@@ -1,0 +1,75 @@
+# Command: Clean Codebase
+# =========================
+# Automated codebase cleanup and compliance checking.
+
+name: clean_codebase
+description: |
+  Removes dead code, checks for duplicate logic across services,
+  validates service boundary compliance, and enforces coding standards.
+
+usage: "/clean_codebase [--fix] [--check-only] [--service <name>]"
+
+parameters:
+  - name: fix
+    type: boolean
+    default: false
+    description: "Auto-fix issues where possible (formatting, unused imports)"
+
+  - name: check_only
+    type: boolean
+    default: false
+    description: "Only report issues without making changes"
+
+  - name: service
+    type: string
+    required: false
+    description: "Target a specific service (e.g., 'risk_engine')"
+
+steps:
+  - name: format_code
+    description: "Run black and isort on all Python files"
+    command: |
+      black --line-length 100 services/
+      isort --profile black services/
+
+  - name: lint
+    description: "Run ruff linter with strict rules"
+    command: "ruff check services/ --fix"
+
+  - name: type_check
+    description: "Run mypy type checking"
+    command: "mypy services/ --strict"
+
+  - name: check_service_boundaries
+    description: "Verify no cross-layer imports exist"
+    script: |
+      Scan all Python files in each service directory.
+      Flag any import that crosses service boundaries
+      (e.g., strategy_engine importing from execution_engine).
+      Only services/shared/ imports are allowed across services.
+
+  - name: find_dead_code
+    description: "Identify unused functions and classes"
+    command: "vulture services/ --min-confidence 80"
+
+  - name: check_duplicate_logic
+    description: "Find similar code blocks across services"
+    script: |
+      Use AST analysis to find functions with >80% structural
+      similarity across different services. Candidates for
+      extraction into services/shared/.
+
+  - name: validate_docstrings
+    description: "Ensure all public functions have docstrings"
+    command: "pydocstyle services/ --convention google"
+
+output:
+  format: report
+  sections:
+    - formatting_fixes
+    - lint_issues
+    - type_errors
+    - boundary_violations
+    - dead_code
+    - duplicate_logic
+    - missing_docstrings

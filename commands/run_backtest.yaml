@@ -1,0 +1,145 @@
+name: run_backtest
+description: >
+  Execute a backtest for a registered trading strategy against historical
+  market data stored in S3. Produces comprehensive performance metrics
+  including risk-adjusted returns, drawdown analysis, and trade statistics.
+
+parameters:
+  - name: strategy_name
+    type: string
+    required: true
+    description: Name of a registered strategy in the strategy engine.
+    validation:
+      must_exist_in: services/strategy_engine/registry.py
+
+  - name: start_date
+    type: date
+    required: true
+    description: Backtest start date in YYYY-MM-DD format.
+    validation:
+      format: "%Y-%m-%d"
+      max_value: today
+
+  - name: end_date
+    type: date
+    required: true
+    description: Backtest end date in YYYY-MM-DD format.
+    validation:
+      format: "%Y-%m-%d"
+      must_be_after: start_date
+      max_value: today
+
+  - name: symbols
+    type: list[string]
+    required: true
+    description: >
+      List of instrument symbols to backtest against (e.g., RELIANCE, AAPL).
+      Use NSE symbols for Indian instruments and ticker symbols for US equities.
+    validation:
+      min_length: 1
+      max_length: 50
+
+  - name: initial_capital
+    type: float
+    required: true
+    description: Starting capital for the backtest in the instrument's base currency.
+    validation:
+      min_value: 10000.0
+      max_value: 100000000.0
+
+  - name: config_override
+    type: filepath
+    required: false
+    description: Optional path to a config file that overrides default strategy parameters.
+    validation:
+      extension: .yaml
+
+  - name: slippage_model
+    type: string
+    required: false
+    default: fixed
+    description: Slippage model to use for realistic execution simulation.
+    validation:
+      allowed_values: [fixed, percentage, volume_based]
+
+  - name: commission_model
+    type: string
+    required: false
+    default: zerodha
+    description: Commission model matching the target broker.
+    validation:
+      allowed_values: [zerodha, alpaca, zero]
+
+steps:
+  - name: validate_historical_data
+    action: check_s3_data
+    description: >
+      Verify historical data exists in S3 for all requested symbols
+      across the full date range. Fail early if data gaps exceed 5%.
+    bucket: "${S3_BUCKET_DATA}"
+    path_pattern: "historical/{symbol}/{date}/"
+
+  - name: load_strategy
+    action: import_strategy
+    description: Load the strategy module and instantiate with configuration.
+    source: "services/strategy_engine/strategies/{strategy_name}.py"
+
+  - name: execute_backtest
+    action: run
+    description: >
+      Run the strategy against historical data with the specified parameters.
+      Simulate order execution with the chosen slippage and commission models.
+      Track all signals, trades, and portfolio state at each timestep.
+    engine: scripts/backtest/run.py
+
+  - name: compute_metrics
+    action: calculate
+    description: Compute comprehensive performance metrics from backtest results.
+    metrics:
+      returns:
+        - total_return_pct
+        - annualized_return_pct
+        - monthly_returns
+      risk_adjusted:
+        - sharpe_ratio
+        - sortino_ratio
+        - calmar_ratio
+        - information_ratio
+      drawdown:
+        - max_drawdown_pct
+        - max_drawdown_duration_days
+        - average_drawdown_pct
+      trade_statistics:
+        - total_trades
+        - win_rate_pct
+        - profit_factor
+        - average_win_loss_ratio
+        - average_holding_period
+        - max_consecutive_losses
+      exposure:
+        - average_exposure_pct
+        - max_exposure_pct
+        - time_in_market_pct
+
+  - name: save_results
+    action: persist
+    description: Save backtest results and artifacts to S3.
+    artifacts:
+      - path: "backtests/{strategy_name}/{timestamp}/results.json"
+        content: full metrics and trade log
+      - path: "backtests/{strategy_name}/{timestamp}/equity_curve.csv"
+        content: daily equity curve
+      - path: "backtests/{strategy_name}/{timestamp}/trades.csv"
+        content: complete trade log with entry/exit details
+
+output:
+  success_message: >
+    Backtest completed for '{strategy_name}' from {start_date} to {end_date}.
+  display_metrics:
+    - "Total Return: {total_return_pct}%"
+    - "Sharpe Ratio: {sharpe_ratio}"
+    - "Max Drawdown: {max_drawdown_pct}%"
+    - "Win Rate: {win_rate_pct}%"
+    - "Total Trades: {total_trades}"
+    - "Profit Factor: {profit_factor}"
+  artifacts_location: "s3://{S3_BUCKET_DATA}/backtests/{strategy_name}/{timestamp}/"

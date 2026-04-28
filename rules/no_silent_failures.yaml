@@ -1,0 +1,63 @@
+# Rule: No Silent Failures
+# ===========================
+# Every error in the trading path must be visible and actionable.
+
+name: no_silent_failures
+severity: critical
+enforcement: code_review_and_ci
+
+description: |
+  In a trading system, a swallowed exception can mean missed trades,
+  duplicate orders, or untracked risk. Every failure must be logged,
+  alerted on, and handled explicitly.
+
+rules:
+  - name: no_bare_except
+    description: |
+      No bare 'except:' or 'except Exception:' clauses that silently
+      pass. Every exception handler must log the error with context
+      and either re-raise, return an error result, or take corrective action.
+    enforcement: ruff_rule  # B001, E722
+    applies_to: all_services
+
+  - name: structured_logging
+    description: |
+      All log messages must use structured logging (structlog) with:
+      - correlation_id: traces a signal from strategy through execution
+      - service_name: which service generated the log
+      - event: machine-readable event name (e.g., 'order_placed')
+      - Relevant context fields (symbol, order_id, signal_id, etc.)
+    applies_to: all_services
+
+  - name: correlation_ids
+    description: |
+      Every signal gets a correlation_id at generation time. This ID
+      flows through risk validation and execution, appearing in every
+      log entry. This enables end-to-end tracing of a trading decision.
+    flow: strategy_engine -> risk_engine -> execution_engine
+
+  - name: circuit_breakers
+    description: |
+      All external API calls (broker APIs, AWS services) must use
+      circuit breaker patterns. After N consecutive failures, stop
+      calling and enter a cooldown period. Alert when a circuit opens.
+    applies_to:
+      - execution_engine (broker APIs)
+      - data_ingestion (WebSocket reconnection)
+    parameters:
+      failure_threshold: 5
+      cooldown_seconds: 60
+      half_open_requests: 1
+
+  - name: alert_on_trading_errors
+    description: |
+      The following events must trigger immediate alerts:
+      - Order rejection by broker
+      - Risk validation failure (pattern of rejections)
+      - Kill switch activation
+      - Broker API circuit breaker opening
+      - Service crash/restart
+      - DynamoDB conditional write conflicts
+    alert_channels:
+      - cloudwatch_alarm
+      - sns_topic (email/SMS)

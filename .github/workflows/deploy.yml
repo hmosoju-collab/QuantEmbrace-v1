@@ -1,0 +1,313 @@
+###############################################################################
+# QuantEmbrace — Deploy: ECS Rolling Update
+#
+# Flow:
+#   1. Auto-deploy to staging on every successful build (main branch).
+#   2. Run smoke tests against staging.
+#   3. Require manual approval before promoting to prod.
+#   4. Deploy to prod with the same immutable SHA tag used in staging.
+#
+# Required secrets:
+#   AWS_DEPLOY_ROLE_ARN        — IAM role for ECS updates (OIDC)
+#   AWS_ECR_REGISTRY           — ECR registry URL
+#   PROD_APPROVERS             — Comma-separated GitHub usernames allowed to approve
+#
+# Required environments (configure in repo Settings → Environments):
+#   staging  — no protection rules (auto-deploy)
+#   prod     — required reviewers + optional deployment branch rule
+###############################################################################
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["Build"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+env:
+  AWS_DEFAULT_REGION: ap-south-1
+  ECS_CLUSTER: quantembrace-prod   # Same cluster; environment distinguished by service names
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Gate: only proceed if the upstream Build workflow succeeded
+  # ─────────────────────────────────────────────────────────────────────────
+  check-build:
+    name: Check upstream build
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      sha: ${{ steps.get-sha.outputs.sha }}
+    steps:
+      - name: Get triggering commit SHA
+        id: get-sha
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          echo "sha=${SHA:0:8}" >> "$GITHUB_OUTPUT"
+          echo "Deploying SHA: ${SHA:0:8}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Deploy to staging (automatic)
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → staging
+    runs-on: ubuntu-latest
+    needs: check-build
+    environment: staging
+
+    strategy:
+      fail-fast: true   # If any service fails, stop staging deploy
+      matrix:
+        service:
+          - data_ingestion
+          - strategy_engine
+          - risk_engine
+          - execution_engine
+          - ai_engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Render new ECS task definition
+        id: render-td
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: infra/ecs-task-defs/staging/${{ matrix.service }}.json
+          container-name: ${{ matrix.service }}
+          image: >-
+            ${{ secrets.AWS_ECR_REGISTRY }}/quantembrace-${{ matrix.service }}:${{ needs.check-build.outputs.sha }}
+
+      - name: Deploy to ECS (staging)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-td.outputs.task-definition }}
+          service: quantembrace-staging-${{ matrix.service }}
+          cluster: quantembrace-staging
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Smoke tests against staging
+  # ─────────────────────────────────────────────────────────────────────────
+  smoke-test-staging:
+    name: Smoke test staging
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Run integration smoke tests
+        run: |
+          pytest tests/integration/ -v \
+            --tb=short \
+            -m smoke \
+            --timeout=120
+        env:
+          ENVIRONMENT: staging
+          AWS_DEFAULT_REGION: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Check ECS service health (all services running)
+        run: |
+          python scripts/deploy/check_ecs_health.py \
+            --cluster quantembrace-staging \
+            --services data_ingestion strategy_engine risk_engine execution_engine ai_engine \
+            --min-running 1
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Manual approval gate for production
+  # ─────────────────────────────────────────────────────────────────────────
+  await-prod-approval:
+    name: Await prod approval
+    runs-on: ubuntu-latest
+    needs: smoke-test-staging
+    environment: prod   # GitHub environment with required reviewers configured
+    steps:
+      - name: Approval received
+        run: echo "Production deployment approved for SHA ${{ needs.check-build.outputs.sha }}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Deploy to prod (after manual approval)
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy → prod
+    runs-on: ubuntu-latest
+    needs: [check-build, await-prod-approval]
+
+    strategy:
+      # Deploy risk_engine first, then execution_engine, then the rest in parallel.
+      # This preserves the architectural invariant: risk must be up before execution.
+      max-parallel: 1
+      matrix:
+        include:
+          - service: risk_engine
+            order: 1
+          - service: execution_engine
+            order: 2
+          - service: data_ingestion
+            order: 3
+          - service: strategy_engine
+            order: 3
+          - service: ai_engine
+            order: 3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Render new ECS task definition
+        id: render-td
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: infra/ecs-task-defs/prod/${{ matrix.service }}.json
+          container-name: ${{ matrix.service }}
+          image: >-
+            ${{ secrets.AWS_ECR_REGISTRY }}/quantembrace-${{ matrix.service }}:${{ needs.check-build.outputs.sha }}
+
+      - name: Deploy to ECS (prod) — rolling update
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-td.outputs.task-definition }}
+          service: quantembrace-prod-${{ matrix.service }}
+          cluster: quantembrace-prod
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+          # ECS rolling update: new task must be healthy before old is drained
+          # Configured in service definition: minimumHealthyPercent=100, maximumPercent=200
+
+      - name: Tag image as latest-prod
+        run: |
+          REGISTRY="${{ secrets.AWS_ECR_REGISTRY }}"
+          SERVICE="${{ matrix.service }}"
+          SHA="${{ needs.check-build.outputs.sha }}"
+          MANIFEST=$(aws ecr batch-get-image \
+            --repository-name "quantembrace-${SERVICE}" \
+            --image-ids imageTag="${SHA}" \
+            --query 'images[0].imageManifest' \
+            --output text)
+          aws ecr put-image \
+            --repository-name "quantembrace-${SERVICE}" \
+            --image-tag "latest-prod" \
+            --image-manifest "$MANIFEST"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Post-deploy: verify prod health and emit deployment summary
+  # ─────────────────────────────────────────────────────────────────────────
+  verify-prod:
+    name: Verify prod health
+    runs-on: ubuntu-latest
+    needs: [check-build, deploy-prod]
+    if: always() && needs.deploy-prod.result == 'success'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Check all prod services running
+        run: |
+          python scripts/deploy/check_ecs_health.py \
+            --cluster quantembrace-prod \
+            --services data_ingestion strategy_engine risk_engine execution_engine ai_engine \
+            --min-running 1
+
+      - name: Deployment summary
+        run: |
+          echo "## Production Deployment Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SHA | \`${{ needs.check-build.outputs.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | prod |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Region | ${{ env.AWS_DEFAULT_REGION }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Services | data_ingestion, strategy_engine, risk_engine, execution_engine, ai_engine |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Deployed at | $(date -u) |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Rollback on prod deployment failure (automatic)
+  # ─────────────────────────────────────────────────────────────────────────
+  rollback-on-failure:
+    name: Auto-rollback prod
+    runs-on: ubuntu-latest
+    needs: deploy-prod
+    if: failure() && needs.deploy-prod.result == 'failure'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Rollback all prod services to previous task definition
+        run: |
+          for SERVICE in data_ingestion strategy_engine risk_engine execution_engine ai_engine; do
+            echo "Rolling back quantembrace-prod-${SERVICE}..."
+            # ECS keeps the previous task definition revision — force a new deployment
+            # of the current running revision (which was the last stable one).
+            PREV_TD=$(aws ecs describe-services \
+              --cluster quantembrace-prod \
+              --services "quantembrace-prod-${SERVICE}" \
+              --query 'services[0].taskDefinition' \
+              --output text)
+            aws ecs update-service \
+              --cluster quantembrace-prod \
+              --service "quantembrace-prod-${SERVICE}" \
+              --task-definition "$PREV_TD" \
+              --force-new-deployment > /dev/null
+            echo "  Rollback initiated for ${SERVICE} (td=${PREV_TD})"
+          done
+
+      - name: Notify rollback
+        run: |
+          echo "## ⚠️ Production Rollback Initiated" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployment of SHA \`${{ needs.check-build.outputs.sha }}\` failed." >> "$GITHUB_STEP_SUMMARY"
+          echo "All services have been rolled back to their previous task definition." >> "$GITHUB_STEP_SUMMARY"

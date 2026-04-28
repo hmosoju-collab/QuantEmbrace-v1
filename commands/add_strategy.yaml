@@ -1,0 +1,107 @@
+name: add_strategy
+description: >
+  Register a new trading strategy in the strategy engine. Creates the strategy
+  module from a template, validates it extends BaseStrategy, and registers it
+  in the strategy engine's module registry. A backtest must be run and pass
+  minimum performance thresholds before the strategy can be activated.
+
+parameters:
+  - name: strategy_name
+    type: string
+    required: true
+    description: >
+      Unique identifier for the strategy. Must be snake_case, alphanumeric
+      with underscores only (e.g., momentum_breakout, mean_reversion_pairs).
+    validation:
+      pattern: "^[a-z][a-z0-9_]{2,48}$"
+      unique: true  # must not conflict with existing strategy names
+
+  - name: strategy_type
+    type: string
+    required: true
+    description: The category of trading strategy being implemented.
+    validation:
+      allowed_values:
+        - momentum
+        - mean_reversion
+        - stat_arb
+        - trend_following
+        - market_making
+        - volatility
+        - custom
+
+  - name: config_file
+    type: filepath
+    required: true
+    description: >
+      Path to the strategy configuration YAML file containing parameters
+      such as lookback windows, thresholds, target symbols, and timeframes.
+    validation:
+      must_exist: true
+      extension: .yaml
+
+steps:
+  - name: validate_strategy_name
+    action: check_unique
+    description: Verify strategy name does not conflict with existing registered strategies.
+    target: services/strategy_engine/strategies/
+
+  - name: create_strategy_module
+    action: generate_from_template
+    template: services/strategy_engine/templates/strategy_template.py
+    output: "services/strategy_engine/strategies/{strategy_name}.py"
+    description: >
+      Generate the strategy module file from the BaseStrategy template.
+      The generated file will contain the class skeleton with required
+      method signatures (generate_signals, on_market_data, get_parameters).
+
+  - name: validate_base_class
+    action: static_analysis
+    description: >
+      Verify the strategy class extends BaseStrategy and implements all
+      required abstract methods. Fail if any required method is missing.
+    checks:
+      - extends: BaseStrategy
+      - implements: [generate_signals, on_market_data, get_parameters]
+      - has_type_hints: true
+      - has_docstrings: true
+
+  - name: validate_config
+    action: schema_validation
+    description: Validate the strategy config file against the expected schema.
+    schema: configs/schemas/strategy_config_schema.yaml
+
+  - name: register_strategy
+    action: update_registry
+    target: services/strategy_engine/registry.py
+    description: >
+      Add the strategy to the strategy engine's module registry so it can
+      be loaded and executed during live trading and backtesting.
+
+  - name: run_initial_backtest
+    action: execute_backtest
+    description: >
+      Run a mandatory initial backtest to validate the strategy produces
+      valid signals and meets minimum performance thresholds.
+    requirements:
+      min_sharpe_ratio: 0.5
+      max_drawdown_pct: 30.0
+      min_trade_count: 10
+      backtest_period_days: 180
+
+  - name: create_tests
+    action: generate_from_template
+    template: tests/unit/templates/strategy_test_template.py
+    output: "tests/unit/strategy_engine/test_{strategy_name}.py"
+    description: Generate unit test skeleton for the new strategy.
+
+output:
+  success_message: >
+    Strategy '{strategy_name}' created and registered successfully.
+    Module: services/strategy_engine/strategies/{strategy_name}.py
+    Tests: tests/unit/strategy_engine/test_{strategy_name}.py
+    Status: registered (inactive until backtest approval)
+  artifacts:
+    - "services/strategy_engine/strategies/{strategy_name}.py"
+    - "tests/unit/strategy_engine/test_{strategy_name}.py"
+    - "configs/strategies/{strategy_name}.yaml"

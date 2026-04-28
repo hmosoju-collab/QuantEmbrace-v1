@@ -1,0 +1,47 @@
+# Hook: Prefer Refactor Over Rewrite
+# ======================================
+# Flags large file changes for review to encourage incremental improvement.
+
+name: prefer_refactor_over_rewrite
+type: pre_merge
+priority: 4
+
+description: |
+  When more than 50% of a file is modified in a single PR, this hook
+  flags it for additional review. Large rewrites carry higher risk of
+  introducing bugs, especially in trading-critical code. Prefer
+  incremental refactoring unless a full rewrite is justified.
+
+trigger:
+  event: pull_request
+  condition: "file_change_percentage > 50"
+  exclude_paths:
+    - "*.md"
+    - "*.yaml"
+    - "*.tfvars"
+    - tests/**
+
+thresholds:
+  warning: 50   # Flag for review at 50% change
+  critical: 80  # Require explicit justification at 80% change
+
+on_warning:
+  - request_review: true
+  - comment: |
+      This file has >50% of its lines changed. Consider whether
+      this could be done as a series of smaller, incremental refactors
+      instead. Large changes are harder to review and more likely to
+      introduce regressions in trading logic.
+
+on_critical:
+  - block_merge: true
+  - require_justification: true
+  - comment: |
+      This file has >80% of its lines rewritten. A justification is
+      required before this can be merged. Please explain why an
+      incremental refactor was not feasible.
+
+exceptions:
+  - "Initial service creation (new files)"
+  - "Generated code (Terraform plans, protobuf)"
+  - "Dependency version bumps"

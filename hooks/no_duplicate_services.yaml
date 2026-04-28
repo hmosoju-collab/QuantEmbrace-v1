@@ -1,0 +1,53 @@
+# Hook: No Duplicate Services
+# ==============================
+# Prevents creation of services that overlap in responsibility.
+
+name: no_duplicate_services
+type: pre_commit
+priority: 2
+
+description: |
+  Enforces strict service boundaries. Each domain concern is owned
+  by exactly one service. No two services may implement the same
+  capability.
+
+trigger:
+  event: service_creation_or_modification
+  paths:
+    - services/*/
+
+checks:
+  - name: no_cross_layer_imports
+    description: "Strategy must not import from execution or risk internals"
+    rules:
+      - source: services/strategy_engine/
+        forbidden_imports:
+          - services.execution_engine
+          - services.risk_engine.validators
+          - services.risk_engine.killswitch
+
+      - source: services/risk_engine/
+        forbidden_imports:
+          - services.execution_engine.brokers
+          - services.strategy_engine.strategies
+
+      - source: services/execution_engine/
+        forbidden_imports:
+          - services.strategy_engine.strategies
+          - services.strategy_engine.signals
+
+  - name: no_duplicate_capabilities
+    description: "Each capability belongs to exactly one service"
+    capability_map:
+      signal_generation: strategy_engine
+      risk_validation: risk_engine
+      order_placement: execution_engine
+      market_data_ingestion: data_ingestion
+      model_inference: ai_engine
+
+on_violation:
+  - block_merge: true
+  - message: |
+      Service boundary violation detected. Each service owns a single
+      domain. If you need cross-service data, use the defined interfaces
+      (SQS queues, shared DynamoDB tables, HTTP APIs).

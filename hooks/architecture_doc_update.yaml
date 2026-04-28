@@ -1,0 +1,47 @@
+# Hook: Architecture Documentation Update
+# ==========================================
+# Requires architecture docs to be updated when system design changes.
+
+name: architecture_doc_update
+type: pre_merge
+priority: 3
+
+description: |
+  Any change to system architecture (new service, new data flow,
+  new API contract, infrastructure change) must be reflected in
+  the corresponding architecture document BEFORE the code change
+  can be merged.
+
+trigger:
+  event: pull_request
+  paths:
+    - services/*/service.py
+    - services/*/connectors/*
+    - services/*/brokers/*
+    - infra/terraform/**
+    - services/shared/messaging/*
+
+required_doc_updates:
+  - trigger_path: "services/*/service.py"
+    required_docs:
+      - architecture/system_design.md
+      - architecture/trading_flow.md
+
+  - trigger_path: "services/*/connectors/*"
+    required_docs:
+      - architecture/data_flow.md
+
+  - trigger_path: "services/*/brokers/*"
+    required_docs:
+      - architecture/api_contracts.md
+
+  - trigger_path: "infra/terraform/**"
+    required_docs:
+      - architecture/infra_diagram.md
+
+on_missing_update:
+  - block_merge: true
+  - message: |
+      Architecture change detected but docs not updated.
+      Please update the relevant files in architecture/ before merging.
+      This ensures documentation stays in sync with the actual system.

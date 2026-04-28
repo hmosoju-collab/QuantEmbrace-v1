@@ -1,0 +1,70 @@
+# Hook: Pre-Trade Risk Validation
+# ==================================
+# NON-NEGOTIABLE: Every trade signal MUST pass through risk validation
+# before reaching the execution engine. There is no bypass path.
+
+name: pre_trade_risk_validation
+type: pre_execution
+priority: 1  # Highest priority — runs before all other hooks
+mandatory: true  # Cannot be disabled or skipped
+bypass_allowed: false
+
+description: |
+  Validates every trading signal through the risk engine before
+  order execution. This is the critical safety boundary between
+  strategy signals and live order placement.
+
+trigger:
+  event: signal_ready_for_execution
+  source: strategy_engine
+  destination: execution_engine
+
+validation_sequence:
+  - name: kill_switch_check
+    description: "Check if global kill switch is active"
+    on_active: reject_all
+    priority: 1
+
+  - name: position_limit_check
+    description: "Verify signal doesn't exceed max position size for the instrument"
+    validator: risk_engine.validators.position_validator.PositionValidator
+    params:
+      max_single_position_pct: 10  # Max 10% of portfolio in one instrument
+    on_failure: reject
+
+  - name: exposure_check
+    description: "Verify total portfolio exposure stays within limits"
+    validator: risk_engine.validators.exposure_validator.ExposureValidator
+    params:
+      max_total_exposure_pct: 80  # Max 80% total exposure
+    on_failure: reject
+
+  - name: daily_loss_check
+    description: "Verify daily loss limit hasn't been breached"
+    validator: risk_engine.validators.loss_validator.DailyLossValidator
+    params:
+      max_daily_loss_pct: 2  # Max 2% daily loss
+      kill_switch_threshold_pct: 3  # Auto-activate kill switch at 3%
+    on_failure: reject_and_alert
+
+on_approval:
+  - forward_to: execution_engine
+  - log_decision:
+      destination: s3
+      bucket: quantembrace-{env}-trading-logs
+      include: [signal_id, risk_decision_id, all_check_results, timestamp]
+
+on_rejection:
+  - block_execution: true
+  - log_decision:
+      destination: s3
+      bucket: quantembrace-{env}-trading-logs
+      include: [signal_id, rejection_reason, failed_check, timestamp]
+  - alert:
+      channel: risk_alerts
+      severity: warning
+
+failure_mode: |
+  If the risk engine is unreachable or returns an error,
+  ALL signals are REJECTED. This is by design — we fail closed,
+  never open. Trading halts until risk engine recovers.

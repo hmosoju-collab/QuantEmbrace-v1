@@ -1,0 +1,312 @@
+{
+  "project": {
+    "name": "QuantEmbrace",
+    "description": "Hedge-level algorithmic trading system for multi-market execution",
+    "version": "0.1.0",
+    "python_version": "3.11+"
+  },
+  "environments": {
+    "dev": {
+      "aws_account_id": "",
+      "deploy_enabled": false,
+      "paper_trading": true,
+      "log_level": "DEBUG",
+      "dynamodb_capacity_mode": "ON_DEMAND",
+      "fargate_spot_enabled": true
+    },
+    "staging": {
+      "aws_account_id": "",
+      "deploy_enabled": true,
+      "paper_trading": true,
+      "log_level": "INFO",
+      "dynamodb_capacity_mode": "ON_DEMAND",
+      "fargate_spot_enabled": true
+    },
+    "prod": {
+      "aws_account_id": "",
+      "deploy_enabled": true,
+      "paper_trading": false,
+      "log_level": "WARNING",
+      "dynamodb_capacity_mode": "PROVISIONED",
+      "fargate_spot_enabled": false
+    }
+  },
+  "services": {
+    "data_ingestion": {
+      "name": "data-ingestion",
+      "port": 8001,
+      "cpu": 512,
+      "memory": 1024,
+      "desired_count": 1,
+      "health_check_path": "/health",
+      "environment_variables": {
+        "TICK_BUFFER_SIZE": "10000",
+        "FLUSH_INTERVAL_SECONDS": "60",
+        "S3_PARTITION_FORMAT": "year=%Y/month=%m/day=%d"
+      }
+    },
+    "strategy_engine": {
+      "name": "strategy-engine",
+      "port": 8002,
+      "cpu": 1024,
+      "memory": 2048,
+      "desired_count": 1,
+      "health_check_path": "/health",
+      "environment_variables": {
+        "STRATEGY_POLL_INTERVAL_MS": "100",
+        "MAX_CONCURRENT_STRATEGIES": "20",
+        "SIGNAL_QUEUE": "quantembrace-signals"
+      }
+    },
+    "execution_engine": {
+      "name": "execution-engine",
+      "port": 8003,
+      "cpu": 512,
+      "memory": 1024,
+      "desired_count": 1,
+      "health_check_path": "/health",
+      "environment_variables": {
+        "ORDER_RETRY_MAX_ATTEMPTS": "3",
+        "ORDER_RETRY_BACKOFF_MS": "500",
+        "CIRCUIT_BREAKER_THRESHOLD": "5",
+        "CIRCUIT_BREAKER_RESET_SECONDS": "60"
+      }
+    },
+    "risk_engine": {
+      "name": "risk-engine",
+      "port": 8004,
+      "cpu": 512,
+      "memory": 1024,
+      "desired_count": 1,
+      "health_check_path": "/health",
+      "environment_variables": {
+        "RISK_EVAL_TIMEOUT_MS": "200",
+        "KILL_SWITCH_TABLE": "quantembrace-kill-switch",
+        "AUDIT_LOG_BUCKET": "quantembrace-risk-audit"
+      }
+    },
+    "ai_engine": {
+      "name": "ai-engine",
+      "port": 8005,
+      "cpu": 2048,
+      "memory": 4096,
+      "desired_count": 1,
+      "health_check_path": "/health",
+      "environment_variables": {
+        "MODEL_ARTIFACTS_BUCKET": "quantembrace-ml-models",
+        "INFERENCE_TIMEOUT_MS": "500",
+        "FEATURE_STORE_TABLE": "quantembrace-feature-store"
+      }
+    }
+  },
+  "brokers": {
+    "zerodha": {
+      "enabled": true,
+      "name": "Zerodha Kite Connect",
+      "markets": ["NSE", "BSE"],
+      "base_url": "https://api.kite.trade",
+      "websocket_url": "wss://ws.kite.trade",
+      "login_url": "https://kite.zerodha.com/connect/login",
+      "credentials": {
+        "api_key": "${KITE_API_KEY}",
+        "api_secret": "${KITE_API_SECRET}",
+        "access_token": "${KITE_ACCESS_TOKEN}"
+      },
+      "rate_limits": {
+        "orders_per_second": 10,
+        "historical_data_per_second": 3
+      },
+      "session": {
+        "token_expiry_time_ist": "07:30",
+        "auto_reauth_enabled": true
+      },
+      "order_products": {
+        "intraday": "MIS",
+        "delivery": "CNC",
+        "futures_options": "NRML"
+      },
+      "auto_square_off_time_ist": "15:15"
+    },
+    "alpaca": {
+      "enabled": true,
+      "name": "Alpaca",
+      "markets": ["NYSE", "NASDAQ"],
+      "base_url": {
+        "live": "https://api.alpaca.markets",
+        "paper": "https://paper-api.alpaca.markets"
+      },
+      "data_url": "https://data.alpaca.markets",
+      "websocket_url": "wss://stream.data.alpaca.markets",
+      "credentials": {
+        "api_key": "${ALPACA_API_KEY}",
+        "api_secret": "${ALPACA_API_SECRET}"
+      },
+      "rate_limits": {
+        "requests_per_minute": 200
+      },
+      "features": {
+        "fractional_shares": true,
+        "extended_hours": false,
+        "paper_trading_for_staging": true
+      }
+    }
+  },
+  "aws": {
+    "primary_region": "ap-south-1",
+    "secondary_region": "us-east-1",
+    "regions_by_market": {
+      "india": "ap-south-1",
+      "us": "us-east-1"
+    },
+    "ecs": {
+      "cluster_name": "quantembrace-cluster",
+      "platform_version": "1.4.0",
+      "namespace": "quantembrace.local"
+    },
+    "s3": {
+      "buckets": {
+        "market_data": "quantembrace-market-data",
+        "execution_logs": "quantembrace-execution-logs",
+        "risk_audit": "quantembrace-risk-audit",
+        "backtest_artifacts": "quantembrace-backtest-artifacts",
+        "ml_models": "quantembrace-ml-models"
+      },
+      "lifecycle_policies": {
+        "move_to_ia_after_days": 90,
+        "move_to_glacier_after_days": 365,
+        "delete_after_days": 2555
+      }
+    },
+    "dynamodb": {
+      "tables": {
+        "order_state": {
+          "name": "quantembrace-order-state",
+          "partition_key": "order_id",
+          "sort_key": "timestamp",
+          "ttl_field": null
+        },
+        "positions": {
+          "name": "quantembrace-positions",
+          "partition_key": "account_id",
+          "sort_key": "symbol",
+          "ttl_field": null
+        },
+        "risk_state": {
+          "name": "quantembrace-risk-state",
+          "partition_key": "account_id",
+          "sort_key": "date",
+          "ttl_field": null
+        },
+        "session_tokens": {
+          "name": "quantembrace-session-tokens",
+          "partition_key": "broker",
+          "sort_key": "account_id",
+          "ttl_field": "expires_at"
+        },
+        "kill_switch": {
+          "name": "quantembrace-kill-switch",
+          "partition_key": "scope",
+          "sort_key": null,
+          "ttl_field": null
+        }
+      }
+    },
+    "sqs": {
+      "queues": {
+        "normalized_ticks": "quantembrace-normalized-ticks",
+        "signals": "quantembrace-signals",
+        "approved_signals": "quantembrace-approved-signals",
+        "dead_letter": "quantembrace-dlq"
+      },
+      "visibility_timeout_seconds": 30,
+      "message_retention_days": 4
+    },
+    "vpc": {
+      "cidr": "10.0.0.0/16",
+      "use_vpc_endpoints": true,
+      "vpc_endpoints": ["s3", "dynamodb", "sqs", "ecr.api", "ecr.dkr", "logs"]
+    }
+  },
+  "cost_optimization": {
+    "use_fargate_spot_for_non_critical": true,
+    "lambda_prohibited_for_streaming": true,
+    "cloudwatch_log_retention_days": 30,
+    "archive_logs_to_s3": true,
+    "use_vpc_endpoints_to_avoid_nat_charges": true,
+    "dynamodb_ttl_on_ephemeral_records": true,
+    "s3_intelligent_tiering_for_backtest_data": true,
+    "reserved_capacity_for_prod": false,
+    "monthly_budget_alert_thresholds_usd": [100, 250, 500, 1000]
+  },
+  "risk_limits": {
+    "global": {
+      "max_total_exposure_pct": 80.0,
+      "max_single_position_pct": 10.0,
+      "max_daily_loss_pct": 2.0,
+      "max_weekly_loss_pct": 5.0,
+      "max_drawdown_pct": 10.0,
+      "max_open_orders": 50,
+      "max_orders_per_minute": 30,
+      "kill_switch_loss_threshold_pct": 3.0
+    },
+    "per_market": {
+      "NSE": {
+        "max_position_size_inr": 5000000,
+        "max_daily_loss_inr": 200000,
+        "max_exposure_inr": 20000000,
+        "trading_hours_ist": {
+          "start": "09:15",
+          "end": "15:30"
+        },
+        "pre_market_ist": {
+          "start": "09:00",
+          "end": "09:08"
+        }
+      },
+      "US": {
+        "max_position_size_usd": 50000,
+        "max_daily_loss_usd": 5000,
+        "max_exposure_usd": 200000,
+        "trading_hours_et": {
+          "start": "09:30",
+          "end": "16:00"
+        },
+        "extended_hours_et": {
+          "pre_market_start": "04:00",
+          "after_hours_end": "20:00"
+        },
+        "pdt_protection_enabled": true
+      }
+    }
+  },
+  "logging": {
+    "format": "json",
+    "level_default": "INFO",
+    "level_overrides": {
+      "services.execution_engine": "DEBUG",
+      "services.risk_engine": "DEBUG",
+      "common.broker": "DEBUG"
+    },
+    "correlation_id_header": "X-Correlation-ID",
+    "include_fields": [
+      "timestamp",
+      "level",
+      "service",
+      "correlation_id",
+      "message",
+      "extra"
+    ],
+    "output": {
+      "console": true,
+      "file": false,
+      "cloudwatch": true
+    },
+    "sensitive_fields_to_mask": [
+      "api_key",
+      "api_secret",
+      "access_token",
+      "password",
+      "secret"
+    ]
+  }
+}

@@ -1,0 +1,134 @@
+name: optimize_costs
+description: >
+  Run a comprehensive cost optimization analysis across all AWS resources
+  used by QuantEmbrace. Identifies unused resources, oversized compute tasks,
+  suboptimal storage tiers, and networking inefficiencies. Generates an
+  actionable report with estimated savings.
+
+parameters:
+  - name: environment
+    type: string
+    required: false
+    default: prod
+    description: Target environment to analyze.
+    validation:
+      allowed_values: [dev, staging, prod, all]
+
+  - name: lookback_days
+    type: integer
+    required: false
+    default: 30
+    description: Number of days of usage data to analyze.
+    validation:
+      min_value: 7
+      max_value: 90
+
+  - name: report_format
+    type: string
+    required: false
+    default: json
+    description: Output format for the cost report.
+    validation:
+      allowed_values: [json, csv, markdown]
+
+steps:
+  - name: collect_usage_metrics
+    action: aws_query
+    description: >
+      Gather resource usage metrics from CloudWatch and AWS Cost Explorer
+      for the analysis period.
+    data_sources:
+      - cloudwatch_metrics: [CPUUtilization, MemoryUtilization, NetworkIn, NetworkOut]
+      - cost_explorer: [service_costs, resource_costs, daily_breakdown]
+      - ecs_task_metrics: [task_count, cpu_reserved, memory_reserved, cpu_used, memory_used]
+      - dynamodb_metrics: [ReadCapacityUnits, WriteCapacityUnits, ConsumedRCU, ConsumedWCU]
+      - s3_metrics: [BucketSizeBytes, NumberOfObjects, StorageClass]
+
+  - name: analyze_compute
+    action: analyze
+    description: Identify compute optimization opportunities.
+    checks:
+      ecs_right_sizing:
+        description: Compare reserved vs actual CPU/memory usage across all ECS tasks.
+        threshold: "Flag tasks where average utilization is below 40%."
+        recommendation: Reduce task definition CPU/memory to match actual usage.
+      fargate_spot_candidates:
+        description: Identify non-critical workloads that could run on Fargate Spot.
+        eligible: [backtesting, batch_analytics, data_download]
+        savings_estimate: "Up to 70% for eligible workloads."
+      lambda_misuse:
+        description: Flag any Lambda functions being used for streaming or long-running workloads.
+        action: Recommend migration to ECS Fargate.
+
+  - name: analyze_storage
+    action: analyze
+    description: Identify storage optimization opportunities.
+    checks:
+      s3_lifecycle_compliance:
+        description: Verify lifecycle policies are set on all buckets.
+        rule: "Data older than 90 days should be in Glacier."
+      s3_intelligent_tiering:
+        description: Identify buckets with unpredictable access patterns.
+        recommendation: Enable S3 Intelligent-Tiering for backtest data.
+      dynamodb_ttl:
+        description: Check for tables without TTL enabled on ephemeral records.
+        tables: [session_tokens, temporary_locks, rate_limit_counters]
+      dynamodb_in_s3:
+        description: Flag any time-series or historical data stored in DynamoDB.
+        action: Recommend migration to S3 with Athena queries.
+      s3_storage_class:
+        description: Identify objects in Standard tier that are rarely accessed.
+        threshold: "Objects not accessed in 30+ days."
+
+  - name: analyze_networking
+    action: analyze
+    description: Identify networking cost optimization opportunities.
+    checks:
+      vpc_endpoints:
+        description: Verify VPC endpoints exist for S3 and DynamoDB.
+        action: "Create VPC endpoints to avoid NAT Gateway data transfer charges."
+      nat_gateway_usage:
+        description: Analyze NAT Gateway data transfer costs.
+        threshold: "Flag if monthly NAT costs exceed $50."
+      cross_az_traffic:
+        description: Identify unnecessary cross-AZ data transfer.
+        recommendation: Co-locate communicating services in the same AZ where possible.
+
+  - name: analyze_monitoring
+    action: analyze
+    description: Identify monitoring cost optimization opportunities.
+    checks:
+      cloudwatch_log_retention:
+        description: Check log group retention policies.
+        rule: "Hot retention max 30 days, archive to S3 after."
+      custom_metrics:
+        description: Flag high-cardinality CloudWatch custom metrics.
+        recommendation: Use Prometheus sidecar for detailed metrics instead.
+      unused_alarms:
+        description: Identify CloudWatch alarms that have not triggered in 90 days.
+
+  - name: generate_report
+    action: compile_report
+    description: Compile all findings into an actionable cost optimization report.
+    sections:
+      - executive_summary: total current spend, total potential savings, top 5 recommendations
+      - compute_findings: ECS right-sizing, Fargate Spot opportunities
+      - storage_findings: S3 lifecycle, DynamoDB optimization
+      - networking_findings: VPC endpoints, NAT Gateway
+      - monitoring_findings: CloudWatch optimization
+      - action_items: prioritized list with estimated savings and effort level
+
+  - name: save_report
+    action: persist
+    destination: "s3://{S3_BUCKET_LOGS}/cost_reports/{environment}/{timestamp}.{report_format}"
+
+output:
+  success_message: >
+    Cost optimization analysis complete for {environment}.
+  display:
+    - "Current monthly spend: ${current_monthly_spend}"
+    - "Potential monthly savings: ${potential_savings}"
+    - "Savings percentage: {savings_pct}%"
+    - "Critical findings: {critical_count}"
+    - "Recommendations: {recommendation_count}"
+    - "Report saved to: s3://{S3_BUCKET_LOGS}/cost_reports/{environment}/{timestamp}.{report_format}"

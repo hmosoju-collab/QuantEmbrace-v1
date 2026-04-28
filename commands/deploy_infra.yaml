@@ -1,0 +1,137 @@
+name: deploy_infra
+description: >
+  Deploy infrastructure changes via Terraform. Supports targeted module
+  deployment and environment-specific workflows. Production deployments
+  require explicit approval and cost impact validation.
+
+parameters:
+  - name: environment
+    type: string
+    required: true
+    description: Target deployment environment.
+    validation:
+      allowed_values: [dev, staging, prod]
+
+  - name: module
+    type: string
+    required: false
+    description: >
+      Specific Terraform module to deploy. If omitted, deploys all modules.
+      Useful for targeted changes to reduce blast radius.
+    validation:
+      allowed_values:
+        - ecs
+        - vpc
+        - dynamodb
+        - s3
+        - sqs
+        - iam
+        - monitoring
+        - cloudmap
+
+  - name: auto_approve
+    type: boolean
+    required: false
+    default: false
+    description: >
+      Auto-approve the terraform apply step. Only allowed for dev environment.
+      Staging and prod always require explicit approval regardless of this flag.
+
+  - name: dry_run
+    type: boolean
+    required: false
+    default: false
+    description: Run terraform plan only without applying changes.
+
+steps:
+  - name: validate_environment
+    action: check_prerequisites
+    description: >
+      Verify AWS credentials, Terraform version, and state file access
+      for the target environment.
+    checks:
+      - aws_credentials_valid: true
+      - terraform_version: ">=1.5.0"
+      - state_backend_accessible: true
+      - workspace_exists: "{environment}"
+
+  - name: select_workspace
+    action: terraform_workspace
+    command: "terraform workspace select {environment}"
+    working_dir: "infra/terraform/environments/{environment}"
+
+  - name: terraform_init
+    action: terraform_init
+    command: "terraform init -reconfigure"
+    description: Initialize Terraform with the environment-specific backend.
+
+  - name: terraform_plan
+    action: terraform_plan
+    command: >
+      terraform plan
+      -var-file=environments/{environment}/terraform.tfvars
+      {'-target=module.' + module if module else ''}
+      -out=plan.tfplan
+    description: Generate and display the execution plan.
+
+  - name: cost_impact_analysis
+    action: estimate_costs
+    description: >
+      Analyze the terraform plan for cost implications. Flag any changes
+      that would increase monthly costs by more than 10% or $100.
+    thresholds:
+      max_monthly_increase_pct: 10
+      max_monthly_increase_usd: 100
+      flag_new_resources: true
+
+  - name: approval_gate
+    action: require_approval
+    description: >
+      Require explicit human approval before applying changes.
+      Dev can be auto-approved. Staging requires one approval.
+      Prod requires two approvals.
+    rules:
+      dev:
+        auto_approve_allowed: true
+        required_approvals: 0
+      staging:
+        auto_approve_allowed: false
+        required_approvals: 1
+        approvers: [infra_engineer, chief_architect]
+      prod:
+        auto_approve_allowed: false
+        required_approvals: 2
+        approvers: [infra_engineer, chief_architect, risk_manager]
+
+  - name: terraform_apply
+    action: terraform_apply
+    command: "terraform apply plan.tfplan"
+    description: Apply the approved plan.
+    skip_if: dry_run
+
+  - name: verify_deployment
+    action: health_check
+    description: >
+      Run health checks against deployed resources to verify the
+      infrastructure is functioning correctly after apply.
+    checks:
+      - ecs_services_stable: true
+      - dynamodb_tables_accessible: true
+      - s3_buckets_accessible: true
+      - vpc_endpoints_functional: true
+
+  - name: update_deployment_log
+    action: log
+    description: Record the deployment in the deployment audit log on S3.
+    destination: "s3://{S3_BUCKET_LOGS}/deployments/{environment}/{timestamp}.json"
+
+output:
+  success_message: >
+    Infrastructure deployment to {environment} completed successfully.
+  display:
+    - "Environment: {environment}"
+    - "Module: {module or 'all'}"
+    - "Resources created: {resources_created}"
+    - "Resources modified: {resources_modified}"
+    - "Resources destroyed: {resources_destroyed}"
+    - "Estimated monthly cost change: ${cost_change}/month"

@@ -1,0 +1,85 @@
+# Rule: AWS Cost Optimization
+# ==============================
+# Mandatory cost controls for all infrastructure decisions.
+
+name: cost_optimization
+severity: high
+enforcement: architecture_review
+
+description: |
+  QuantEmbrace must be cost-efficient on AWS. These rules prevent
+  common cost traps in trading system infrastructure.
+
+rules:
+  - name: no_lambda_for_streaming
+    severity: critical
+    description: |
+      NEVER use AWS Lambda for continuous polling, streaming data,
+      or WebSocket connections. Lambda's cold start latency and
+      15-minute timeout make it unsuitable. Use ECS Fargate instead.
+    applies_to: infra/terraform/**
+    check: "No aws_lambda_function resources for data ingestion or trading"
+
+  - name: s3_for_historical_data
+    severity: high
+    description: |
+      All historical market data, logs, and backtest artifacts must
+      be stored in S3, never in DynamoDB. DynamoDB is only for
+      low-latency key-value access (positions, orders, latest prices).
+    check: "DynamoDB tables should not have time-series scan patterns"
+
+  - name: dynamodb_scoped_usage
+    severity: high
+    description: |
+      DynamoDB is ONLY for: order state, current positions, latest
+      prices (with TTL), risk counters, session tokens.
+      For everything else, use S3.
+    allowed_tables:
+      - orders
+      - positions
+      - latest_prices
+      - risk_state
+      - strategy_state
+
+  - name: fargate_spot_for_non_critical
+    severity: medium
+    description: |
+      Use Fargate Spot for non-critical workloads: backtesting,
+      batch analytics, AI training. Never use Spot for execution
+      engine or risk engine.
+    spot_eligible:
+      - ai_engine
+      - backtesting_tasks
+    spot_ineligible:
+      - execution_engine
+      - risk_engine
+      - data_ingestion  # In production
+
+  - name: vpc_endpoints
+    severity: medium
+    description: |
+      Use VPC endpoints for S3 and DynamoDB to avoid NAT Gateway
+      data transfer charges. Internal service communication stays
+      within the VPC via Cloud Map service discovery.
+
+  - name: s3_lifecycle_policies
+    severity: medium
+    description: |
+      All S3 buckets must have lifecycle policies:
+      - Market data: 90 days Standard -> Intelligent-Tiering -> Glacier
+      - Logs: 30 days Standard -> Glacier
+      - Model artifacts: Versioned, oldest versions to Glacier after 90 days
+
+  - name: log_retention
+    severity: low
+    description: |
+      CloudWatch Logs retention: 14 days (dev), 30 days (prod).
+      Older logs archived to S3 for long-term retention.
+      Avoid high-cardinality custom metrics in CloudWatch.
+
+cost_review_checklist:
+  - "Is this resource needed 24/7 or can it be scheduled?"
+  - "Can this workload run on Fargate Spot?"
+  - "Is data in the cheapest appropriate storage tier?"
+  - "Are VPC endpoints configured to avoid NAT charges?"
+  - "Are there unused or oversized resources to clean up?"

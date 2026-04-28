@@ -1,0 +1,370 @@
+# QuantEmbrace — Instrument Universe Configuration
+#
+# This file defines WHICH stocks the system watches and is allowed to trade.
+# The algorithm auto-decides WHEN to trade based on momentum signals.
+#
+# HOW IT WORKS:
+#   1. You set active: true for stocks you want the system to watch
+#   2. Data ingestion subscribes to those symbols automatically
+#   3. The strategy engine runs momentum analysis on all active symbols
+#   4. A BUY or SELL signal is only generated when the algorithm detects
+#      a crossover — you don't pick when to trade, only which universe to watch
+#
+# TO ADD A STOCK:    Add an entry below with active: true
+# TO REMOVE A STOCK: Set active: false (don't delete — keeps history)
+# TO PAUSE A STOCK:  Set active: false temporarily
+#
+# Last updated: 2026-04-24
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NSE INDIA — Nifty 50 Universe
+# Market hours: 09:15 – 15:30 IST (Monday to Friday)
+# Broker: Zerodha Kite Connect
+# ─────────────────────────────────────────────────────────────────────────────
+nse:
+  # Strategy settings that apply to ALL NSE instruments (can be overridden per instrument)
+  default_strategy:
+    name: momentum
+    short_window: 10       # 10-tick/bar short moving average
+    long_window: 50        # 50-tick/bar long moving average
+    min_confidence: 0.60   # Only trade if confidence score ≥ 0.60
+    quantity: 20           # Default shares per signal (overridden by lot_size below)
+
+  instruments:
+    # ── BANKING ─────────────────────────────────────────────────────────────
+    - symbol: HDFCBANK
+      name: HDFC Bank Ltd
+      sector: Banking
+      lot_size: 15         # Minimum tradeable quantity on NSE
+      active: true
+
+    - symbol: ICICIBANK
+      name: ICICI Bank Ltd
+      sector: Banking
+      lot_size: 25
+      active: true
+
+    - symbol: KOTAKBANK
+      name: Kotak Mahindra Bank
+      sector: Banking
+      lot_size: 20
+      active: true
+
+    - symbol: AXISBANK
+      name: Axis Bank Ltd
+      sector: Banking
+      lot_size: 25
+      active: true
+
+    - symbol: SBIN
+      name: State Bank of India
+      sector: Banking
+      lot_size: 75
+      active: true
+
+    # ── IT / TECHNOLOGY ──────────────────────────────────────────────────────
+    - symbol: TCS
+      name: Tata Consultancy Services
+      sector: IT
+      lot_size: 19
+      active: true
+
+    - symbol: INFY
+      name: Infosys Ltd
+      sector: IT
+      lot_size: 25
+      active: true
+
+    - symbol: WIPRO
+      name: Wipro Ltd
+      sector: IT
+      lot_size: 50
+      active: true
+
+    - symbol: HCLTECH
+      name: HCL Technologies
+      sector: IT
+      lot_size: 35
+      active: true
+
+    - symbol: TECHM
+      name: Tech Mahindra
+      sector: IT
+      lot_size: 50
+      active: false         # Paused — low liquidity in afternoon sessions
+
+    # ── ENERGY & OIL ─────────────────────────────────────────────────────────
+    - symbol: RELIANCE
+      name: Reliance Industries Ltd
+      sector: Energy
+      lot_size: 25
+      active: true
+      strategy_override:
+        short_window: 8    # Faster MA for Reliance — more liquid, faster signals
+        long_window: 40
+
+    - symbol: ONGC
+      name: Oil and Natural Gas Corp
+      sector: Energy
+      lot_size: 150
+      active: true
+
+    - symbol: NTPC
+      name: NTPC Ltd
+      sector: Energy
+      lot_size: 150
+      active: true
+
+    # ── CONSUMER / FMCG ──────────────────────────────────────────────────────
+    - symbol: HINDUNILVR
+      name: Hindustan Unilever Ltd
+      sector: FMCG
+      lot_size: 25
+      active: true
+
+    - symbol: ITC
+      name: ITC Ltd
+      sector: FMCG
+      lot_size: 1600
+      active: true
+
+    - symbol: NESTLEIND
+      name: Nestle India Ltd
+      sector: FMCG
+      lot_size: 10
+      active: false        # High price, small lot — revisit after position sizing update
+
+    # ── AUTOMOBILE ───────────────────────────────────────────────────────────
+    - symbol: TATAMOTORS
+      name: Tata Motors Ltd
+      sector: Auto
+      lot_size: 150
+      active: true
+
+    - symbol: MARUTI
+      name: Maruti Suzuki India
+      sector: Auto
+      lot_size: 10
+      active: true
+
+    - symbol: BAJAJ-AUTO
+      name: Bajaj Auto Ltd
+      sector: Auto
+      lot_size: 25
+      active: false
+
+    # ── METALS & MINING ──────────────────────────────────────────────────────
+    - symbol: TATASTEEL
+      name: Tata Steel Ltd
+      sector: Metals
+      lot_size: 550
+      active: true
+
+    - symbol: JSWSTEEL
+      name: JSW Steel Ltd
+      sector: Metals
+      lot_size: 200
+      active: true
+
+    - symbol: HINDALCO
+      name: Hindalco Industries
+      sector: Metals
+      lot_size: 350
+      active: false
+
+    # ── PHARMA ───────────────────────────────────────────────────────────────
+    - symbol: SUNPHARMA
+      name: Sun Pharmaceutical Industries
+      sector: Pharma
+      lot_size: 350
+      active: true
+
+    - symbol: DRREDDY
+      name: Dr Reddys Laboratories
+      sector: Pharma
+      lot_size: 50
+      active: false
+
+    # ── FINANCIAL SERVICES ───────────────────────────────────────────────────
+    - symbol: BAJFINANCE
+      name: Bajaj Finance Ltd
+      sector: Financial Services
+      lot_size: 25
+      active: true
+
+    - symbol: BAJAJFINSV
+      name: Bajaj Finserv Ltd
+      sector: Financial Services
+      lot_size: 50
+      active: false
+
+    - symbol: HDFCLIFE
+      name: HDFC Life Insurance
+      sector: Financial Services
+      lot_size: 200
+      active: false
+
+    # ── INFRASTRUCTURE ───────────────────────────────────────────────────────
+    - symbol: LT
+      name: Larsen and Toubro Ltd
+      sector: Infrastructure
+      lot_size: 25
+      active: true
+
+    - symbol: ADANIPORTS
+      name: Adani Ports and SEZ
+      sector: Infrastructure
+      lot_size: 250
+      active: false        # High volatility — need risk review before enabling
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# US EQUITIES — S&P 500 / NASDAQ Universe
+# Market hours: 09:30 – 16:00 ET (= ~19:00 – 01:30 IST)
+# Broker: Alpaca Markets
+# ─────────────────────────────────────────────────────────────────────────────
+us:
+  # Strategy settings for all US instruments
+  default_strategy:
+    name: momentum
+    short_window: 10
+    long_window: 50
+    min_confidence: 0.65   # Slightly higher threshold for US (more volatile)
+    quantity: 5            # Default shares per signal (fractional supported on Alpaca)
+
+  instruments:
+    # ── BIG TECH (FAANG+) ────────────────────────────────────────────────────
+    - symbol: AAPL
+      name: Apple Inc
+      sector: Technology
+      active: true
+
+    - symbol: MSFT
+      name: Microsoft Corporation
+      sector: Technology
+      active: true
+      strategy_override:
+        min_confidence: 0.70  # Higher bar for MSFT — more institutionally driven
+
+    - symbol: GOOGL
+      name: Alphabet Inc (Class A)
+      sector: Technology
+      active: true
+
+    - symbol: AMZN
+      name: Amazon.com Inc
+      sector: Technology
+      active: true
+
+    - symbol: META
+      name: Meta Platforms Inc
+      sector: Technology
+      active: true
+
+    - symbol: NVDA
+      name: NVIDIA Corporation
+      sector: Technology
+      active: true
+      strategy_override:
+        short_window: 8      # Faster signals — NVDA moves fast
+
+    - symbol: TSLA
+      name: Tesla Inc
+      sector: Auto / Tech
+      active: false          # High volatility and news-driven — not suitable for pure momentum
+
+    # ── FINANCIALS ───────────────────────────────────────────────────────────
+    - symbol: JPM
+      name: JPMorgan Chase and Co
+      sector: Financials
+      active: true
+
+    - symbol: BAC
+      name: Bank of America Corp
+      sector: Financials
+      active: true
+
+    - symbol: GS
+      name: Goldman Sachs Group
+      sector: Financials
+      active: false
+
+    # ── HEALTHCARE ───────────────────────────────────────────────────────────
+    - symbol: JNJ
+      name: Johnson and Johnson
+      sector: Healthcare
+      active: true
+
+    - symbol: UNH
+      name: UnitedHealth Group
+      sector: Healthcare
+      active: false
+
+    - symbol: PFE
+      name: Pfizer Inc
+      sector: Healthcare
+      active: false
+
+    # ── CONSUMER ─────────────────────────────────────────────────────────────
+    - symbol: AMZN
+      name: Amazon.com Inc
+      sector: Consumer Discretionary
+      active: false          # Already listed under Big Tech above — duplicate removed
+
+    - symbol: WMT
+      name: Walmart Inc
+      sector: Consumer Staples
+      active: false
+
+    - symbol: KO
+      name: Coca-Cola Company
+      sector: Consumer Staples
+      active: false         # Low volatility — momentum signals rare
+
+    # ── ENERGY ───────────────────────────────────────────────────────────────
+    - symbol: XOM
+      name: Exxon Mobil Corporation
+      sector: Energy
+      active: true
+
+    - symbol: CVX
+      name: Chevron Corporation
+      sector: Energy
+      active: false
+
+    # ── INDUSTRIALS ──────────────────────────────────────────────────────────
+    - symbol: CAT
+      name: Caterpillar Inc
+      sector: Industrials
+      active: false
+
+    - symbol: BA
+      name: Boeing Company
+      sector: Industrials
+      active: false          # Avoid — high news-driven volatility, not momentum-friendly
+
+    # ── ETFs (for index-level momentum) ─────────────────────────────────────
+    - symbol: SPY
+      name: SPDR S&P 500 ETF
+      sector: ETF
+      active: false          # Planned — useful for regime detection
+      strategy_override:
+        quantity: 2
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIVERSE FILTERS (applied on top of active: true)
+# Use these to dynamically exclude instruments without editing each entry
+# ─────────────────────────────────────────────────────────────────────────────
+filters:
+  nse:
+    exclude_sectors: []          # e.g. ["Metals"] to exclude all metal stocks
+    max_instruments: 20          # Safety cap — never watch more than 20 NSE symbols at once
+    min_lot_size: 1
+    max_lot_size: 1000           # Exclude instruments with very large lots (too capital-intensive)
+
+  us:
+    exclude_sectors: []
+    max_instruments: 15          # Cap for US — fewer symbols, higher quality
+    min_price: 10.0              # Exclude penny stocks
+    max_price: 10000.0           # Exclude Berkshire-style high-price stocks

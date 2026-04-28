@@ -1,0 +1,65 @@
+# Rule: Trading Layer Separation
+# =================================
+# NON-NEGOTIABLE: Strategy, Risk, and Execution are isolated domains.
+
+name: trading_layer_separation
+severity: critical
+enforcement: ci_pipeline
+
+description: |
+  The three core trading layers — strategy, risk, and execution — must
+  remain strictly isolated. No layer may import from another layer's
+  internal modules. Cross-layer communication happens ONLY through
+  defined interfaces (SQS queues, shared pydantic models in common/).
+
+  Flow: strategy_engine -> risk_engine -> execution_engine
+  This is the ONLY allowed direction. No shortcuts. No bypasses.
+
+rules:
+  - name: strategy_isolation
+    description: "Strategy engine must never import execution or risk internals"
+    service: strategy_engine
+    allowed_imports:
+      - services.shared
+      - services.strategy_engine
+      - third_party_libraries
+    forbidden_imports:
+      - services.execution_engine
+      - services.risk_engine
+      - services.data_ingestion.storage  # Strategy reads from SQS, not direct storage
+
+  - name: risk_isolation
+    description: "Risk engine validates signals, never modifies them or places orders"
+    service: risk_engine
+    allowed_imports:
+      - services.shared
+      - services.risk_engine
+      - third_party_libraries
+    forbidden_imports:
+      - services.execution_engine.brokers  # Risk must never call brokers
+      - services.strategy_engine.strategies  # Risk must never run strategies
+
+  - name: execution_isolation
+    description: "Execution engine places orders, never generates signals"
+    service: execution_engine
+    allowed_imports:
+      - services.shared
+      - services.execution_engine
+      - third_party_libraries
+    forbidden_imports:
+      - services.strategy_engine  # Execution must never generate signals
+      - services.risk_engine.validators  # Execution trusts risk decisions
+
+  - name: mandatory_risk_gateway
+    description: "All signals must pass through risk engine before execution"
+    pattern: |
+      The execution_engine must ONLY consume from the risk-approved
+      signals queue. Direct strategy->execution communication is a
+      critical defect that must be caught in code review and CI.
+
+enforcement_mechanism:
+  tool: "ruff custom rule or CI script"
+  script: |
+    # Check for forbidden cross-layer imports
+    # Run as part of CI pipeline
+    # Exit non-zero if violations found

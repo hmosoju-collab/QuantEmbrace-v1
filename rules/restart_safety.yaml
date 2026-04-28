@@ -1,0 +1,59 @@
+# Rule: Restart Safety & Idempotency
+# ======================================
+# Every service must be safe to restart at any time.
+
+name: restart_safety
+severity: critical
+enforcement: code_review
+
+description: |
+  In a trading system, services will crash, be redeployed, or be
+  restarted. This must NEVER result in data loss, duplicate orders,
+  or inconsistent state.
+
+rules:
+  - name: state_reconciliation_on_startup
+    description: |
+      Every service must reconcile its in-memory state with DynamoDB
+      and broker state before resuming operations. This means checking
+      for orders that filled while the service was down, positions that
+      changed, and risk limits that may have been breached.
+    applies_to:
+      - execution_engine
+      - risk_engine
+      - data_ingestion
+    implementation: |
+      Each service.py must have a _reconcile_state() method called
+      in start() before the main processing loop begins.
+
+  - name: idempotent_order_submission
+    description: |
+      The same signal processed twice must NOT produce duplicate orders.
+      Use signal_id as a deduplication key with DynamoDB conditional
+      writes (PutItem with ConditionExpression).
+    applies_to: execution_engine
+    implementation: |
+      Before placing an order, check DynamoDB for an existing order
+      with the same signal_id. Use conditional writes to prevent
+      race conditions in concurrent processing.
+
+  - name: conditional_state_transitions
+    description: |
+      All state transitions in DynamoDB must use conditional expressions
+      to prevent race conditions. Example: only transition an order from
+      PLACED to FILLED if the current status is still PLACED.
+    applies_to: all_services
+    implementation: |
+      Use ConditionExpression in all UpdateItem calls:
+      ConditionExpression='#status = :expected_status'
+
+  - name: graceful_shutdown
+    description: |
+      All services must handle SIGTERM gracefully: stop accepting new
+      work, complete in-flight operations, flush buffers, then exit.
+      WebSocket connections must be cleanly closed.
+    applies_to: all_services
+    implementation: |
+      Register signal handlers for SIGTERM and SIGINT.
+      Set a _running = False flag and wait for in-flight work.
+      Flush any buffered S3 writes before exiting.
