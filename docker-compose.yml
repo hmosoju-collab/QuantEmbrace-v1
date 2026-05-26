@@ -1,0 +1,342 @@
+# QuantEmbrace — Local Paper Trading Stack
+#
+# Starts everything needed to run all 5 services in paper-trading mode locally.
+# No real broker credentials are required; paper signals never hit Zerodha or Alpaca.
+#
+# QUICK START
+# ───────────────────────────────────────────────────────────────────────────────
+#   1. cp .env.example .env
+#   2. Fill in KAFKA_BOOTSTRAP_SERVERS (leave it empty — overridden to localhost below)
+#   3. docker-compose up -d localstack redpanda          # infra only
+#   4. docker-compose run --rm setup                     # create DynamoDB tables + Kafka topics
+#   5. docker-compose up                                 # start all services
+#
+# OR just: docker-compose up  (setup runs first via depends_on)
+#
+# PAPER TRADING
+#   All signals default to paper_trade=True (controlled by DynamoDB strategy-config).
+#   Execution engine routes paper signals to the built-in simulator — no broker API calls.
+#
+# KAFKA AUTH
+#   Local Redpanda uses PLAINTEXT. KAFKA_USE_IAM=false is set for all services.
+#   MSK Serverless (production) uses SASL_SSL + IAM — set KAFKA_USE_IAM=true.
+#
+# PORTS (host)
+#   LocalStack     : http://localhost:4566  (DynamoDB, S3)
+#   Redpanda       : localhost:19092        (Kafka, external)
+#   Redpanda Admin : http://localhost:9644
+#   Redpanda Console: http://localhost:8080 (topic browser)
+#   data_ingestion : http://localhost:8081/health
+#   strategy_engine: http://localhost:8082/health
+#   risk_engine    : http://localhost:8083/health
+#   execution_engine: http://localhost:8084/health
+#   ai_engine      : http://localhost:8085/health
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-service-defaults: &service-defaults
+  build:
+    context: .
+    dockerfile: infra/deployment/Dockerfile
+  env_file: .env
+  environment:
+    # Override broker string to point at local Redpanda (internal Docker network)
+    KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    # Disable IAM auth — local Redpanda uses PLAINTEXT
+    KAFKA_USE_IAM: "false"
+    # AWS SDK → LocalStack
+    AWS_ENDPOINT_URL: http://localstack:4566
+    AWS_DEFAULT_REGION: ap-south-1
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    # DynamoDB table prefix for local dev
+    DYNAMODB_TABLE_PREFIX: quantembrace-development
+    # Paper trading safety net
+    RISK_PROFILE: paper
+    QE_ENVIRONMENT: development
+    LOG_LEVEL: INFO
+  depends_on:
+    setup:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  redpanda:
+    image: redpandadata/redpanda:v24.1.1
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --smp 1
+      - --memory 1G
+      - --mode dev-container
+      - --default-log-level warn
+      - --blocked-reactor-notify-ms 2000
+    ports:
+      - "19092:19092"   # Kafka — host access for scripts/local tools
+      - "18082:18082"   # Pandaproxy (HTTP Kafka)
+      - "9644:9644"     # Admin API
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 20s
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+
+  redpanda-console:
+    image: redpandadata/console:v2.6.0
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        cat <<EOF > /tmp/config.yml
+        kafka:
+          brokers: ["redpanda:9092"]
+        EOF
+        /app/console
+    ports:
+      - "8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  localstack:
+    image: localstack/localstack:3.4
+    environment:
+      SERVICES: s3,dynamodb
+      DEFAULT_REGION: ap-south-1
+      PERSISTENCE: 1
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:4566/_localstack/health | grep -qE '\"dynamodb\": \"(available|running)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    volumes:
+      - localstack-data:/var/lib/localstack
+
+  # ── One-shot setup: create DynamoDB tables + Kafka topics ──────────────────
+
+  setup:
+    build:
+      context: .
+      dockerfile: infra/deployment/Dockerfile
+    env_file: .env
+    environment:
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_TABLE_PREFIX: quantembrace-development
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_USE_IAM: "false"
+      QE_ENVIRONMENT: development
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "=== Creating DynamoDB tables ===" && \
+        python /app/scripts/setup_local_tables.py && \
+        echo "=== Creating Kafka topics ===" && \
+        python /app/scripts/kafka/create_topics.py \
+          --bootstrap-servers redpanda:9092 \
+          --short-retention && \
+        echo "=== Setup complete ==="
+    depends_on:
+      localstack:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/app/scripts:ro
+
+  # ── Trading Services ────────────────────────────────────────────────────────
+
+  data_ingestion:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/deployment/Dockerfile
+      args:
+        SERVICE_NAME: data_ingestion
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_USE_IAM: "false"
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_TABLE_PREFIX: quantembrace-development
+      DYNAMODB_TABLE_SESSIONS: quantembrace-development-sessions
+      QE_ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      QE_HEALTH_CHECK_PORT: "8081"
+      ZERODHA_API_KEY: ${ZERODHA_API_KEY:-paper_placeholder}
+      ZERODHA_API_SECRET: ${ZERODHA_API_SECRET:-paper_placeholder}
+      ZERODHA_ACCESS_TOKEN: ${ZERODHA_ACCESS_TOKEN:-}
+      # Allow last-known prices from reconnect dumps to pass through in paper mode
+      DATA_INGESTION_TICK_STALE_THRESHOLD: "86400"
+    volumes:
+      - ./configs:/app/configs:ro
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  strategy_engine:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/deployment/Dockerfile
+      args:
+        SERVICE_NAME: strategy_engine
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_USE_IAM: "false"
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_TABLE_PREFIX: quantembrace-development
+      QE_ENVIRONMENT: development
+      RISK_PROFILE: paper
+      LOG_LEVEL: INFO
+      QE_HEALTH_CHECK_PORT: "8082"
+    volumes:
+      - ./configs:/configs:ro
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8082/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  risk_engine:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/deployment/Dockerfile
+      args:
+        SERVICE_NAME: risk_engine
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_USE_IAM: "false"
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_TABLE_PREFIX: quantembrace-development
+      QE_ENVIRONMENT: development
+      RISK_PROFILE: paper
+      RISK_DAILY_LOSS_HALT_PCT: "3.0"
+      LOG_LEVEL: INFO
+      QE_HEALTH_CHECK_PORT: "8083"
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8083/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  execution_engine:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/deployment/Dockerfile
+      args:
+        SERVICE_NAME: execution_engine
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_USE_IAM: "false"
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_TABLE_PREFIX: quantembrace-development
+      QE_ENVIRONMENT: development
+      RISK_PROFILE: paper
+      # Broker credentials — optional for paper trading (paper signals skip broker calls)
+      # Set real values only when promoting to live trading
+      ZERODHA_API_KEY: ${ZERODHA_API_KEY:-paper_placeholder}
+      ZERODHA_API_SECRET: ${ZERODHA_API_SECRET:-paper_placeholder}
+      ALPACA_API_KEY: ${ALPACA_API_KEY:-paper_placeholder}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET:-paper_placeholder}
+      ALPACA_BASE_URL: https://paper-api.alpaca.markets
+      ALPACA_USE_PAPER: "true"
+      # Paper simulation parameters
+      EXECUTION_PAPER_SLIPPAGE_BPS: "5.0"
+      EXECUTION_PAPER_SPREAD_BPS: "10.0"
+      EXECUTION_PAPER_LATENCY_MS: "250"
+      EXECUTION_PAPER_PARTIAL_FILL_PROBABILITY: "0.0"
+      EXECUTION_PAPER_REJECT_PROBABILITY: "0.0"
+      EXECUTION_PAPER_RANDOM_SEED: quantembrace-paper-v1
+      LOG_LEVEL: INFO
+      QE_HEALTH_CHECK_PORT: "8084"
+      # NSE watchlist for LiveQuotePoller — writes QUOTE#NSE#{symbol}/LATEST to
+      # prices table so LtpResolver returns live prices instead of fill-price fallback.
+      STRATEGY_WATCHLIST_NSE: "HDFCBANK,ICICIBANK,KOTAKBANK,AXISBANK,SBIN,TCS,INFY,WIPRO,HCLTECH,TECHM,RELIANCE,ONGC,NTPC,HINDUNILVR,ITC,NESTLEIND,TATAMOTORS,MARUTI,BAJAJ-AUTO,TATASTEEL,JSWSTEEL,HINDALCO,SUNPHARMA,DRREDDY,CIPLA,DIVISLAB,APOLLOHOSP,BAJFINANCE,BAJAJFINSV,HDFCLIFE,LT,ADANIPORTS,ADANIENT,ADANIGREEN,ATGL,ADANIPOWER,TATAPOWER,NHPC,SJVN,TORNTPOWER,IOC,HINDPETRO,BPCL,OIL,HAL,BEL,BEML,BHEL,COCHINSHIP,MAZDOCK,DEEPAKFERT,GRASIM,INDIGO,TATAELXSI,PERSISTENT,DATAPATTNS,ZENTEC,TEXRAIL,WAAREEENER,WAAREERTL,IIFL,JIOFIN,PATELENG,JINDALSAW,PRAKASH,HSCL,PRAJIND,ETERNAL,SAMHI,TI,TILAKNAGAR"
+    ports:
+      - "8084:8084"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8084/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  ai_engine:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/deployment/Dockerfile
+      args:
+        SERVICE_NAME: ai_engine
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_USE_IAM: "false"
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_TABLE_PREFIX: quantembrace-development
+      QE_ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      QE_HEALTH_CHECK_PORT: "8085"
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8085/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+
+volumes:
+  redpanda-data:
+  localstack-data:
