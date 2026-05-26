@@ -6,7 +6,7 @@
 
 ---
 
-## ADR-001: ECS Fargate Over Lambda for Compute
+## ADR-001: ECS Fargate Over Lambda for Compute [SUPERSEDED by ADR-009 — EC2 ARM64 ASGs]
 
 **Date**: 2026-04-23
 **Status**: Accepted
@@ -388,3 +388,640 @@ class BrokerAdapter(ABC):
 - Every broker-specific behavior must be encapsulated within the adapter. This sometimes requires creative normalization (e.g., Zerodha's order types map differently to internal order types than Alpaca's).
 - New adapters must pass the full adapter integration test suite (a set of tests defined against the abstract interface).
 - The adapter pattern adds a layer of indirection, but this is a worthwhile tradeoff for flexibility and testability.
+
+---
+
+## ADR-009: EC2 Auto Scaling Groups for Latency-Critical Services
+
+**Date**: 2026-04-29  
+**Status**: Accepted (historical — SQS references below describe Phase 1 state; superseded by ADR-010/ADR-011 for messaging layer)  
+**Supersedes**: ADR-001 (partially) — EC2 replaces Fargate for data_ingestion, strategy_engine, execution_engine only  
+**Phase**: Phase 1 — EC2 Backbone Migration  
+
+### Context
+
+ADR-001 chose ECS Fargate over EC2 for operational simplicity. This was the correct decision at
+system inception. As QuantEmbrace evolves toward hedge-fund-grade architecture, three specific
+limitations of Fargate have become architectural constraints:
+
+1. **Fargate network virtualization** introduces 3–15ms of additional jitter on the order placement
+   path. EC2 with enhanced networking (ENA) and a kernel-tuned TCP stack eliminates this overhead.
+2. **Fargate cannot use cluster placement groups**. The execution engine needs physical co-location
+   with the AZ's DynamoDB endpoint for minimum-latency risk state reads (kill switch + position checks
+   happen on every order).
+3. **Fargate provides no persistent local storage**. Phase 2 (Kafka) requires EC2 instances with EBS
+   volumes for Kafka broker storage. Phase 1 EC2 migration is the required prerequisite.
+
+### Decision
+
+Migrate **data-ingestion, strategy-engine, and execution-engine** from ECS Fargate to EC2 Auto
+Scaling Groups backed by AWS Graviton3 ARM instances.
+
+The risk engine and AI engine **were initially kept on ECS Fargate** (historical — both have since migrated to EC2 ARM64 ASGs in Phase 2) because:
+- Risk engine: zero latency benefit from EC2 (signals arrive via SQS, not time-critical path).
+  Fargate provides simpler operations for the consistency-critical singleton.
+- AI engine: batch inference only. EC2 provides no benefit for on-demand batch workloads.
+
+### Instance Selection
+
+| Service | Instance | Rationale |
+|---|---|---|
+| data-ingestion-nse/us | `t4g.medium` | I/O-bound WebSocket workload. Burstable credits handle tick bursts. |
+| strategy-engine | `c6g.large` | Sustained CPU for indicator math. No burstable ceiling. |
+| execution-engine | `c6g.large` | Predictable CPU + cluster placement group for lowest order latency. |
+
+All instances use **AWS Graviton3 ARM64** (AL2023). 15–40% better price/performance vs. x86 for
+Python workloads. Fully supported in ap-south-1.
+
+### Rationale
+
+1. **Kernel-tunable network stack**: EC2 allows tuning `net.ipv4.tcp_nodelay`, receive/send buffer
+   sizes, keepalive intervals, and slow-start behavior. These are applied via `/etc/sysctl.d/` at
+   instance launch. Fargate provides no equivalent control.
+
+2. **Cluster placement group for execution engine**: Physical co-location within a rack reduces
+   intra-AZ network hops. Estimated 1–3ms savings on the DynamoDB read path per order. At 100
+   orders/day, this compounds significantly and enables Phase 7 latency work.
+
+3. **Warm pools for fast failover**: ASG warm pools (pre-stopped instances) reduce failover time
+   from 2–3 minutes (Fargate cold start) to <60 seconds. Critical during market hours.
+
+4. **Phase 2 prerequisite**: Apache Kafka brokers require persistent EBS storage, which Fargate
+   cannot provide. EC2 instances established in Phase 1 will host Kafka brokers in Phase 2.
+
+5. **Scheduled stop/start**: EC2 instances can be stopped (not terminated) outside market hours,
+   preserving the warm Docker image cache and reducing startup time for the next session. Fargate
+   tasks start from cold on every scheduled start.
+
+### Costs
+
+Phase 1 increases monthly compute cost by approximately $31 (from ~$130 to ~$161/month) on
+On-Demand pricing. This premium is justified by the latency and architectural benefits.
+With 1-year Reserved Instances for the two t4g.medium instances (purchased after 30-day
+validation), cost premium reduces to ~$20/month.
+
+### Operational Changes
+
+- **OS patching**: Automated via AWS SSM Patch Manager weekly instance refresh. No in-place
+  patching — patch by replacing instances via ASG.
+- **Shell access**: SSM Session Manager (no bastion, no SSH keys). IAM-controlled.
+- **Monitoring**: CloudWatch Agent on each instance, identical log group names and structured
+  JSON format to Fargate predecessor.
+- **Deployment**: Same Docker images from ECR. CI/CD pipeline unchanged. Deployment updates
+  the Launch Template, then triggers an ASG instance refresh.
+
+### Consequences
+
+- Operational surface area increases modestly (OS-level concerns for 4 EC2 instances).
+- Migration requires a blue/green cutover period per service (documented in `docs/phase1_ec2_migration.md`).
+- Risk engine and AI engine remain unaffected — zero changes required to those services.
+- All Python application code is unchanged — only compute substrate changes.
+- Phase 2 (Kafka) and Phase 7 (latency optimization) are now unblocked.
+
+---
+
+## ADR-010: Kafka-Native Event Model for Phase 2 (SQS Removed)
+
+**Date**: 2026-04-30
+**Status**: SUPERSEDED by ADR-011 (v2.1 refinements)
+**Document**: `architecture/phase2_kafka_architecture.md` (v2.0)
+
+---
+
+## ADR-011: Phase 2 Kafka Architecture v2.1 — Pre-Implementation Final Design
+
+**Date**: 2026-04-30
+**Status**: Accepted — implementation complete 2026-05-03
+**Supersedes**: ADR-010
+**Document**: `architecture/phase2_kafka_architecture.md` (v2.1)
+
+### Blockers (must resolve before implementation begins)
+
+**BLOCKER B1**: Zerodha fill tracking not implemented.
+  - Required: Zerodha postback webhook (preferred) OR polling fallback (interim)
+  - Infrastructure: ALB + public DNS endpoint for postback; OR 300ms polling loop
+  - If using polling fallback initially: must be replaced with postback in Phase 3
+  - Without this: orders.events topic is unpopulated for NSE; risk engine position state is wrong
+
+**BLOCKER B2**: ALB and DNS infrastructure for Zerodha webhook not yet in Terraform.
+  - Terraform work required: ALB listener, target group, DNS record, security group
+  - Fallback: polling loop requires no infrastructure changes — can unblock Phase 2
+
+### Changes from ADR-010 (v2.1 delta)
+
+**1. signal_id collision fix — timeframe added to hash (v2.1).**
+Old: `hash(strategy_id, symbol, direction, tick_sequence_id)`
+New: `hash(strategy_id, symbol, direction, timeframe, tick_sequence_id)`
+Reason: Same strategy can run on 1m and 5m timeframes simultaneously. Same
+(symbol, direction, tick_sequence_id) would produce identical signal_ids.
+The 1m and 5m signals are distinct trades. The v2.0 formula was silently deduplicating them.
+Timeframe string must use canonical registry (instruments.yaml) — "1m", never "1min" or "1_minute".
+
+**2. Kill switch hierarchy with evaluation algorithm.**
+Scope hierarchy: GLOBAL > MARKET > INSTRUMENT.
+Most restrictive scope always wins. A Global halt cannot be overridden by market-level allow.
+Evaluation: check global → check market → check instrument. First match halts.
+Kill switch state object: `{global_halt, halted_markets: [], halted_instruments: []}`.
+All three checks are in-memory (0ms). No I/O in the hot path.
+
+**3. Consumer lag policy: 4-tier → 5-tier with tighter thresholds.**
+<200ms: NORMAL (generate signals)
+200–1000ms: WARNING (generate with 0.75× conviction, emit metric)
+1000–3000ms: STALE_DROP (consume but discard, no signal generation)
+3000–5000ms: PARTIAL_HALT (stop generating signals, continue consuming + fills)
+≥5000ms: FULL_HALT (stop signals, auto-scale consumer group, ops alert)
+Key change: 200ms is NORMAL (v2.0 had 500ms). 1000ms is STALE_DROP (v2.0 had 2000ms).
+Recovery: 30 consecutive messages in Tier 1 before re-enabling signal generation.
+
+**4. Risk engine: 3 named consumer groups (thread isolation was insufficient).**
+OLD: 3 threads sharing one consumer group.
+NEW: 3 independent consumer groups:
+  risk-v1    → ticks.nse, ticks.us
+  risk-v1 → signals.pending
+  risk-v1  → orders.events, orders.events, orders.events
+Reason: Shared consumer group → shared offset commits → rebalances affect all 3 functions
+simultaneously. Independent groups have independent lag, independent rebalances,
+independent failure modes.
+risk-v1 lag >2000 offsets for 2min → automatic GLOBAL kill switch.
+
+**5. Replay guardrail: max bounded window (not auto.offset.reset=earliest).**
+OLD: auto.offset.reset=earliest → could replay 24h of ticks on restart.
+NEW: On startup, if gap since last commit > MAX_REPLAY_WINDOW → seek to (now - window).
+Per-group replay windows:
+  risk-v1 (ticks.nse/us):      60s   (stale prices are useless)
+  risk-v1 (orders.events):      3600s (1h — fills must not be missed)
+  risk-v1 (signals.pending):    300s  (5 min)
+  strategy-*-v1:            300s
+  execution-v1:             1800s (30 min — approved signals are precious)
+
+**6. Hot partition monitoring.**
+LagMonitor publishes KAFKA_PARTITION_TRAFFIC_PCT per partition every 30s.
+If any partition > 30% of total traffic:
+  5-minute sustained → WARNING alert
+  15-minute sustained → CRITICAL alert (re-partitioning evaluation)
+LagMonitor maintains partition→instrument mapping for last 1 hour.
+
+**7. Kafka write failure → Global kill switch.**
+3 consecutive delivery failures on any critical topic → Global kill switch.
+Kill switch published via separate high-priority producer (acks=1, max.block.ms=1000).
+If Kafka itself is down: fall back to DynamoDB kill switch write + 5s poll.
+Trading halts within 10s of total Kafka failure (without this, trading continues blind).
+unclean.leader.election=false: writes block rather than elect stale replica.
+A halt is recoverable; silent data corruption from stale leader election is not.
+
+**8. orders.events schema fully specified (v2.1).**
+fill_id = deterministic hash ("FILL-{market}-{date}-{time_bucket}-{order_id[:8]}")
+fill_source field: zerodha_postback | zerodha_polling | alpaca_websocket
+is_replay field: true only during operational replay (risk engine skips position updates)
+Partial fills: published immediately; FULL fill event closes position.
+Idempotency: DynamoDB conditional write on fill_id before Kafka publish.
+Fill durability fallback: fills-pending DynamoDB table (TTL 24h) if Kafka write fails.
+
+### Unchanged from ADR-010
+- SQS completely removed from all trading paths
+- 15 Kafka topics (same as ADR-010)
+- Deterministic order_id (sha256 of signal_id + risk_decision_id + ...)
+- Signal expiry at 3 layers (risk, execution, broker)
+- trace_id propagated end-to-end from tick → fill
+- 3-tier retry classification for broker errors
+- CooperativeStickyAssignor for zero-downtime rolling deploys
+
+### Decision
+
+Replace SQS entirely with Kafka (Amazon MSK, 3-broker, 3-AZ) as the exclusive
+transport for all trading events. The system is not live; full replacement with no
+backward compatibility obligation is permitted.
+
+### Core Design Decisions
+
+**1. Events are contracts, not payloads.**
+Every event carries a base envelope: `event_id`, `trace_id`, `schema_version`,
+`source`, `source_instance`, `ingestion_time`, `published_time`. Schema versioned
+with semver; consumers reject unknown major versions and route to dead-letter.
+
+**2. Deterministic IDs (not UUIDs) for signal_id and order_id.**
+`signal_id` = deterministic hash of `(strategy_id, symbol, direction, tick_sequence_id)`.
+`order_id` = sha256 of `(signal_id + risk_decision_id + instrument_id + direction + quantity)`.
+Same input conditions = same ID = idempotency guaranteed across restarts and replays.
+Using UUID4 for these IDs is an architectural defect — it breaks deduplication.
+
+**3. Risk engine is an independent Kafka consumer, not a synchronous gatekeeper.**
+Risk engine runs 3 independent consumer threads: tick price monitoring, signal validation,
+fill processing. It produces to signals.approved and signals.rejected. It never blocks
+the signal producer path — decoupled via Kafka topic.
+
+**4. Kill switch propagates via Kafka (risk.kill-switch, 1 partition, 30d retention).**
+All services subscribe to risk.kill-switch as a dedicated listener (not a consumer group).
+Kill switch propagation SLA: <200ms from DynamoDB write to "no new orders."
+Phase 2 introduces scoped kill switch: scope=ALL | NSE | US | instrument_id.
+
+**5. Consumer lag policy is deterministic — not advisory.**
+Every lag threshold produces exactly one defined action (drop, degrade, halt, scale).
+No ambiguity. No "depends." See Section 3 of phase2_kafka_architecture.md.
+
+**6. Signal expiry is enforced at three layers.**
+Layer 1: risk engine (signal.expires_at check before validation).
+Layer 2: execution engine (re-check before broker API call).
+Layer 3: broker API (Alpaca 422 on stale limit order, Zerodha order rejection).
+Default expires_at = signal_time + 30 seconds. Configurable per strategy.
+
+**7. Three-tier retry classification maintained from Phase 1.**
+NonRetryableBrokerError (400/403/422): no retry, no circuit breaker trip.
+BrokerAPIError (500/503/429): max 4 attempts, exponential backoff (200ms, factor 2, ±20% jitter).
+Circuit breaker: 5 failures in 60s → OPEN → scoped kill switch to risk engine.
+
+### Topic Architecture (15 topics)
+| Topic | Partitions | Partition Key | Retention |
+|-------|-----------|---------------|-----------|
+| ticks.nse | 2 | instrument_id | 24h |
+| ticks.us | 2 | instrument_id | 24h |
+| signals.pending | 2 | instrument_id | 2h |
+| signals.approved | 32 | instrument_id | 30m |
+| signals.rejected | 8 | instrument_id | 7d |
+| orders.events/filled/cancelled/rejected | 32/16/8/8 | instrument_id | 7d |
+| risk.state-updates | 16 | instrument_id | 1h |
+| risk.kill-switch | 1 | "GLOBAL" | 30d |
+| ops.audit | 8 | trace_id | 90d |
+| ops.dead-letter | 8 | original_topic | 7d |
+
+---
+
+## ADR-012: Zerodha Full-Capacity Rate Limit Architecture
+
+**Date**: 2026-05-01
+**Status**: Accepted — implementation active
+**Document**: `architecture/zerodha_rate_capacity_design.md` (v1.1)
+
+### Context
+
+Two critical bugs existed in the Phase 1 Zerodha integration:
+
+1. `asyncio.Semaphore(8)` was documented as "enforcing 10 req/sec" but controls concurrency, not rate. Under burst conditions it silently exceeded the Zerodha limit.
+2. `fill_poller.py` called `kite.order_history(order_id=X)` per open order — O(N) API calls per cycle. With 5 open orders at 300ms, this produced 16.7 req/sec, violating the Zerodha limit. With 10 orders: 33.3 req/sec.
+
+At the same time, the system was massively under-utilizing the 10 req/sec budget: no live quotes, no bulk position monitoring, no intraday candle streaming.
+
+### Decision
+
+Replace `asyncio.Semaphore(8)` with a **token bucket rate limiter** (`ZerodhaRateLimiter`) with 4 priority tiers. Replace per-order polling with `kite.orders()` bulk call (`BulkOrderPoller`). Add market-phase-aware budget allocation (`MarketPhaseGovernor`). Add `LiveQuotePoller`, `PositionMonitor`, and `IntradayCandleStream` to use freed capacity intelligently.
+
+### Core Design Choices
+
+1. **Token bucket, not semaphore**: 10 tokens/sec capacity, 15-token burst ceiling, priority queue (CRITICAL > HIGH > MEDIUM > LOW). Never drops requests — CRITICAL-priority calls always preempt.
+2. **O(1) bulk fill polling**: `kite.orders()` returns all orders in one call. Rate cost: 2 req/sec fixed regardless of open order count (was up to 33 req/sec).
+3. **Adaptive polling interval**: 2000ms idle → 300ms during heavy order activity and PRE_CLOSE phase.
+4. **Market phase awareness**: 7 IST phases (PRE_OPEN through POST_CLOSE). Budget table allocates all 10 req/sec differently per phase. RESERVE column guarantees CRITICAL-priority calls never wait.
+5. **Separate historical data budget**: `kite.historical_data()` uses a distinct 3 req/sec limit independent of the 10 req/sec order API limit. `IntradayCandleStream` operates on this separate budget.
+6. **LiveQuotePoller disabled during MARKET_OPEN and PRE_CLOSE**: Budget reserved for order placement and fill detection during high-activity phases.
+
+### New Capabilities Unlocked
+
+- Live bid/ask spread gate on every order (risk engine rejects wide-spread entries)
+- PositionMonitor: ground-truth position state every 1-2s (catches manual orders, auto-square-offs)
+- IntradayCandleStream: exchange-validated 1m candles for ORB, Scalp, VWAP strategies
+- 5 new signal types: ORB, Scalp 1m, VWAP Reversion, Intraday Trend 15m, Pre-Close Momentum
+
+### Implementation Order
+
+Gate 1 (foundation): RT-T01 (rate limiter), RT-T02 (phase governor), RT-T07 (broker client extensions)
+Gate 2 (fill fix): RT-T03 (BulkOrderPoller — replaces O(N) fill_poller)
+Gate 3 (new feeds): RT-T04–T06, RT-T09, RT-T10 — enable one at a time after 5-day Gate 2 validation
+Gate 4 (new signals): RT-T08 — paper trade 5 days before live capital
+
+### Consequences
+
+- `ZerodhaFillPoller` (`fill_poller.py`) deprecated after RT-T03 5-day validation window
+- `asyncio.Semaphore(8)` removed from execution engine entirely
+- 3 new shared modules: `services/shared/zerodha/rate_limiter.py`, `market_phase.py`
+- New CloudWatch namespace: `QuantEmbrace/ZerodhaRateLimit`
+- No changes to: auth, kill switch, OrderManager, signal schemas, risk engine validators
+
+### Honest Weaknesses Documented
+1. Single risk engine instance serializes validation — Phase 4 must address per-instrument sharding
+2. Zerodha fill tracking is polling-based (500ms) — Phase 3 should implement postback URL
+3. No end-to-end transactionality — at-least-once + idempotent consumers (acceptable for Phase 2)
+4. Backtest shares production MSK cluster — Phase 3 should isolate to MSK serverless
+
+### Non-Negotiable Pre-Conditions Before Implementation (historical context)
+- Zerodha fill tracking (Phase 1 defect) must be implemented before Phase 2 go-live
+- All 15 topics created via script (auto.create.topics.enable=false)
+- Schema registry running; all Avro schemas registered
+- Consumer group names finalized (changing post-deploy = offset loss)
+
+### Consequences
+- Full SQS removal from core trading path
+- trace_id propagation required in all service loggers
+- All services must implement kill-switch Kafka listener (dedicated thread, not consumer group)
+- LagMonitor service required (new service, polls AdminClient every 5s)
+
+---
+
+## ADR-013: Phase 3 — Strategy Isolation, DynamoDB Candle Integration, paper_trade Pipeline, Topology Preparation
+
+**Date**: 2026-05-05
+**Status**: Accepted — implementation in progress
+**Document**: `architecture/phase3_design_review.md` (v1.2)
+**Phase**: Phase 3 — Decouple Strategy & Scale Horizontally
+
+### Context
+
+Phase 2 left five candle strategies producing zero signals in production: `CandleBarAdapter._signal_queue` is never drained by `StrategyEngineService`. One unhandled exception in any strategy halts signal generation for all strategies. Config changes require a full deploy. Tick topic partition topology was sized for Phase 2 only.
+
+### Decisions
+
+1. **Single `StrategyRunner` class**, `interface_type = TICK | CANDLE`, with dual-threshold circuit breaker. One class because lifecycle concerns (circuit breaker, enabled flag, paper_trade, metrics, state persistence) are identical for both interface types.
+
+2. **Candle strategies consume via DynamoDB `candle-cache` poll** (3-min overlapping lookback, 500ms poll interval). `IntradayCandleStream` stays in `data_ingestion` untouched. `strategy_engine` makes zero Zerodha API calls.
+
+3. **`candle_stream.py` cross-service import fixed** via constructor injection. Module-level `from execution_engine.brokers.zerodha_broker import ZerodhaBrokerClient` removed. Full fix (moving `ZerodhaBrokerClient` to `shared/`) deferred to Phase 5.
+
+4. **`paper_trade` field added to Signal model** (`bool = False`, additive, backward compatible). Full pipeline support: risk engine propagates flag unchanged; execution engine branches to `_handle_paper_order()` which logs, publishes synthetic `ORDER_FILLED` (paper=true) to `orders.events`, records `PAPER_FILLED` in DynamoDB, never calls live broker.
+
+5. **`max_signals_per_day` defaults set**: ORB=2, Scalp1m=10, VWAPReversion=6, IntradayTrend15m=4, PreCloseMomentum=2, MomentumStrategy=10 (capped, not unlimited).
+
+6. **Tick topic partitions 2 → 4** (`ticks.nse`, `ticks.us`). Online, non-destructive. Prepares topology for future horizontal scale without building multi-instance machinery today.
+
+7. **No multi-instance strategy engine in Phase 3.** Signal rate is 5–30/day; multi-instance sharding at this volume is over-engineering. Deferred until signal rate justifies it.
+
+### Why DynamoDB over in-process IntradayCandleStream
+
+In-process `IntradayCandleStream` inside `strategy_engine` would:
+- Import `ZerodhaBrokerClient` into strategy_engine (violates service boundary — broker methods exposed to strategy layer)
+- Create a second independent `ZerodhaRateLimiter` token bucket with no coordination across processes
+- Break `MarketPhaseGovernor` phase enforcement (governor only works if rate limiter + candle stream share a process)
+- Create an unmonitored Zerodha API call path invisible to `rate_monitor.py`
+
+DynamoDB polling resolves all four conflicts. Candle-to-signal latency is ~17.5s — acceptable for all five candle strategies which act on confirmed closed bars.
+
+### Candle Signal Correctness Rules
+
+- `signal.generated_at` = `candle.dt + timedelta(minutes=interval_minutes[candle.interval])` (candle close time, NOT polling time)
+- `trace_id` = `sha256("candle|{market}|{symbol}|{interval}|{candle_open_time.isoformat()}").hexdigest()[:32]`
+- Overlapping 3-min lookback + in-memory dedup set (5-min rolling window) ensures eventual-consistency stragglers are caught
+- Phase check: no candle signals during MARKET_OPEN or PRE_CLOSE (data_ingestion pauses candle_stream during these phases anyway)
+
+### Consequences
+
+- All 6 strategies produce signals after Phase 3 (5 candle strategies were producing zero)
+- One strategy exception no longer halts all others (per-StrategyRunner failure domain)
+- Config changes (enable/disable, paper_trade flip, threshold changes) take effect within 60s via DynamoDB hot-reload
+- `paper_trade=True` signals never result in live broker calls
+- Monthly cost delta: ~+$5/month (DynamoDB candle-cache reads ~$2, CloudWatch metrics ~$3)
+- Paper trading validation (5 trading days) required before flipping any strategy to `paper_trade=False`
+
+---
+
+## ADR-014: Phase 4 — Distributed Risk Engine + Portfolio Layer
+
+**Date**: 2026-05-06
+**Status**: Accepted
+**Document**: `architecture/phase4_design_review.md` (v1.1)
+**Phase**: Phase 4 — Distributed Risk Engine + Portfolio Layer
+
+### Context
+
+Phase 3 completed the strategy layer. The risk engine has validators in place but lacks:
+- Per-signal kill switch I/O costs 3–8ms (DynamoDB read every validation)
+- `max_sector_exposure_pct` field exists in risk settings but is never enforced
+- No liquidity guard — illiquid instruments are not screened at validation time
+- No spread gate — wide bid-ask spreads are not blocked at entry
+- No portfolio analytics — sector/VaR snapshots not computed or persisted
+- ADV data is in the candle cache (written by candle_prefetch.py) but not consumed by risk engine
+
+The Phase 4 roadmap sketch proposed Redis/ElastiCache and active-active dual instances. These are architectural overkill for 5–30 signals/day. The correct scope is filling the actual gaps.
+
+### Decisions
+
+1. **`KillSwitchCache`** — in-memory bool, background asyncio task polls DynamoDB kill-switch record every 1 second. `is_active()` returns RAM value (0ms, no I/O). `activate()` writes DynamoDB + triggers force-cancel via `Priority.CRITICAL` in `ZerodhaRateLimiter`. Eliminates per-signal DynamoDB read.
+
+2. **`RiskContextBuilder.build(signal)`** — single pre-fetch call assembles all validator inputs in 3–4 DynamoDB reads (position record, portfolio state, live quote from LiveQuotePoller output, ADV from candle cache). Replaces 8–12 scattered reads across individual validators.
+
+3. **`RiskContext` dataclass** — immutable snapshot passed to every validator: `signal, confirmed_position, pending_quantity, current_exposure, sector_exposures, adv_20d, live_spread_bps: float | None, portfolio_nav, analytics_snapshot, fetched_at`.
+
+4. **11-step validator pipeline** (in order):
+   1. `KillSwitchCache.is_active()` [0ms — RAM]
+   2. `SignalAgeValidator` [0ms]
+   3. `RiskContextBuilder.build()` [3–8ms — DynamoDB]
+   4. `PositionValidator` [0ms]
+   5. `ExposureValidator` [0ms]
+   6. `LiquidityValidator` [0ms]
+   7. `SpreadGateValidator` [0ms]
+   8. `SectorConcentrationValidator` [0ms]
+   9. `MarginValidator` [cached broker call]
+   10. `SlippageValidator` [0ms]
+   11. `DailyLossValidator` [0ms]
+
+5. **`SpreadGateValidator`** — reads `context.live_spread_bps` from `LiveQuotePoller` DynamoDB output. Rejects if `live_spread_bps > max_spread_bps` (default 50 bps, per-instrument configurable). Approves with `STALE_SPREAD_DATA` warning if data is >30s old — never blocks trading on stale data.
+
+6. **`SectorConcentrationValidator`** — enforces `max_sector_exposure_pct` using `context.sector_exposures`. Previously this field was set but never read.
+
+7. **`LiquidityValidator`** — rejects signals on instruments where `adv_20d < min_adv_lakhs` (per-instrument configurable). During `MARKET_OPEN` phase when `IntradayCandleStream` is paused, uses daily ADV written by `candle_prefetch.py` to the candle-cache table with `interval="day"`. Approves with `LOW_ADV_DATA` warning if no data exists.
+
+8. **`InstrumentRegistry`** — `instruments.yaml` with per-instrument risk params: `sector`, `max_spread_bps`, `min_adv_lakhs`, `max_position_size`, `market`. Loaded at startup via `registry.py`. Single source of truth for instrument classification.
+
+9. **`RiskAnalyticsEngine`** — background asyncio loop, reads position snapshots + fill history + NAV from DynamoDB, computes sector breakdown, simplified 5-day historical VaR (2% quantile), portfolio P&L. Persists snapshot to DynamoDB `analytics-snapshot` record. Phase-aware interval via `ANALYTICS_INTERVAL_BY_PHASE`:
+   - PRE_OPEN/MARKET_OPEN/PRE_CLOSE: 30s
+   - NORMAL: 60s
+   - POST_CLOSE: 300s
+   - OVERNIGHT: disabled
+
+10. **No Redis, no active-active** — DynamoDB on-demand + in-memory cache covers all latency requirements at current signal volume. Revisit at >500 signals/day.
+
+### Zerodha Rate Capacity Alignment (v1.1 additions)
+
+All 4 misalignments with `zerodha_rate_capacity_design.md` resolved:
+- `SpreadGateValidator` added (Misalignment 1)
+- `RiskAnalyticsEngine` uses `ANALYTICS_INTERVAL_BY_PHASE` (Misalignment 2)
+- `LiquidityValidator` degrades to candle_prefetch.py daily ADV during MARKET_OPEN gap (Misalignment 3)
+- Force-cancel on kill switch activation uses `Priority.CRITICAL` in `ZerodhaRateLimiter` (Misalignment 4)
+
+### Consequences
+
+- Per-signal validation latency: 3–8ms (down from 11–16ms) — all from the single `RiskContextBuilder` pre-fetch
+- Kill switch check: 0ms RAM (down from 3–8ms DynamoDB)
+- Sector exposure cap now actually enforced (was configured but never checked)
+- Illiquid instrument protection: live
+- Wide-spread rejection: live
+- Monthly cost delta: ~+$3/month (analytics loop DynamoDB reads)
+- `instruments.yaml` must be updated for each new instrument added to trading
+- Paper trading validation (5 trading days, Gate 4) is a prerequisite for Phase 4 go-live
+
+### Follow-up: PHASE4-FU-001 Live Quote Persistence
+
+`LiveQuotePoller` now writes live NSE quote snapshots to the prices DynamoDB table
+using `PK=QUOTE#{market}#{symbol}`, `SK=LATEST`. `RiskContextBuilder` reads this
+record and `SpreadGateValidator` can reject wide-spread NSE entries end to end.
+
+Important broker boundary: the poller is **NSE-only** because it is backed by
+Zerodha `kite.quote()`. US symbols must not be passed to `LiveQuotePoller`; US
+spread data remains stale-approved until an Alpaca-backed quote writer exists.
+
+---
+
+## ADR-015: Phase 8 — Production Hardening + Fault Tolerance
+
+**Date**: 2026-05-08
+**Status**: ✅ Accepted 2026-05-08 — defaults from §12 all confirmed
+**Reference**: `architecture/phase8_design_review.md` v1.0
+
+### Context
+
+Eight failure modes were identified during the Phase 7 post-review session. Each represents a
+path to financial loss, duplicate orders, or unprotected positions in a live trading environment.
+Phase 8 closes all eight before live capital is deployed.
+
+### Key Decisions
+
+**1. SQLite for durable local outbox (not DynamoDB)**
+
+When Kafka is unavailable, DynamoDB may also be degraded (same VPC, same AZ). SQLite is
+process-local with zero network dependency. The outbox is a short-lived buffer (minutes, not
+hours), so durability beyond the EC2 instance lifetime is not required.
+
+**2. Per-endpoint Zerodha rate budgets (not a separate cancel queue)**
+
+A separate cancel queue would require persistent state management across restarts. The
+endpoint budget model integrates with the existing token bucket, requiring only a config
+struct and branch logic in the rate limiter. The trade-off is coarser control, but the
+actual requirement (cancel cannot be starved during placement degradation) is fully met.
+
+**3. Outbox pattern over Kafka transactions for signal processing**
+
+MSK Serverless does not support exactly-once semantics (EOS) across all regions. The outbox
+pattern achieves the equivalent guarantee using at-least-once Kafka + DynamoDB conditional
+write deduplication — the same pattern already used for order idempotency throughout the
+system. Consistency over novelty.
+
+**4. Operator approval required to clear the reconciliation halt**
+
+The `reconciliation_required` flag in DynamoDB is set automatically but can only be cleared
+by a human operator running `scripts/ops/reconcile.py --clear`. Automation could clear the
+halt based on the wrong source of truth (e.g., DynamoDB reflects a failed order that the
+broker never received). Position drift after a live incident requires human judgment.
+
+**5. Orphan detector alerts; does not auto-flatten**
+
+An operator may have intentionally removed a protective SL (e.g., converting an intraday
+position to delivery by removing the stop). Auto-flattening on orphan detection would be
+worse than the intended outcome in that case. The alarm is mandatory; the action is human.
+
+**6. `data_quality` field uses `default=DataQuality.NORMAL`**
+
+This ensures zero breaking changes to all existing consumers. Services that don't yet read
+the field continue operating normally. The field is purely additive in schema v3.0.
+
+### Consequences
+
+- 2 new DynamoDB tables (`signal-inbox`, `signal-outbox`)
+- 3 new CloudWatch alarms (`RiskV1LagHigh`, `OrphanPositionDetected`, `ReconciliationHaltActive`)
+- 5 new shared modules (`local_outbox`, `endpoint_budgets`, `reconciliation/gate`, `signal_inbox`, `signal_outbox`)
+- 4 new execution_engine components (`orphan_detector`, `outbox_publisher`, `kafka_lag_watchdog`, reconciliation_validator)
+- 158+ new tests
+- No new Kafka topics, no schema version bump, no service boundary changes
+
+---
+
+## ADR-016: LiveCounters Shared In-Memory Singleton for Monitoring
+
+**Date**: 2026-05-25
+**Status**: Accepted
+
+### Context
+
+The paper trading monitoring report showed all UNKNOWN/zero values for service counters because `LiveCounters` was never populated by running services. `MonitoringStatusService` accepted an optional `live_counters` param but no component ever created or shared one.
+
+### Decision
+
+Create a single `LiveCounters()` instance in `ExecutionService.__init__()` and pass it by reference to `ExitOrderRouter`, `TradeExitEngine`, and `MISSquareOffManager`. A new background task `_monitoring_flush_loop()` serialises the instance to JSON every 60s via atomic `os.replace()`.
+
+### Rationale
+
+1. **No locks needed** — All three components run in the same asyncio event loop. Counter increments (`+= 1`) are safe without additional synchronisation; the GIL and single-threaded event loop guarantee no concurrent mutation from these components.
+2. **Flush over push** — The monitor reads a file; the service writes a file. No IPC, no sockets, no new Kafka topic. Simple, debuggable, crash-safe.
+3. **Atomic writes** — `open(path + ".tmp")` → `os.replace(tmp, final)` ensures the monitor never reads a partial JSON file during a write cycle.
+4. **Configurable path** — `QE_MONITORING_COUNTERS_PATH` env var allows CI/test environments to use a different output path without code changes.
+5. **Offline fallback** — When the execution service is not running, the monitor accepts any JSON stub via `--counters scripts/monitoring/sample_counters.json`.
+
+### Consequences
+
+- One new asyncio task (`execution-monitoring-flush`) added to `ExecutionService`'s 10-task `asyncio.gather`. Lightweight — one JSON serialisation + file write per 60s.
+- `LiveCounters` fields are all zero/False/None by default — a fresh instance shows "not yet run" rather than UNKNOWN, which is accurate when the service just started.
+- The flush loop does not crash the service on write failure — logs a warning and continues.
+- `paper_trading_monitor.py --counters /tmp/qe_live_counters.json` is the canonical local monitoring command when the execution service is live.
+
+---
+
+## ADR-017: LtpResolver — Shared LTP Lookup with Freshness Metadata
+
+**Date**: 2026-05-25
+**Status**: Accepted
+
+### Context
+
+Monitoring was showing entry fill price as LTP because `_parse_position()` read `last_price` from the DynamoDB positions table (set once at fill, never updated). `TradeExitEngine._read_price_from_table()` read the prices table but never validated the `captured_at` freshness field — stale prices from a prior session were used silently.
+
+### Decision
+
+Introduce `LtpResolver` in `services/shared/monitoring/ltp_resolver.py`. Priority chain:
+1. DynamoDB prices table (`QUOTE#NSE/{symbol}/LATEST`) — fresh when `captured_at` age ≤ `freshness_seconds` (default 5 s).
+2. Position fill price fallback — always `is_stale=True`, `source="position_fill"`.
+
+Returns `LtpResult(price, source, captured_at, age_seconds, is_stale)`. Shared by both `MonitoringStatusService` (via `_enrich_ltp()`) and `TradeExitEngine` (replaces `_read_price_from_table()`).
+
+Monitoring §5 now shows `LTP Source` and `LTP Age` columns. When `LiveQuotePoller` is offline, all positions show `fill` and a data-quality warning is emitted.
+
+### Rationale
+
+Single implementation of "read DynamoDB prices table + check freshness" — eliminates the two divergent stale-LTP bugs that existed before this ADR. The resolver is async and safe to call from both monitoring and TEE without duplication.
+
+### Consequences
+
+- `TEE_LTP_FRESHNESS_SECONDS` env var controls the freshness threshold (default 5 s).
+- Monitoring shows `live` / `stale` / `fill` / `—` in the LTP Source column per position.
+- When the poller is offline, P&L values are approximate; this is explicitly flagged.
+- `_read_price_from_table()` removed from TEE entirely.
+
+---
+
+## ADR-018: Live Trading Tightening — Lock Poisoning Fix, Stale-LTP Blocking, Preflight Gates
+
+**Date**: 2026-05-25
+**Status**: Accepted
+
+### Context
+
+Pre-live audit revealed four safety gaps:
+
+1. **Lock poisoning**: `ExitOrderRouter.route()` acquired the DynamoDB idempotency lock (`exit_order_id`) before calling `_route_live()`. If `_route_live()` returned `False` (live disabled, no broker, not implemented), the lock stayed permanently set — TEE could never retry, MIS square-off skips positions with `exit_order_id`, kill-switch flattening also blocked.
+2. **`live_trading_enabled` hardcoded**: `service.py` passed `live_trading_enabled=False` regardless of settings. The Phase 4 gate was permanently closed with no path to open it without a code change.
+3. **Stale LTP in LIVE mode**: `_get_last_price()` warned on stale LTP but still returned the price. In live mode this risks executing a stop-loss at a 30-second-old price.
+4. **Preflight `check_kill_switch()` queried wrong table/key**: Table was `{prefix}-kill-switch` (doesn't exist); key was `pk/sk` lowercase (wrong schema). Should be `{prefix}-risk-state` with `PK/SK` uppercase.
+
+### Decision
+
+**A. Pre-gate in `route()`**: Check `_live_enabled` BEFORE `_acquire_exit_lock()`. Returns `False` immediately if live is disabled — lock is never acquired, position remains retriable.
+
+**B. `_route_live()` implemented**: Calls `zerodha.place_order()` wrapped in `asyncio.wait_for(timeout=LIVE_EXIT_BROKER_TIMEOUT_S)`. On timeout: lock NOT released (order disposition unknown — operator must verify). On other exception: `_release_exit_lock()` called so TEE can retry.
+
+**C. `_release_exit_lock()`**: Conditional DynamoDB `REMOVE exit_order_id, exit_trigger` — only succeeds if `exit_order_id` matches the current request, preventing race with a concurrent winner.
+
+**D. `service.py` reads from settings**: `live_trading_enabled=getattr(self._settings.execution, "live_trading_enabled", False)`. Defaults to `False` (safe). Set `QE_EXECUTION_LIVE_TRADING_ENABLED=true` in the environment to unlock Phase 4.
+
+**E. TEE stale-LTP blocking in LIVE mode**: When `router.mode == "live"` and LTP age exceeds `TEE_MAX_STALE_LTP_LIVE_SECONDS` (default 3 s), `_get_last_price()` returns `None` instead of the stale price. TEE skips exit evaluation for that position. In PAPER mode: warns only (no monetary risk).
+
+**F. Preflight fixes**: `check_kill_switch()` corrected to `{prefix}-risk-state` / `PK=KILLSWITCH, SK=GLOBAL`. Two new checks added: `check_live_trading_gate()` (confirms explicit opt-in via env var) and `check_ltp_freshness_for_live()` (enforces `TEE_LTP_FRESHNESS_SECONDS ≤ 2.0` and `TEE_MAX_STALE_LTP_LIVE_SECONDS ≤ 3.0` when live is enabled).
+
+### Rationale
+
+- Lock poisoning was the most critical risk: a single failed live exit would have permanently frozen the position — no stop-loss, no MIS square-off, no kill switch.
+- Timeout handling is asymmetric by design: we release the lock on known-failed calls but NOT on timeout, because releasing on timeout could allow two simultaneous exit orders for the same position if the broker received the first one.
+- Stale-LTP blocking in LIVE mode is conservative — it is better to delay an exit by one poll interval than to execute at a price that is 10 seconds old during a fast-moving market.
+
+### Consequences
+
+- `LIVE_EXIT_BROKER_TIMEOUT_S` env var controls broker call timeout (default 15 s).
+- `TEE_MAX_STALE_LTP_LIVE_SECONDS` env var controls the LIVE-mode stale-LTP block threshold (default 3 s).
+- `QE_EXECUTION_LIVE_TRADING_ENABLED` must be explicitly set to `true` to unlock live broker orders.
+- Preflight check now correctly reads kill-switch state from the risk-state table.
+- Monitoring §6 shows `Stale LTP exit blocks` counter; §7 shows `Live exits placed` (successes).
+- `tee_stale_ltp_blocks` incremented in `LiveCounters` and flushed to monitoring JSON every 60 s.
