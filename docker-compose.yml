@@ -325,6 +325,9 @@ services:
     volumes:
       # universe_modes.yaml + exclusion_lists.yaml are resolved relative to /app/configs
       - ./configs:/app/configs:ro
+      # Expose LiveCounters JSON to the host so paper_trading_monitor.py can read it
+      # without docker exec. The flush loop writes /tmp/qe_live_counters.json every 60s.
+      - /tmp:/tmp
     ports:
       - "8084:8084"
     healthcheck:

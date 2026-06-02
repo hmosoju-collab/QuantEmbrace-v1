@@ -559,3 +559,68 @@ class TestOriginalBugRegression:
         short_syms = {p["symbol"] for p in result if p["close_side"] == "BUY"}
         assert len(long_syms)  == 6
         assert len(short_syms) == 9
+
+
+# ── paper close order path ────────────────────────────────────────────────────
+
+class TestPaperCloseOrder:
+    """Regression: paper close must call apply_fill_to_position with market_str=,
+    not market= (wrong kwarg causes TypeError at runtime).  Fixes the bug that
+    caused all 7 MIS close attempts to fail on 2026-06-02."""
+
+    def setup_method(self) -> None:
+        self.mgr = MISSquareOffManager(
+            zerodha_broker=MagicMock(),
+            order_manager=MagicMock(),
+            dynamo_client=MagicMock(),
+            positions_table="test-positions",
+            kill_switch_table="test-risk-state",
+            paper_trading=True,
+        )
+        self.mgr._order_manager.apply_fill_to_position = AsyncMock(return_value=True)
+
+    def _resolved(self, symbol: str, quantity: float, last_price: float = 150.0) -> dict:
+        return {
+            "symbol":          symbol,
+            "quantity":        quantity,
+            "effective_dir":   "LONG" if quantity > 0 else "SHORT",
+            "close_side":      "SELL" if quantity > 0 else "BUY",
+            "close_qty":       abs(quantity),
+            "avg_entry_price": last_price,
+            "last_price":      last_price,
+        }
+
+    @pytest.mark.asyncio
+    async def test_paper_long_close_calls_apply_fill_with_market_str(self) -> None:
+        pos = self._resolved("PRAKASH", quantity=340.0, last_price=147.16)
+        result = await self.mgr._place_mis_close_order(pos)
+        assert result is not None, "paper close must return an order_id on success"
+        call_kwargs = self.mgr._order_manager.apply_fill_to_position.call_args[1]
+        assert "market_str" in call_kwargs, "must use market_str= not market="
+        assert "market" not in call_kwargs or "market_str" in call_kwargs
+        assert call_kwargs["market_str"] == "NSE"
+        assert call_kwargs["symbol"] == "PRAKASH"
+
+    @pytest.mark.asyncio
+    async def test_paper_short_close_calls_apply_fill_with_market_str(self) -> None:
+        pos = self._resolved("TATASTEEL", quantity=-710.0, last_price=210.67)
+        result = await self.mgr._place_mis_close_order(pos)
+        assert result is not None
+        call_kwargs = self.mgr._order_manager.apply_fill_to_position.call_args[1]
+        assert call_kwargs["market_str"] == "NSE"
+        assert call_kwargs["filled_quantity"] == 710.0
+
+    @pytest.mark.asyncio
+    async def test_paper_close_returns_none_on_failure(self) -> None:
+        self.mgr._order_manager.apply_fill_to_position = AsyncMock(
+            side_effect=TypeError("unexpected keyword argument 'market'")
+        )
+        pos = self._resolved("SAMHI", quantity=-297.0)
+        result = await self.mgr._place_mis_close_order(pos)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_paper_close_does_not_call_broker_place_order(self) -> None:
+        pos = self._resolved("TI", quantity=-115.0)
+        await self.mgr._place_mis_close_order(pos)
+        self.mgr._zerodha.place_order.assert_not_called()

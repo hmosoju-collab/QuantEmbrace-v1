@@ -544,7 +544,7 @@ class MISSquareOffManager:
                     filled_quantity=close_qty,
                     avg_fill_price=fill_price,
                     last_price=fill_price,
-                    market="NSE",
+                    market_str="NSE",
                     order_id=order_id,
                     signal_id=f"mis-square-off-{symbol}",
                     risk_decision_id="mis-auto-close",
