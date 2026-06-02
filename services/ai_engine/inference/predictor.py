@@ -4,15 +4,16 @@ Runs model inference on extracted features and returns predictions
 with confidence scores. Orchestrates the feature pipeline and model registry.
 """
 
+from __future__ import annotations
+
+import numpy as np
 from typing import Any, Optional
 
-import structlog
+from ai_engine.features.feature_pipeline import FeaturePipeline
+from ai_engine.models.model_registry import ModelRegistry
+from shared.logging.logger import get_logger
 
-from services.ai_engine.features.feature_pipeline import FeaturePipeline
-from services.ai_engine.models.model_registry import ModelRegistry
-from services.shared.logging.logger import get_logger
-
-logger = get_logger(__name__)
+logger = get_logger(__name__, service_name="ai_engine")
 
 
 class Predictor:
@@ -86,12 +87,20 @@ class Predictor:
                 "features_used": [],
             }
 
-        # Run inference
-        # TODO: Replace with actual model.predict() call
-        # feature_vector = np.array([features[f] for f in metadata.features])
-        # raw_prediction = model.predict(feature_vector.reshape(1, -1))[0]
-        raw_prediction = 0.0  # Placeholder
-        confidence = 0.0  # Placeholder
+        # Run inference — use feature ordering from model metadata if available
+        ordered_keys = metadata.features if metadata.features else sorted(features.keys())
+        feature_vector = np.array(
+            [features.get(k, 0.0) for k in ordered_keys], dtype=np.float64
+        ).reshape(1, -1)
+
+        try:
+            raw_prediction = float(model.predict(feature_vector)[0])
+            proba = getattr(model, "predict_proba", None)
+            confidence = float(np.max(proba(feature_vector)[0])) if proba else 0.5
+        except Exception:
+            logger.exception("predictor.inference_error symbol=%s model=%s", symbol, model_name)
+            raw_prediction = 0.0
+            confidence = 0.0
 
         logger.info(
             "predictor.prediction_complete",

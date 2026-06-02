@@ -69,14 +69,32 @@ class StructuredJsonFormatter(logging.Formatter):
 
         # Include any extra fields passed via the `extra` kwarg
         standard_attrs = {
-            "name", "msg", "args", "created", "relativeCreated", "exc_info",
-            "exc_text", "stack_info", "lineno", "funcName", "pathname",
-            "filename", "module", "levelno", "levelname", "msecs",
-            "processName", "process", "threadName", "thread", "taskName",
+            "name",
+            "msg",
+            "args",
+            "created",
+            "relativeCreated",
+            "exc_info",
+            "exc_text",
+            "stack_info",
+            "lineno",
+            "funcName",
+            "pathname",
+            "filename",
+            "module",
+            "levelno",
+            "levelname",
+            "msecs",
+            "processName",
+            "process",
+            "threadName",
+            "thread",
+            "taskName",
             "message",
         }
         extras = {
-            k: v for k, v in record.__dict__.items()
+            k: v
+            for k, v in record.__dict__.items()
             if k not in standard_attrs and not k.startswith("_")
         }
         if extras:
@@ -85,11 +103,31 @@ class StructuredJsonFormatter(logging.Formatter):
         return json.dumps(log_entry, default=str, ensure_ascii=False)
 
 
+_LOGGING_KWARGS = {"exc_info", "extra", "stack_info", "stacklevel"}
+
+
+class StructuredLoggerAdapter(logging.LoggerAdapter):
+    """Logger adapter that accepts structured key=value fields."""
+
+    def process(self, msg: Any, kwargs: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        extra = dict(kwargs.pop("extra", {}) or {})
+        structured = {key: kwargs.pop(key) for key in list(kwargs) if key not in _LOGGING_KWARGS}
+        if structured:
+            extra.update(structured)
+        if extra:
+            kwargs["extra"] = extra
+        return msg, kwargs
+
+    def exception(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("exc_info", True)
+        self.error(msg, *args, **kwargs)
+
+
 def get_logger(
     name: str,
     service_name: str = "unknown",
     level: str = "INFO",
-) -> logging.Logger:
+) -> StructuredLoggerAdapter:
     """
     Create or retrieve a structured JSON logger.
 
@@ -99,13 +137,13 @@ def get_logger(
         level: Logging level string (DEBUG, INFO, WARNING, ERROR, CRITICAL).
 
     Returns:
-        Configured logging.Logger instance with JSON output to stdout.
+        Configured logger adapter with JSON output to stdout.
     """
     logger = logging.getLogger(name)
 
     # Avoid adding duplicate handlers if logger already configured
     if logger.handlers:
-        return logger
+        return StructuredLoggerAdapter(logger, {})
 
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.propagate = False
@@ -114,4 +152,4 @@ def get_logger(
     handler.setFormatter(StructuredJsonFormatter(service_name=service_name))
     logger.addHandler(handler)
 
-    return logger
+    return StructuredLoggerAdapter(logger, {})

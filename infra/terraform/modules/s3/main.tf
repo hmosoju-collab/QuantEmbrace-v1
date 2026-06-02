@@ -146,6 +146,28 @@ resource "aws_s3_bucket_lifecycle_configuration" "ohlcv_data" {
       storage_class = "GLACIER_IR"
     }
   }
+
+  # Phase 5: FeatureArchiver writes daily parquet files to features/{market}/{symbol}/{interval}/
+  # Consolidated here (moved from dynamodb/features.tf) to avoid dual lifecycle resources on the
+  # same bucket, which Terraform rejects.
+  # Standard → IA at 90d (infrequent access after backtesting window) → Glacier IR at 365d.
+  rule {
+    id     = "features-parquet-tiering"
+    status = "Enabled"
+
+    filter {
+      prefix = "features/"
+    }
+
+    transition {
+      days          = 90
+      storage_class = "STANDARD_IA"
+    }
+    transition {
+      days          = 365
+      storage_class = "GLACIER_IR"
+    }
+  }
 }
 
 # =============================================================================

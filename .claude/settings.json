@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/hooks/doc_update_reminder.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(docker exec *)",
+      "Bash(aws dynamodb *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); item=d.get\\('Item',{}\\); print\\('active:', item.get\\('active',{}\\).get\\('BOOL','?'\\)\\); print\\('status:', item.get\\('status',{}\\).get\\('S','?'\\)\\)\")",
+      "Bash(python3 scripts/zerodha_login.py)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('\\\\n'.join\\(d.get\\('TableNames',[]\\)\\)\\)\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['Item']['access_token']['S']\\)\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); t=d['Table']; print\\('Status:', t.get\\('TableStatus'\\)\\); print\\('GSI count:', len\\(t.get\\('GlobalSecondaryIndexes',[]\\)\\)\\)\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); item=d.get\\('Item',{}\\); print\\('Kill switch active:', item.get\\('active',{}\\).get\\('BOOL','?'\\)\\); print\\('Status:', item.get\\('status',{}\\).get\\('S','?'\\)\\)\")"
+    ]
+  }
+}

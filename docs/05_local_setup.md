@@ -1,541 +1,385 @@
 # QuantEmbrace — Local Setup Guide
 
-> **Who is this for?** Anyone setting up QuantEmbrace for the first time on their local machine. This guide starts from absolute zero.
-
----
-
-## Table of Contents
-
-1. [Prerequisites](#prerequisites)
-2. [Repository Setup](#repository-setup)
-3. [Environment Configuration](#environment-configuration)
-4. [Start Local Infrastructure](#start-local-infrastructure)
-5. [Running Individual Services](#running-individual-services)
-6. [Running the Full Stack](#running-the-full-stack)
-7. [Running Tests](#running-tests)
-8. [Running a Backtest](#running-a-backtest)
-9. [Common Setup Problems](#common-setup-problems)
-10. [Developer Workflow](#developer-workflow)
+> **Who is this for?** Anyone running QuantEmbrace for the first time on a local machine in paper-trading mode.
+> All signals default to `paper_trade=True`. No real broker credentials are required to start.
 
 ---
 
 ## Prerequisites
 
-Install these before starting:
+| Tool | Minimum version | Install |
+|------|----------------|---------|
+| Python | 3.11+ | [python.org](https://www.python.org/downloads/) |
+| Docker Desktop | 4.x | [docs.docker.com](https://docs.docker.com/get-docker/) |
+| Docker Compose | v2 (bundled with Docker Desktop) | bundled |
+| AWS CLI v2 | 2.x | [aws.amazon.com/cli](https://aws.amazon.com/cli/) |
+| Terraform | 1.5+ | [terraform.io](https://www.terraform.io/downloads) |
 
-### 1. Python 3.11+
-
-```bash
-# Check your Python version
-python --version   # Must be 3.11 or higher
-
-# macOS (via Homebrew)
-brew install python@3.11
-
-# Ubuntu/Debian
-sudo apt install python3.11 python3.11-venv
-
-# Windows: Download from python.org
-```
-
-### 2. Docker Desktop
-
-Required for running LocalStack (local AWS simulation) and all services together.
-
-- macOS/Windows: https://www.docker.com/products/docker-desktop/
-- Linux: https://docs.docker.com/engine/install/
-
-```bash
-docker --version   # Should print Docker version
-docker compose version  # Should print Docker Compose version
-```
-
-### 3. AWS CLI v2
-
-Even for local development, the AWS CLI is needed for interacting with LocalStack.
-
-```bash
-# macOS
-brew install awscli
-
-# Linux
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
-unzip awscliv2.zip && sudo ./aws/install
-
-# Verify
-aws --version
-```
-
-### 4. Terraform 1.5+
-
-For deploying to real AWS (not needed for local-only development):
-
-```bash
-# macOS
-brew tap hashicorp/tap
-brew install hashicorp/tap/terraform
-
-# Linux
-# Follow https://developer.hashicorp.com/terraform/install
-
-terraform --version
-```
-
-### 5. Broker API Credentials (for live data / paper trading)
-
-- **Zerodha Kite Connect:** Register at https://kite.trade and create an app. You'll get an API key and secret.
-- **Alpaca:** Sign up at https://alpaca.markets. The free account gives paper trading access. For live trading, complete KYC.
-
-**Important:** For local development, you can use paper trading credentials. Never use live trading credentials in a local dev environment.
+AWS CLI is only needed for infrastructure work (Terraform). Local paper trading uses LocalStack and does not require real AWS credentials.
 
 ---
 
-## Repository Setup
+## Table of Contents
+
+1. [Repository Setup](#1-repository-setup)
+2. [Environment Configuration](#2-environment-configuration)
+3. [Option A — Docker Compose (recommended)](#3-option-a--docker-compose-recommended)
+4. [Option B — Run Services Directly](#4-option-b--run-services-directly)
+5. [Running Tests](#5-running-tests)
+6. [Running a Backtest](#6-running-a-backtest)
+7. [Verifying Paper Trades](#7-verifying-paper-trades)
+8. [Common Problems](#8-common-problems)
+9. [Developer Workflow](#9-developer-workflow)
+
+---
+
+## 1. Repository Setup
 
 ```bash
-# 1. Clone the repository
+# Clone
 git clone <repo-url>
 cd "QuantEmbrace - A Hedge Level Algo Trading System"
 
-# 2. Create a Python virtual environment
-python3.11 -m venv .venv
+# Python virtual environment
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
-# 3. Activate the virtual environment
-# macOS / Linux:
-source .venv/bin/activate
-# Windows:
-.venv\Scripts\activate
-
-# You should see (.venv) in your terminal prompt now
-
-# 4. Install all dependencies
-pip install -r services/requirements.txt
-
-# 5. Verify installation
-python -c "import pydantic; print('OK')"
+# Install dependencies
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 ---
 
-## Environment Configuration
-
-### Create your .env file
+## 2. Environment Configuration
 
 ```bash
-# Copy the template
 cp .env.example .env
-
-# Open in your editor
-nano .env  # or: code .env, vim .env, etc.
 ```
 
-### Fill in these values
+Edit `.env`. The minimum fields for local paper trading:
 
-```bash
-# ─── BROKER: ZERODHA (NSE India) ───────────────────────────────────────────
-KITE_API_KEY=your_kite_api_key_here
-KITE_API_SECRET=your_kite_api_secret_here
-KITE_ACCESS_TOKEN=                   # Leave blank — set at runtime after login
+| Variable | Value for local dev | Notes |
+|----------|--------------------|----|
+| `QE_ENVIRONMENT` | `development` | Already set in template |
+| `KAFKA_BOOTSTRAP_SERVERS` | *(leave empty)* | docker-compose overrides to `redpanda:9092` |
+| `KAFKA_USE_IAM` | `false` | Local Redpanda uses PLAINTEXT, not MSK IAM |
+| `RISK_PROFILE` | `paper` | Already set in template |
+| `ZERODHA_API_KEY` | *(optional for paper)* | Only needed for live signals |
+| `ALPACA_API_KEY` | *(optional for paper)* | Only needed for live signals |
 
-# ─── BROKER: ALPACA (US Equities) ──────────────────────────────────────────
-ALPACA_API_KEY=your_alpaca_api_key_here
-ALPACA_API_SECRET=your_alpaca_api_secret_here
-ALPACA_BASE_URL=https://paper-api.alpaca.markets   # Use paper for development
-
-# ─── AWS (use fake values for LocalStack, real values for prod) ────────────
-AWS_REGION=ap-south-1
-AWS_ACCESS_KEY_ID=test               # LocalStack accepts any value
-AWS_SECRET_ACCESS_KEY=test           # LocalStack accepts any value
-
-# ─── APPLICATION CONFIG ─────────────────────────────────────────────────────
-ENVIRONMENT=dev
-LOG_LEVEL=DEBUG
-DYNAMODB_TABLE_PREFIX=qe-dev
-S3_BUCKET_DATA=quantembrace-market-data-history
-S3_BUCKET_LOGS=quantembrace-trading-logs
-
-# ─── SQS QUEUES (LocalStack URLs for local dev) ────────────────────────────
-SQS_MARKET_DATA_QUEUE_URL=http://localhost:4566/000000000000/qe-dev-market-data
-SQS_SIGNALS_QUEUE_URL=http://localhost:4566/000000000000/qe-dev-signals.fifo
-SQS_ORDERS_QUEUE_URL=http://localhost:4566/000000000000/qe-dev-orders.fifo
-
-# ─── RISK PARAMETERS ────────────────────────────────────────────────────────
-PORTFOLIO_VALUE=1000000              # 10 lakh INR or $10,000 USD (adjust to your capital)
-MAX_POSITION_SIZE_PCT=5.0
-MAX_TOTAL_EXPOSURE_PCT=80.0
-MAX_DAILY_LOSS_PCT=3.0
-```
+> **Note:** For pure paper trading, broker credentials are not required. The execution engine routes paper signals to the built-in simulator, which never calls Zerodha or Alpaca.
 
 ---
 
-## Start Local Infrastructure
+## 3. Option A — Docker Compose (recommended)
 
-LocalStack simulates AWS services (SQS, DynamoDB, S3) on your local machine. This means you can develop and test without any AWS costs.
+This starts LocalStack (DynamoDB + S3), Redpanda (Kafka), and all 5 trading services.
 
-### Start LocalStack and DynamoDB Local
-
-```bash
-# From the project root
-docker compose up -d localstack dynamodb-local
-
-# Wait ~10 seconds for services to initialize, then verify:
-curl http://localhost:4566/_localstack/health
-# Should see: {"services": {"s3": "running", "sqs": "running", ...}}
-```
-
-### Create required tables and queues
+### First-time setup
 
 ```bash
-# Run the setup script to create all DynamoDB tables and SQS queues locally
-python scripts/setup_local_tables.py
+# Start infrastructure only
+docker-compose up -d localstack redpanda
 
-# Expected output:
-# ✓ Created DynamoDB table: qe-dev-latest-prices
-# ✓ Created DynamoDB table: qe-dev-positions
-# ✓ Created DynamoDB table: qe-dev-orders
-# ✓ Created DynamoDB table: qe-dev-risk-state
-# ✓ Created SQS queue: qe-dev-market-data
-# ✓ Created SQS FIFO queue: qe-dev-signals.fifo
-# ✓ Created SQS FIFO queue: qe-dev-orders.fifo
-# ✓ Created S3 bucket: quantembrace-market-data-history
-# ✓ Created S3 bucket: quantembrace-trading-logs
-# Setup complete!
+# Wait ~20s for health checks, then create tables and Kafka topics
+# This also: seeds paper NAV at ₹10L and strategy configs (max_signals=0 per strategy)
+docker-compose run --rm setup
+
+# Run pre-flight check before starting services
+python scripts/deploy/paper_preflight_check.py  # must exit 0
+
+# Start all trading services
+docker-compose up -d
 ```
+
+> **Important (2026-05-27):** After any `docker-compose down -v`, you must re-run `setup` before starting services. The setup job seeds:
+> - Paper NAV: ₹10,00,000 (aligned with `risk_limits_production.yaml`)
+> - Strategy configs: all 6 strategies with `max_signals_per_day=0` (unlimited), `paper_trade=True`
+> 
+> Without this, risk engine uses a ₹50L NAV default (5× mismatch) and strategies are silently capped at 10 signals/day each.
+
+### Subsequent starts
+
+```bash
+docker-compose up -d
+```
+
+### View logs
+
+```bash
+docker-compose logs -f                     # all services
+docker-compose logs -f risk_engine         # single service
+```
+
+### Stop
+
+```bash
+docker-compose down                        # keep volumes
+docker-compose down -v                     # also wipe LocalStack + Redpanda data
+```
+
+### Service health endpoints
+
+| Service | Port | URL |
+|---------|------|-----|
+| Redpanda Console (topic browser) | 8080 | http://localhost:8080 |
+| data_ingestion | 8081 | http://localhost:8081/health |
+| strategy_engine | 8082 | http://localhost:8082/health |
+| risk_engine | 8083 | http://localhost:8083/health |
+| execution_engine | 8084 | http://localhost:8084/health |
+| ai_engine | 8085 | http://localhost:8085/health |
+| LocalStack | 4566 | http://localhost:4566/_localstack/health |
+| Redpanda Kafka | 19092 | `localhost:19092` (Kafka protocol) |
 
 ---
 
-## Running Individual Services
+## 4. Option B — Run Services Directly
 
-You can run each service individually for focused development:
+Use this when iterating quickly on a single service without rebuilding Docker images.
+
+### Start infrastructure
 
 ```bash
-# Activate virtual environment first
-source .venv/bin/activate
-
-# Load environment variables
-export $(cat .env | xargs)
-
-# Run a specific service
-python -m services.data_ingestion.main
-python -m services.strategy_engine.main
-python -m services.risk_engine.main
-python -m services.execution_engine.main
-python -m services.ai_engine.main
+docker-compose up -d localstack redpanda
+docker-compose run --rm setup
 ```
 
-### What you'll see when each service starts
+### Set local environment
 
-**data_ingestion:**
-```
-INFO  Starting Data Ingestion Service
-INFO  Connecting to Zerodha Kite Ticker...
-INFO  WebSocket connected — subscribing to 5 instruments
-INFO  Connecting to Alpaca WebSocket...
-INFO  WebSocket connected — subscribing to 5 symbols
-INFO  Data Ingestion Service started
+```bash
+export KAFKA_BOOTSTRAP_SERVERS=localhost:19092
+export KAFKA_USE_IAM=false
+export AWS_ENDPOINT_URL=http://localhost:4566
+export AWS_DEFAULT_REGION=ap-south-1
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export DYNAMODB_TABLE_PREFIX=quantembrace-development
+export QE_ENVIRONMENT=development
+export RISK_PROFILE=paper
+export PYTHONPATH=$(pwd)/services
 ```
 
-**risk_engine:**
+### Run individual services
+
+```bash
+python -m data_ingestion.service
+python -m strategy_engine.service
+python -m risk_engine.service
+python -m execution_engine.service
+python -m ai_engine.service
 ```
-INFO  Starting Risk Engine Service
-INFO  Loading kill switch state from DynamoDB...
-INFO  Kill switch state: active=False
-INFO  Risk Engine Service started
-```
+
+Each service reads `.env` via pydantic-settings. The `PYTHONPATH` above makes `services/` importable without package installation.
 
 ---
 
-## Running the Full Stack
-
-To run all services together:
+## 5. Running Tests
 
 ```bash
-# This starts all services + local infrastructure
-docker compose up
-
-# To run in background
-docker compose up -d
-
-# View logs for a specific service
-docker compose logs -f risk_engine
-docker compose logs -f strategy_engine
-
-# Stop everything
-docker compose down
-```
-
-### Service Health Check
-
-After starting, verify all services are healthy:
-
-```bash
-# Check ECS task status (local simulation)
-docker compose ps
-
-# Should show all services as "Up":
-# NAME                STATUS
-# data_ingestion_nse  Up
-# data_ingestion_us   Up
-# strategy_engine     Up
-# risk_engine         Up
-# execution_engine    Up
-# localstack          Up
-# dynamodb_local      Up
-```
-
----
-
-## Running Tests
-
-### Run all unit tests
-
-```bash
-cd "QuantEmbrace - A Hedge Level Algo Trading System"
-source .venv/bin/activate
-
+# Unit tests (no Docker required)
 pytest tests/unit/ -v
-```
 
-### Run tests for a specific service
+# Unit tests with coverage
+pytest tests/unit/ --cov=services --cov-report=term-missing
 
-```bash
-pytest tests/unit/risk_engine/ -v
-pytest tests/unit/strategy_engine/ -v
-pytest tests/unit/execution_engine/ -v
-```
-
-### Run integration tests (requires LocalStack running)
-
-```bash
-# Start LocalStack first
-docker compose up -d localstack dynamodb-local
-python scripts/setup_local_tables.py
-
-# Run integration tests
+# Integration tests (require LocalStack + Redpanda running)
+docker-compose up -d localstack redpanda
+docker-compose run --rm setup
 pytest tests/integration/ -v
 ```
 
-### Run with coverage report
+---
+
+## 6. Running a Backtest
 
 ```bash
-pytest tests/unit/ --cov=services --cov-report=html
-open htmlcov/index.html  # View coverage in browser
+# Download historical data (NSE example)
+python scripts/backtest/fetch_historical.py \
+  --symbol RELIANCE \
+  --from 2025-01-01 \
+  --to 2025-12-31
+
+# Run a backtest
+python scripts/backtest/run_backtest.py \
+  --strategy momentum \
+  --config configs/backtest_momentum.yaml
 ```
 
-**Minimum coverage target:** 85% for core trading logic (risk, execution, order management).
+Backtest artifacts are written to `S3` (LocalStack in dev) under the `quantembrace-development-data` bucket.
 
-### Running property-based tests (hypothesis)
+---
 
-The risk engine uses hypothesis for property-based testing — it generates thousands of random inputs to find edge cases:
+## 7. Verifying Paper Trades
+
+Paper trades are processed through the full signal pipeline with `paper_trade=True` stamped on each signal. They produce real DynamoDB order records and Kafka `orders.events` messages — only the broker call is simulated.
 
 ```bash
-pytest tests/unit/risk_engine/ -v -k "hypothesis"
-# This may take 30–60 seconds — hypothesis runs many iterations
+# List paper orders in DynamoDB (LocalStack)
+aws --endpoint-url=http://localhost:4566 dynamodb scan \
+  --table-name quantembrace-development-orders \
+  --filter-expression "attribute_exists(paper_trade)"
+
+# Watch live Kafka signals
+docker run --rm --network host \
+  redpandadata/redpanda:v24.1.1 \
+  rpk topic consume signals.approved --brokers localhost:19092
+
+# Check risk engine decisions in S3
+aws --endpoint-url=http://localhost:4566 s3 ls \
+  s3://quantembrace-development-logs/risk/
 ```
 
 ---
 
-## Running a Backtest
+## 8. Common Problems
 
-Backtesting lets you test a strategy against historical data without risking real money.
-
-### Step 1: Download historical data
-
-```bash
-# Download 1 year of RELIANCE tick data
-python scripts/data_download/fetch_historical.py \
-    --symbol RELIANCE \
-    --market NSE \
-    --from 2025-01-01 \
-    --to 2025-12-31
-
-# Download US equity data
-python scripts/data_download/fetch_historical.py \
-    --symbol AAPL \
-    --market US \
-    --from 2025-01-01 \
-    --to 2025-12-31
-
-# Data is saved to: s3://quantembrace-market-data-history/ (or local cache)
-```
-
-### Step 2: Run the backtest
-
-```bash
-python scripts/backtest/run.py \
-    --strategy momentum \
-    --config configs/backtest_momentum.yaml \
-    --from 2025-01-01 \
-    --to 2025-12-31
-
-# With specific symbols:
-python scripts/backtest/run.py \
-    --strategy momentum \
-    --symbols RELIANCE,TCS,INFY \
-    --market NSE \
-    --from 2025-06-01 \
-    --to 2025-12-31
-```
-
-### Step 3: Interpret results
+### `KAFKA_BOOTSTRAP_SERVERS` not set
 
 ```
-Backtest Results: MomentumStrategy (NSE, 2025-01-01 to 2025-12-31)
-═══════════════════════════════════════════════════════════════════
-Capital:          ₹10,00,000
-Final Value:      ₹11,43,250
-Total Return:     +14.3%
-Sharpe Ratio:     1.42            ← Above 1.0 is generally good
-Max Drawdown:     -6.8%           ← Worst peak-to-trough decline
-Win Rate:         54.2%           ← 54% of trades were profitable
-Total Trades:     187
-Avg Trade P&L:    ₹765
-Avg Hold Time:    2h 14m
-═══════════════════════════════════════════════════════════════════
+ERROR: KAFKA_BOOTSTRAP_SERVERS is required
 ```
 
-**Note:** Past backtest performance does not guarantee future results. Backtesting has survivorship bias and look-ahead bias risks. Always paper trade before going live.
+**Fix:** Set `KAFKA_BOOTSTRAP_SERVERS=localhost:19092` (Option B) or use docker-compose (overrides automatically).
 
 ---
 
-## Common Setup Problems
-
-### Problem: `LocalStack not ready` when running setup script
+### LocalStack DynamoDB table not found
 
 ```
-Error: Connection refused to localhost:4566
+ResourceNotFoundException: Requested resource not found
 ```
 
-**Fix:** LocalStack takes ~15 seconds to start. Wait and retry.
+**Fix:** Run setup: `docker-compose run --rm setup`
+
+---
+
+### Redpanda health check fails on first `docker-compose up`
+
+The Redpanda `rpk cluster health` check takes ~20s on first start. Run:
+
 ```bash
-sleep 15 && python scripts/setup_local_tables.py
-```
-
-### Problem: `ModuleNotFoundError: No module named 'kiteconnect'`
-
-```
-ModuleNotFoundError: No module named 'kiteconnect'
-```
-
-**Fix:** Virtual environment not activated, or requirements not installed.
-```bash
-source .venv/bin/activate
-pip install -r services/requirements.txt
-```
-
-### Problem: Zerodha authentication fails
-
-```
-Error: Invalid API key or access token
-```
-
-**Fix:** Zerodha access tokens expire daily. Generate a fresh one:
-```bash
-python scripts/zerodha_login.py  # Opens browser for login, saves token to .env
-```
-
-### Problem: DynamoDB errors with `ResourceNotFoundException`
-
-```
-botocore.errorfactory.ResourceNotFoundException: Requested resource not found
-```
-
-**Fix:** Tables not created yet. Run setup:
-```bash
-python scripts/setup_local_tables.py
-```
-
-### Problem: Tests failing with import errors
-
-```
-ImportError: attempted relative import beyond top-level package
-```
-
-**Fix:** Run tests from the project root, not from a subdirectory:
-```bash
-# ❌ Wrong
-cd services/risk_engine && pytest
-
-# ✅ Correct
-cd "QuantEmbrace - A Hedge Level Algo Trading System"
-pytest tests/
-```
-
-### Problem: `Port already in use` for LocalStack
-
-```
-Error: port 4566 is already allocated
-```
-
-**Fix:** Another LocalStack instance is running. Stop it:
-```bash
-docker compose down
-docker ps  # Check for any lingering containers
-docker stop $(docker ps -q)  # Stop all containers if needed
-docker compose up -d localstack
+docker-compose up -d redpanda
+docker-compose ps redpanda    # wait until status is "healthy"
 ```
 
 ---
 
-## Developer Workflow
+### `ssl.SSLError` or `SASL_SSL` connection refused to Redpanda
 
-A typical development session:
+Local Redpanda uses PLAINTEXT. Ensure `KAFKA_USE_IAM=false` is set. The MSK IAM path (`SASL_SSL`) is for production MSK Serverless only.
 
-```bash
-# 1. Start a new feature branch
-git checkout main && git pull
-git checkout -b feature/TICK-123-add-mean-reversion-strategy
+---
 
-# 2. Start local infrastructure
-docker compose up -d localstack dynamodb-local
-python scripts/setup_local_tables.py
+### Port conflicts
 
-# 3. Activate virtual environment
-source .venv/bin/activate
+If ports 8080–8085 or 4566 are in use, override in `docker-compose.override.yml`:
 
-# 4. Make your changes
-
-# 5. Run type checking
-mypy services/strategy_engine/
-
-# 6. Run linting and formatting
-ruff check services/
-black services/ --line-length 100
-
-# 7. Run unit tests for the service you changed
-pytest tests/unit/strategy_engine/ -v
-
-# 8. Run integration tests
-pytest tests/integration/strategy_engine/ -v
-
-# 9. If you changed a strategy, run a backtest
-python scripts/backtest/run.py --strategy your_strategy --from 2025-01-01 --to 2025-12-31
-
-# 10. Commit and push
-git add -A
-git commit -m "feat: add mean reversion strategy with z-score signals"
-git push origin feature/TICK-123-add-mean-reversion-strategy
-
-# 11. Open a Pull Request on GitHub
-# PRs for trading logic require TWO reviewers
-```
-
-### Code Quality Checks (must pass before merging)
-
-```bash
-# Formatter (auto-fixes)
-black services/ tests/ --line-length 100
-
-# Linter (must have zero errors)
-ruff check services/ tests/
-
-# Type checker
-mypy services/ --strict
-
-# Test coverage (must be ≥ 85% for trading logic)
-pytest tests/unit/ --cov=services --cov-fail-under=85
+```yaml
+services:
+  localstack:
+    ports:
+      - "4567:4566"
 ```
 
 ---
 
-*Last updated: 2026-04-24 | Update this document whenever: new prerequisites are needed, the setup script changes, new environment variables are required, or the development workflow changes.*
+## 9. Developer Workflow
+
+### Adding a new strategy
+
+1. Create `services/strategy_engine/strategies/<name>.py` implementing the `BaseStrategy` protocol.
+2. Register it in `services/strategy_engine/registry.py`.
+3. Add a DynamoDB entry in `quantembrace-development-strategy-config` with `paper_trade=True`.
+4. Restart `strategy_engine`: `docker-compose restart strategy_engine`.
+
+### Promoting a paper signal to live
+
+1. Complete 5 consecutive profitable paper-trading days.
+2. Update the strategy config in DynamoDB: set `paper_trade=False`.
+3. Ensure `configs/risk_limits_production.yaml` checklist items are all `true`.
+4. Run `python scripts/deploy/preflight_check.py` — must produce zero warnings.
+
+### Kafka topic inspection
+
+```bash
+# List topics
+docker run --rm --network host redpandadata/redpanda:v24.1.1 \
+  rpk topic list --brokers localhost:19092
+
+# Tail a topic
+docker run --rm --network host redpandadata/redpanda:v24.1.1 \
+  rpk topic consume ticks.nse --brokers localhost:19092 --num 10
+```
+
+Or open the Redpanda Console at http://localhost:8080 for a visual topic browser.
+
+---
+
+## Architecture Reference
+
+| Layer | Service | Kafka topics |
+|-------|---------|--------------|
+| Data Ingestion | `data_ingestion` | → `ticks.nse`, `ticks.us` |
+| Strategy | `strategy_engine` | `ticks.*` → `signals.pending` |
+| AI Enrichment | `ai_engine` | `signals.pending` → `signals.enriched` |
+| Risk | `risk_engine` | `signals.enriched` → `signals.approved` |
+| Execution | `execution_engine` | `signals.approved` → `orders.events` |
+
+For full architecture details: [architecture/system_design.md](../architecture/system_design.md)
+
+Compute: EC2 ARM64 ASGs (c6g/t4g) — one ASG per service.
+Messaging: Kafka MSK Serverless, port 9098, SASL/OAUTHBEARER IAM auth.
+State: DynamoDB (orders, positions, sessions, risk state).
+Storage: S3 (raw ticks, execution logs, backtest artifacts, ML model artifacts).
+
+---
+
+## 10. Paper Trading Monitor
+
+The paper trading monitor produces the 15-section monitoring report without connecting to a running service. It reads counters from a JSON file written by the execution engine and queries DynamoDB for position/risk state.
+
+### Quick start — services not running (offline mode)
+
+```bash
+# Seed LocalStack with sample positions
+python scripts/monitoring/seed_local_positions.py
+
+# Run the monitor using the sample counters stub
+python scripts/monitoring/paper_trading_monitor.py \
+  --counters scripts/monitoring/sample_counters.json
+```
+
+### Quick start — services running
+
+```bash
+# Run the monitor using live counters from execution engine
+python scripts/monitoring/paper_trading_monitor.py \
+  --counters /tmp/qe_live_counters.json
+
+# Watch mode: auto-refresh every 60 seconds
+python scripts/monitoring/paper_trading_monitor.py \
+  --counters /tmp/qe_live_counters.json --watch 60
+```
+
+The execution engine writes `LiveCounters` JSON to `/tmp/qe_live_counters.json` (configurable via `QE_MONITORING_COUNTERS_PATH`) every 60 seconds. If this file doesn't exist, all service-side counters show as `UNKNOWN` in the report.
+
+### Seeder options
+
+```bash
+# Seed default 4 positions (RELIANCE, INFY, HDFCBANK, TCS)
+python scripts/monitoring/seed_local_positions.py
+
+# Wipe and re-seed (clean slate)
+python scripts/monitoring/seed_local_positions.py --reset
+```
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `scripts/monitoring/paper_trading_monitor.py` | CLI runner — 15-section monitoring report |
+| `scripts/monitoring/seed_local_positions.py` | Seed LocalStack with sample positions for offline testing |
+| `scripts/monitoring/sample_counters.json` | Static `LiveCounters` stub (no services required) |
+| `services/shared/monitoring/monitoring_status.py` | Core monitoring service and renderer |
+| `docs/operations/monitoring-status-template.md` | Full template specification |

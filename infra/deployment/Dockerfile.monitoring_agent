@@ -1,0 +1,57 @@
+# QuantEmbrace — Monitoring Agent (Phase 1, read-only)
+# =====================================================================================
+# Dedicated image for services/monitoring_agent. Kept separate from the shared service
+# Dockerfile because the agent needs ONE extra dependency (the Docker SDK) and a smaller,
+# clearer surface. It is a sibling observer of the trading fleet — it probes HTTP health
+# endpoints, reads Kafka metadata/offsets, and DescribeTable's DynamoDB. It NEVER writes
+# to the trading platform (Phase 1 is strictly read-only / notify-only).
+#
+# Build:  docker build -f infra/deployment/Dockerfile.monitoring_agent -t quantembrace-monitoring-agent .
+# Run:    docker run --rm quantembrace-monitoring-agent            # long-running poll loop
+#         docker run --rm quantembrace-monitoring-agent --once     # single cycle then exit
+
+# Stage 1: Dependencies ----------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+# Platform deps (boto3, confluent-kafka, PyYAML, ...) + the agent's only extra (docker SDK).
+COPY services/requirements.txt ./requirements.txt
+COPY services/monitoring_agent/requirements.txt ./requirements-agent.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt \
+ && pip install --no-cache-dir --prefix=/install -r requirements-agent.txt
+
+# Stage 2: Runtime ---------------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+# Imports are rooted at /app/services (e.g. ``monitoring_agent.app``, ``shared.health``).
+ENV PYTHONPATH=/app:/app/services \
+    PYTHONUNBUFFERED=1 \
+    QE_HEALTH_CHECK_PORT=8086 \
+    HEALTH_CHECK_PORT=8086 \
+    MONITORING_DRY_RUN=true \
+    MONITORING_ACTION_MODE=notify_only
+
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+
+# Copy the full service tree: the agent imports sibling shared modules
+# (shared.health, shared.aws.clients, shared.kafka.config, MarketPhaseGovernor).
+COPY services/ /app/services/
+
+# Agent-owned observability artifacts (snapshot + incident log) live here.
+# Created before dropping privileges so the non-root user can write them.
+RUN mkdir -p /app/data \
+ && useradd -m -r appuser \
+ && chown -R appuser /app
+USER appuser
+
+# Health/readiness server (HealthServer binds this port inside the poll loop).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python -c "import os, urllib.request; urllib.request.urlopen(f\"http://localhost:{os.environ.get('HEALTH_CHECK_PORT', '8086')}/health\")" || exit 1
+
+EXPOSE 8086
+
+# Long-running read-only poll loop. Override with ["--once"] for a single cycle.
+ENTRYPOINT ["python", "-m", "monitoring_agent.app"]

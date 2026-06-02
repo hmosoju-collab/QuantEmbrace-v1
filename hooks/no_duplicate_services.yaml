@@ -50,4 +50,4 @@ on_violation:
   - message: |
       Service boundary violation detected. Each service owns a single
       domain. If you need cross-service data, use the defined interfaces
-      (SQS queues, shared DynamoDB tables, HTTP APIs).
+      Kafka topics or shared DynamoDB tables. SQS is not an option — it is banned by ruff TID251.

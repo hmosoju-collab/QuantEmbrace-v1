@@ -27,6 +27,20 @@ class NormalizedTick:
 
     All connectors must convert their native tick format into this structure
     before passing to the tick processor.
+
+    ``gap_detected``:
+        Set to True on the first ``RECONNECT_GAP_TICKS`` ticks received after
+        a WebSocket reconnection. A gap means the connector was down for some
+        period and indicator windows (moving averages, RSI, ATR, etc.) are now
+        computed on incomplete data — the gap tick injected a price jump or
+        flatline into the window.
+
+        The strategy engine checks this flag and skips signal generation for
+        any instrument whose tick buffer is still warming up after a reconnect.
+        This prevents spurious momentum signals fired on a stale-window artifact.
+
+        Downstream consumers that do not care about gaps can safely ignore this
+        field (default False = normal tick).
     """
     symbol: str
     market: Market
@@ -37,6 +51,14 @@ class NormalizedTick:
     timestamp: datetime
     broker: str
     raw: dict[str, Any] = field(default_factory=dict)
+    gap_detected: bool = False  # True on first N ticks after a WebSocket reconnect
+
+
+# Number of ticks per symbol to quarantine after a WebSocket reconnect.
+# During this warm-up period, gap_detected=True and strategy signal generation
+# is suppressed. 20 ticks at NSE tick rate (~1-5/s per instrument) = 4–20s.
+# Configurable via RECONNECT_GAP_TICKS env var in connector implementations.
+RECONNECT_GAP_TICKS: int = 20
 
 
 # Type alias for the tick callback

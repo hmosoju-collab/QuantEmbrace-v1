@@ -31,6 +31,7 @@ from data_ingestion.connectors.base import (
     BaseConnector,
     Market,
     NormalizedTick,
+    RECONNECT_GAP_TICKS,
     TickCallback,
 )
 
@@ -47,9 +48,46 @@ except ImportError:
     Trade = None            # type: ignore[assignment,misc]
     Quote = None            # type: ignore[assignment,misc]
 
-# Default data feed — override via ALPACA_DATA_FEED env var
+# Data feed selection — ALPACA_DATA_FEED env var is REQUIRED in production.
+#
+# "iex"  — free feed, ~15 minutes delayed during regular hours.
+#           NEVER use in production: signals generated from 15-min-old prices
+#           will systematically lose to adverse selection.
+# "sip"  — paid consolidated tape, real-time.
+#           Required for any live trading.
+#
+# If ALPACA_DATA_FEED is unset:
+#   - ENVIRONMENT=production  → hard error at startup (no delayed data in prod)
+#   - any other environment   → defaults to "iex" with a loud warning
 import os as _os
-_DEFAULT_FEED: str = _os.environ.get("ALPACA_DATA_FEED", "iex")
+
+_ENV = _os.environ.get("ENVIRONMENT", "development").lower()
+_FEED_FROM_ENV: str | None = _os.environ.get("ALPACA_DATA_FEED")
+
+if _FEED_FROM_ENV is None:
+    if _ENV == "production":
+        raise EnvironmentError(
+            "ALPACA_DATA_FEED is not set and ENVIRONMENT=production. "
+            "Set ALPACA_DATA_FEED=sip for real-time data or "
+            "ALPACA_DATA_FEED=iex explicitly if you accept delayed data. "
+            "Trading live with 15-minute-delayed prices is not permitted."
+        )
+    else:
+        import warnings as _warnings
+        _warnings.warn(
+            "ALPACA_DATA_FEED is not set — defaulting to 'iex' (15-min delayed). "
+            "Set ALPACA_DATA_FEED=sip for real-time data before going live.",
+            stacklevel=2,
+        )
+        _DEFAULT_FEED = "iex"
+else:
+    _DEFAULT_FEED = _FEED_FROM_ENV
+
+if _DEFAULT_FEED == "iex" and _ENV == "production":
+    raise EnvironmentError(
+        "ALPACA_DATA_FEED=iex is set but ENVIRONMENT=production. "
+        "IEX feed has a 15-minute delay. Use ALPACA_DATA_FEED=sip for live trading."
+    )
 
 
 class AlpacaConnector(BaseConnector):
@@ -101,6 +139,15 @@ class AlpacaConnector(BaseConnector):
         self._data_feed = data_feed
         self._stream: Any = None
         self._stream_task: Optional[asyncio.Task[None]] = None
+
+        # ── Gap-detection state ───────────────────────────────────────────────
+        # alpaca-py handles reconnection internally (no explicit callback).
+        # We arm a warm-up counter for every subscribed symbol when the stream
+        # (re)starts.  _run_stream() calls _arm_gap_counters() after each
+        # unexpected stream restart so the strategy engine suppresses stale-
+        # window signals for the first RECONNECT_GAP_TICKS ticks per symbol.
+        self._reconnect_count: int = 0
+        self._gap_ticks_remaining: dict[str, int] = {}  # symbol -> ticks remaining
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -204,6 +251,10 @@ class AlpacaConnector(BaseConnector):
 
         logger.info("Subscribed to Alpaca trades+quotes for: %s", symbols)
 
+        # Arm gap counters for all newly subscribed symbols so the strategy
+        # engine suppresses stale-window signals during initial warm-up.
+        self._arm_gap_counters(symbols)
+
         # Start the WebSocket stream as a background task (if not already running)
         if self._stream_task is None or self._stream_task.done():
             self._stream_task = asyncio.create_task(
@@ -267,8 +318,11 @@ class AlpacaConnector(BaseConnector):
         price = float(getattr(trade, "price", 0.0))
         ts = self._ensure_utc(getattr(trade, "timestamp", None))
 
+        symbol = getattr(trade, "symbol", "UNKNOWN")
+        gap = self._consume_gap_tick(symbol)
+
         return NormalizedTick(
-            symbol=getattr(trade, "symbol", "UNKNOWN"),
+            symbol=symbol,
             market=Market.US,
             last_price=price,
             bid=price,    # bid/ask unknown for a trade event; use price
@@ -277,6 +331,7 @@ class AlpacaConnector(BaseConnector):
             timestamp=ts,
             broker="alpaca",
             raw=self._to_dict(trade),
+            gap_detected=gap,
         )
 
     def _normalize_quote(self, quote: Any) -> NormalizedTick:
@@ -303,8 +358,11 @@ class AlpacaConnector(BaseConnector):
         size = int(getattr(quote, "bid_size", 0))
         ts = self._ensure_utc(getattr(quote, "timestamp", None))
 
+        symbol = getattr(quote, "symbol", "UNKNOWN")
+        gap = self._consume_gap_tick(symbol)
+
         return NormalizedTick(
-            symbol=getattr(quote, "symbol", "UNKNOWN"),
+            symbol=symbol,
             market=Market.US,
             last_price=mid,
             bid=bid,
@@ -313,6 +371,7 @@ class AlpacaConnector(BaseConnector):
             timestamp=ts,
             broker="alpaca",
             raw=self._to_dict(quote),
+            gap_detected=gap,
         )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -322,7 +381,10 @@ class AlpacaConnector(BaseConnector):
         Background coroutine that runs the Alpaca WebSocket stream.
 
         Runs until cancelled (via disconnect()) or the stream raises an
-        unrecoverable error.
+        unrecoverable error.  If the stream exits unexpectedly (not via
+        cancel), gap counters are re-armed for all subscribed symbols so
+        the strategy engine suppresses stale-window signals when the stream
+        is restarted externally.
         """
         try:
             logger.info("Alpaca stream running (feed=%s)", self._data_feed)
@@ -335,6 +397,63 @@ class AlpacaConnector(BaseConnector):
                 "data feed has stopped. Check logs and restart service."
             )
             self._connected = False
+            # Re-arm gap counters so any subsequent restart starts with a
+            # clean warm-up window (alpaca-py may auto-reconnect at a lower
+            # level; this covers higher-level restarts driven by a supervisor).
+            if self._subscribed_symbols:
+                self._arm_gap_counters(self._subscribed_symbols)
+
+    # ── Gap-detection helpers ─────────────────────────────────────────────────
+
+    def _arm_gap_counters(self, symbols: list[str]) -> None:
+        """
+        Set gap warm-up counters for the given symbols.
+
+        Called on initial subscribe and after any unexpected stream exit.
+        Each symbol will emit ``gap_detected=True`` on its first
+        ``RECONNECT_GAP_TICKS`` ticks to let the strategy engine suppress
+        stale-window signals.
+
+        Args:
+            symbols: List of symbols to arm.
+        """
+        self._reconnect_count += 1
+        for symbol in symbols:
+            self._gap_ticks_remaining[symbol] = RECONNECT_GAP_TICKS
+        logger.warning(
+            "Alpaca gap counters armed for %d symbol(s) "
+            "(reconnect #%d, warm-up=%d ticks each): %s",
+            len(symbols),
+            self._reconnect_count,
+            RECONNECT_GAP_TICKS,
+            symbols,
+        )
+
+    def _consume_gap_tick(self, symbol: str) -> bool:
+        """
+        Decrement the gap counter for a symbol and return the gap flag.
+
+        Returns ``True`` (gap tick) while the counter is > 0 and logs when
+        the warm-up window closes.
+
+        Args:
+            symbol: Trading symbol for the incoming tick.
+
+        Returns:
+            True if this tick is within the post-reconnect warm-up window.
+        """
+        remaining = self._gap_ticks_remaining.get(symbol, 0)
+        if remaining <= 0:
+            return False
+
+        self._gap_ticks_remaining[symbol] = remaining - 1
+        if remaining == 1:
+            logger.info(
+                "Gap warm-up complete for %s after reconnect #%d",
+                symbol,
+                self._reconnect_count,
+            )
+        return True
 
     @staticmethod
     def _ensure_utc(ts: Any) -> datetime:

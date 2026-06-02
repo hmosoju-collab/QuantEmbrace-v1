@@ -1,0 +1,109 @@
+# QuantEmbrace — Promotion Gate Configuration
+#
+# Defines the criteria that must pass before promoting to the next universe mode.
+#
+# Promotion path:
+#   PAPER_SAFE_START  →  PAPER_EXPAND  →  LIVE_ADVANCED
+#
+# Promotion is MANUAL: an operator reviews the gate report and explicitly sets
+# the active mode in the environment. The gate evaluator only reports pass/fail —
+# it never automatically changes the active mode.
+#
+# Gate evaluation script: python scripts/evaluate_promotion_gate.py --gate <gate_name>
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 1: PAPER_SAFE_START → PAPER_EXPAND
+# Required before expanding to NIFTY 100 + F&O
+# ─────────────────────────────────────────────────────────────────────────────
+PAPER_SAFE_START_TO_EXPAND:
+  description: "Validate PAPER_SAFE_START before expanding to NIFTY 100 + F&O universe"
+  minimum_paper_trading_days: 5        # Minimum days in PAPER_SAFE_START before gate is evaluated
+
+  data_quality:
+    min_tick_data_pass_rate_pct: 95.0  # % of expected ticks received without error
+    max_data_gap_minutes: 5            # No gap longer than 5 minutes in any session
+    min_candle_formation_rate_pct: 90.0  # % of expected candles successfully formed
+
+  signal_stability:
+    max_signal_flip_rate_pct: 20.0     # ≤20% of signals should flip within 1 candle
+    min_signal_confidence_avg: 0.60    # Average signal confidence must be ≥ 0.60
+
+  order_execution:
+    max_order_rejection_rate_pct: 5.0  # ≤5% of paper orders rejected
+    max_paper_order_latency_ms: 500    # 99th pct paper order placement < 500ms
+    max_duplicate_order_rate_pct: 1.0  # ≤1% duplicate order events
+
+  slippage:
+    max_avg_slippage_bps: 20.0         # Average simulated slippage ≤ 20 bps
+    max_slippage_outlier_pct: 10.0     # ≤10% of fills with slippage > 50 bps
+
+  risk_controls:
+    min_risk_validator_pass_rate_pct: 99.0  # Risk engine accepted ≥99% of valid signals
+    max_kill_switch_false_fires: 2     # ≤2 unintended kill switch activations
+    daily_loss_limit_never_breached: true   # Must never exceed daily loss limit (paper ₹)
+
+  portfolio:
+    max_drawdown_pct: 5.0              # Max drawdown ≤ 5% of paper capital
+    min_position_sizing_correct_pct: 95.0  # ≥95% of positions sized within configured bounds
+
+  reconciliation:
+    min_reconciliation_success_rate_pct: 100.0  # All reconciliation runs completed
+    max_position_mismatch_count: 0     # Zero unresolved DynamoDB vs broker mismatches
+
+  monitoring:
+    all_dashboards_live: true          # Grafana dashboards showing live data
+    all_alerts_configured: true        # CloudWatch alarms set for all critical metrics
+    mis_square_off_tested: true        # MIS auto-square-off confirmed to run at 15:05 IST
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE 2: PAPER_EXPAND → LIVE_ADVANCED
+# Required before activating live trading with real capital
+# ─────────────────────────────────────────────────────────────────────────────
+PAPER_EXPAND_TO_LIVE:
+  description: "Validate PAPER_EXPAND before going live with LIVE_ADVANCED universe"
+  minimum_paper_trading_days: 10       # Minimum days in PAPER_EXPAND before gate is evaluated
+
+  data_quality:
+    min_tick_data_pass_rate_pct: 98.0  # Stricter: ≥98% tick pass rate
+    max_data_gap_minutes: 2
+    min_candle_formation_rate_pct: 95.0
+
+  signal_stability:
+    max_signal_flip_rate_pct: 15.0     # Tighter: ≤15%
+    min_signal_confidence_avg: 0.62
+    min_profitable_signals_pct: 45.0   # ≥45% of closed paper trades profitable (long enough run)
+
+  order_execution:
+    max_order_rejection_rate_pct: 2.0  # Stricter: ≤2%
+    max_paper_order_latency_ms: 300
+    max_duplicate_order_rate_pct: 0.5
+
+  slippage:
+    max_avg_slippage_bps: 15.0         # Tighter slippage
+    max_slippage_outlier_pct: 5.0
+
+  risk_controls:
+    min_risk_validator_pass_rate_pct: 99.5
+    max_kill_switch_false_fires: 1
+    daily_loss_limit_never_breached: true
+    max_drawdown_pct: 3.0              # Stricter: ≤3% drawdown
+
+  portfolio:
+    min_position_sizing_correct_pct: 98.0
+    pnl_reconciliation_complete: true  # Full paper P&L reconciliation done and documented
+
+  reconciliation:
+    min_reconciliation_success_rate_pct: 100.0
+    max_position_mismatch_count: 0
+
+  monitoring:
+    all_dashboards_live: true
+    all_alerts_configured: true
+    mis_square_off_tested: true
+    live_credential_isolation_verified: true  # Paper broker uses dummy/sandbox credentials
+    token_refresh_confirmed: true             # Daily token refresh tested end-to-end
+    kill_switch_manual_test_passed: true      # Kill switch manually fired and cleared in staging
+
+  security:
+    zerodha_credentials_rotated: true    # Live Zerodha creds are fresh (not exposed in logs)
+    paper_env_has_dummy_creds: true      # Paper .env uses paper-dummy values

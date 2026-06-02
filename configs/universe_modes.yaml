@@ -1,0 +1,338 @@
+# QuantEmbrace — Universe Mode Configuration
+#
+# Defines the three trading universe modes and their index membership.
+#
+# PAPER_SAFE_START  → NIFTY 50 only.  First paper-trading stage.
+# PAPER_EXPAND      → NIFTY 100 + F&O stocks.  Second paper stage after gates pass.
+# LIVE_ADVANCED     → NIFTY 200 with strict liquidity and risk filters.  Production live.
+#
+# DATA SOURCES
+# -----------
+# Index membership lists below are curated from NSE public data (last reviewed 2026-05-26).
+# For production, replace with live NSE API integration (see services/shared/universe/data_sources.py).
+# Set data_source.nse_api_enabled: true to use the live feed; the YAML lists serve as fallback.
+#
+# PROMOTION
+# ---------
+# Promotion from one mode to the next requires promotion gates to pass (configs/promotion_gates.yaml).
+# Paper snapshots must never be reused as live snapshots — see isolation rules below.
+#
+# ISOLATION RULES
+# ---------------
+# - Paper and live universe snapshots are stored under separate DynamoDB namespaces.
+# - Paper broker never reads live snapshot; live broker never reads paper snapshot.
+# - Paper decisions never influence live decisions.
+
+data_source:
+  nse_api_enabled: false          # Set true when live NSE index API is integrated
+  nse_api_base_url: ""            # e.g. https://www.nseindia.com/api
+  nse_api_timeout_secs: 10
+  nse_fno_api_path: "/equity-stockIndices?index=SECURITIES IN F&O"
+  nse_index_api_path: "/equity-stockIndices?index={index_name}"
+  fallback_to_yaml: true          # Always true — YAML is the authoritative offline fallback
+  staleness_warn_days: 7          # Warn if YAML lists are older than this many days
+  yaml_last_updated: "2026-05-26"
+
+snapshot:
+  dynamo_table_prefix: "qe_universe_snapshot"
+  s3_audit_prefix: "universe/snapshots"
+  ttl_days: 30                    # DynamoDB TTL for stored snapshots
+  immutable: true                 # Once built for a trading_date+mode, snapshot is never overwritten
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODE: PAPER_SAFE_START
+# Scope: NIFTY 50 only.
+# Purpose: Validate signals, execution logic, slippage, risk controls, data quality.
+# Promotion gate: See configs/promotion_gates.yaml → PAPER_SAFE_START_TO_EXPAND
+# ─────────────────────────────────────────────────────────────────────────────
+modes:
+  PAPER_SAFE_START:
+    description: "Paper trading — NIFTY 50 only. Conservative starting point."
+    paper_mode: true
+    exchange: NSE
+    max_symbols: 50
+    min_symbols_to_trade: 10      # Kill-switch trigger if snapshot too thin
+    index_membership:
+      - NIFTY_50
+    apply_liquidity_filters: true
+    apply_risk_filters: true
+    apply_corporate_action_filters: true
+    allow_etf: false
+    allow_reit: false
+    allow_invit: false
+    allow_sme: false
+    allow_bse_only: false
+    fno_required: false           # NIFTY 50 stocks need not all have F&O; most do
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # MODE: PAPER_EXPAND
+  # Scope: NIFTY 100 (NIFTY 50 + NIFTY NEXT 50) + active F&O stocks.
+  # Purpose: Broader validation before live.
+  # Promotion gate: See configs/promotion_gates.yaml → PAPER_EXPAND_TO_LIVE
+  # ─────────────────────────────────────────────────────────────────────────
+  PAPER_EXPAND:
+    description: "Paper trading — NIFTY 100 + F&O stocks. Expanded universe after safe-start gates pass."
+    paper_mode: true
+    exchange: NSE
+    max_symbols: 250  # raised from 200 — live NIFTY100+FnO union = ~218 symbols
+    min_symbols_to_trade: 30
+    index_membership:
+      - NIFTY_100
+      - FNO               # All stocks with active F&O contracts on NSE
+    apply_liquidity_filters: true
+    apply_risk_filters: true
+    apply_corporate_action_filters: true
+    allow_etf: false
+    allow_reit: false
+    allow_invit: false
+    allow_sme: false
+    allow_bse_only: false
+    fno_required: false
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # MODE: LIVE_ADVANCED
+  # Scope: NIFTY 200 with strict liquidity and risk filters applied.
+  # Purpose: Production live trading after promotion gates pass.
+  # Stricter than paper: higher ADV floor, tighter spread cap, no surveillance.
+  # Promotion gate: Must pass PAPER_EXPAND_TO_LIVE criteria.
+  # ─────────────────────────────────────────────────────────────────────────
+  LIVE_ADVANCED:
+    description: "Live trading — NIFTY 200 with strict liquidity and risk filters."
+    paper_mode: false
+    exchange: NSE
+    max_symbols: 200
+    min_symbols_to_trade: 20      # Emergency threshold — fewer than this triggers degraded-mode alert
+    index_membership:
+      - NIFTY_200
+    apply_liquidity_filters: true
+    apply_risk_filters: true
+    apply_corporate_action_filters: true
+    allow_etf: false
+    allow_reit: false
+    allow_invit: false
+    allow_sme: false
+    allow_bse_only: false
+    fno_required: false
+    requires_promotion: true      # Must pass promotion gate — cannot be activated directly
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INDEX MEMBERSHIP — symbol lists (offline YAML fallback)
+# Source: NSE public index constituents data, reviewed 2026-05-26.
+# NOTE: These lists change quarterly. Integrate NSE live API for production accuracy.
+# ─────────────────────────────────────────────────────────────────────────────
+index_symbols:
+
+  NIFTY_50:
+    # Current NIFTY 50 constituents (50 stocks).
+    # Production: fetch from NSE API /equity-stockIndices?index=NIFTY 50
+    symbols:
+      - ADANIENT
+      - ADANIPORTS
+      - APOLLOHOSP
+      - ASIANPAINT
+      - AXISBANK
+      - BAJAJ-AUTO
+      - BAJFINANCE
+      - BAJAJFINSV
+      - BEL
+      - BHARTIARTL
+      - BPCL
+      - BRITANNIA
+      - CIPLA
+      - COALINDIA
+      - DIVISLAB
+      - DRREDDY
+      - EICHERMOT
+      - ETERNAL
+      - GRASIM
+      - HCLTECH
+      - HDFCBANK
+      - HDFCLIFE
+      - HEROMOTOCO
+      - HINDALCO
+      - HINDUNILVR
+      - ICICIBANK
+      - INDUSINDBK
+      - INFY
+      - ITC
+      - JIOFIN
+      - JSWSTEEL
+      - KOTAKBANK
+      - LT
+      - M&M
+      - MARUTI
+      - NESTLEIND
+      - NTPC
+      - ONGC
+      - POWERGRID
+      - RELIANCE
+      - SBILIFE
+      - SBIN
+      - SHREECEM
+      - SUNPHARMA
+      - TATAMOTORS
+      - TATACONSUM
+      - TATASTEEL
+      - TCS
+      - TECHM
+      - TITAN
+
+  NIFTY_NEXT_50:
+    # NIFTY NEXT 50 constituents (50 stocks).
+    # NIFTY 100 = NIFTY 50 + NIFTY NEXT 50
+    symbols:
+      - ABB
+      - ADANIGREEN
+      - ADANIPOWER
+      - ALKEM
+      - AMBUJACEM
+      - BANKBARODA
+      - BERGEPAINT
+      - BOSCHLTD
+      - CANBK
+      - CHOLAFIN
+      - DABUR
+      - DLF
+      - DMART
+      - GAIL
+      - GODREJCP
+      - HAVELLS
+      - HDFCAMC
+      - ICICIPRULI
+      - ICICIGI
+      - INDUSTOWER
+      - IRFC
+      - LICI
+      - LTF
+      - LUPIN
+      - MARICO
+      - MCDOWELL-N
+      - MPHASIS
+      - MUTHOOTFIN
+      - NAUKRI
+      - NHPC
+      - OBEROIRLTY
+      - OFSS
+      - PIIND
+      - POLYCAB
+      - SHRIRAMFIN
+      - SIEMENS
+      - SRF
+      - SUNTV
+      - TORNTPHARM
+      - TRENT
+      - TVSMOTOR
+      - UNITDSPR
+      - VEDL
+      - VOLTAS
+      - ZYDUSLIFE
+
+  NIFTY_100:
+    # Derived: NIFTY 50 + NIFTY NEXT 50 (computed at runtime from above lists)
+    derived_from:
+      - NIFTY_50
+      - NIFTY_NEXT_50
+
+  FNO:
+    # NSE F&O-eligible stocks beyond NIFTY 100.
+    # Additional stocks from instruments.yaml that have active F&O contracts.
+    # Production: fetch live F&O list from NSE.
+    symbols:
+      - ATGL
+      - BAJAJHLDNG
+      - BEML
+      - BHEL
+      - CASTROL
+      - COCHINSHIP
+      - CONCOR
+      - CUMMINSIND
+      - DATAPATTNS
+      - DEEPAKFERT
+      - EXIDEIND
+      - FEDERALBNK
+      - GNFC
+      - HAL
+      - HFCL
+      - HINDPETRO
+      - HSCL
+      - IDFCFIRSTB
+      - IIFL
+      - IOC
+      - JINDALSAW
+      - JIOFIN        # already in NIFTY_50, duplicates are deduplicated at build time
+      - MAZDOCK
+      - NATIONALUM
+      - PFC
+      - PERSISTENT
+      - PIDILITIND
+      - POWERGRID     # already in NIFTY_50
+      - PRAJIND
+      - PRAKASH
+      - RECLTD
+      - SAMHI
+      - SUZLON
+      - TATACHEM
+      - TATACOMM
+      - TATAELXSI
+      - TATAPOWER
+      - TEXRAIL
+      - TI
+      - TILAKNAGAR
+      - TORNTPOWER
+      - UBL
+      - WAAREEENER
+      - WAAREERTL
+      - ZENTEC
+      - ZEEL
+
+  NIFTY_200:
+    # NIFTY 200 = NIFTY 100 + NIFTY MIDCAP 100.
+    # Derived from NIFTY 100 plus the midcap additions below.
+    derived_from:
+      - NIFTY_100
+    additional_symbols:
+      # Selected NIFTY MIDCAP 100 constituents (representative subset)
+      # Production: fetch NIFTY MIDCAP 100 from NSE API.
+      - ATGL
+      - AUROPHARMA
+      - BANDHANBNK
+      - BATAINDIA
+      - BHEL
+      - BRIGADE
+      - CANBK
+      - CASTROL
+      - CDSL
+      - CESC
+      - COLPAL
+      - CONCOR
+      - CUMMINSIND
+      - DEEPAKFERT
+      - EXIDEIND
+      - FEDERALBNK
+      - GNFC
+      - HAL
+      - HINDPETRO
+      - HSCL
+      - IOC
+      - JINDALSAW
+      - MAZDOCK
+      - MFSL
+      - NATCOPHARM
+      - NHPC
+      - PFC
+      - PERSISTENT
+      - PETRONET
+      - PGHH
+      - PIDILITIND
+      - PRAJIND
+      - RECLTD
+      - SUZLON
+      - TATACHEM
+      - TATACOMM
+      - TATAELXSI
+      - TATAPOWER
+      - TORNTPOWER
+      - TVSMOTOR
+      - UBL
+      - WAAREEENER
+      - WAAREERTL

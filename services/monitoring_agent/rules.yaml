@@ -1,0 +1,190 @@
+# QuantEmbrace Monitoring Agent — declarative monitoring policy (Phase 1)
+# ==============================================================================
+# This file is *policy* (what to watch). Runtime knobs and secrets live in the
+# environment (see config.py): MONITORING_DRY_RUN, MONITORING_ACTION_MODE,
+# SLACK_WEBHOOK_URL, DYNAMODB_TABLE_PREFIX, KAFKA_BOOTSTRAP_SERVERS, etc.
+#
+# Safe to commit and to log — it contains NO secrets.
+#
+# Hostnames below are the docker-compose service names (internal DNS). Ports are
+# the in-container health ports. The agent is read-only: it probes HTTP health
+# endpoints, reads Kafka metadata/offsets, and describes DynamoDB tables. It never
+# writes to the trading platform.
+#
+# Lag / staleness / restart thresholds are consumed by the Phase 2 detector +
+# severity engine. Phase 1 records raw measurements and reports coarse status
+# (ok / degraded / down / unknown) only.
+# ------------------------------------------------------------------------------
+
+# ── Trading service health endpoints (GET /health, GET /ready) ────────────────
+services:
+  - name: data_ingestion
+    host: data_ingestion
+    port: 8081
+    ready_path: /health       # /ready requires Alpaca which is disabled in paper NSE mode
+    critical: true            # no ticks → no signals; capital-path upstream
+  - name: strategy_engine
+    host: strategy_engine
+    port: 8082
+    critical: true
+  - name: risk_engine
+    host: risk_engine
+    port: 8083
+    critical: true            # risk gate — never run blind
+  - name: execution_engine
+    host: execution_engine
+    port: 8084
+    critical: true            # final universe gate + order placement
+  - name: ai_engine
+    host: ai_engine
+    port: 8085
+    critical: false           # EnrichmentWatchdog falls back to risk-v1 if ai_engine lags
+
+# ── Kafka consumer groups (committed-offset lag, read-only) ───────────────────
+# warn_lag / critical_lag are Phase 2 thresholds. Phase 1 flags only a *missing*
+# critical group (no committed offsets → consumer likely not running).
+consumer_groups:
+  - group_id: strategy-v1
+    topics: [ticks.nse, ticks.us]
+    warn_lag: 5000
+    critical_lag: 50000
+    critical: true
+  - group_id: aiengine-v1
+    topics: [signals.pending]
+    warn_lag: 500
+    critical_lag: 5000
+    critical: false           # optional enrichment; fallback path exists
+  - group_id: risk-v1
+    topics: [signals.enriched]
+    warn_lag: 500
+    critical_lag: 5000
+    critical: true
+  - group_id: risk-v1-fallback
+    topics: [signals.pending]
+    warn_lag: 500
+    critical_lag: 5000
+    critical: false           # only active when ai_engine lags
+  - group_id: execution-v1
+    topics: [signals.approved]
+    warn_lag: 100
+    critical_lag: 1000
+    critical: true            # latency-sensitive — orders must not pile up
+
+# ── Kafka topics expected to exist (metadata-only existence check) ────────────
+topics:
+  - name: ticks.nse
+  - name: ticks.us
+  - name: signals.pending
+  - name: signals.enriched
+  - name: signals.approved
+  - name: orders.events
+  - name: risk.kill-switch
+  - name: ops.audit
+
+# ── DynamoDB tables (DescribeTable reachability, read-only) ───────────────────
+# `suffix` is appended to DYNAMODB_TABLE_PREFIX. Critical = capital/risk path.
+dynamodb_tables:
+  - suffix: orders
+    critical: true
+  - suffix: positions
+    critical: true
+  - suffix: risk-state           # holds the kill switch (PK=KILLSWITCH/SK=GLOBAL)
+    critical: true
+  - suffix: strategy-config       # paper_trade flag + universe mode
+    critical: true
+  - suffix: latest-prices         # LtpResolver / execution depends on this
+    critical: true
+  - suffix: fills
+    critical: false
+  - suffix: sessions              # broker token (never read by the agent)
+    critical: false
+  - suffix: candle-cache
+    critical: false
+  - suffix: features
+    critical: false
+  - suffix: regime-log
+    critical: false
+  - suffix: strategy-recommendations
+    critical: false
+  - suffix: strategy-state
+    critical: false
+
+# ── Broker heartbeat (INFERRED from latest-prices freshness — no broker API) ──
+broker:
+  latest_prices_suffix: latest-prices
+  timestamp_attr: captured_at
+  max_age_seconds: 60          # during market hours, newest tick older than this → DEGRADED
+  sample_limit: 50             # bounded projection scan (low RCU)
+  market_hours_aware: true     # suppress staleness alerts when NSE is closed
+
+# ── Docker container liveness + restart counts (read-only) ────────────────────
+# Requires the Docker socket to be readable by the agent (see docker-compose).
+# If unreadable, the collector reports UNKNOWN — it never fails the agent.
+docker:
+  enabled: true
+  name_contains:               # only watch platform containers
+    - data_ingestion
+    - strategy_engine
+    - risk_engine
+    - execution_engine
+    - ai_engine
+    - redpanda
+    - localstack
+  restart_warn: 1              # Phase 2: WARNING at/above this many restarts
+  restart_critical: 3          # Phase 2: CRITICAL at/above this many
+
+# ── Log error-pattern scan (opt-in; paths are deployment-specific) ────────────
+logs:
+  enabled: false               # file-based scanner — disabled (containers log to stdout)
+  paths: []
+  error_patterns: ["ERROR", "CRITICAL", "Traceback", "kill_switch", "RiskRejection"]
+  window_seconds: 300
+  max_bytes_per_file: 2000000
+
+# ── Container log scan (reads Docker stdout/stderr via SDK, no files needed) ──
+# Patterns are checked against raw log text from each service container's stdout.
+# Groups: blocker > critical > warning. Each line is checked against ALL patterns
+# in the relevant group; first match wins per line.
+container_logs:
+  enabled: true
+  lookback_seconds: 90         # fetch 90s window every 30s cycle (overlap = no gaps)
+  max_lines_per_container: 2000
+  sample_lines: 3              # matching lines surfaced in findings (never full log)
+  name_contains:               # container name substrings to watch
+    - data_ingestion
+    - strategy_engine
+    - risk_engine
+    - execution_engine
+    - ai_engine
+
+  # ── BLOCKER: halt-level events — alert immediately ──────────────────────────
+  blocker_patterns:
+    - "kill_switch.activated"      # kill switch fired
+    - "kill_switch.trigger"        # kill switch trigger event
+    - "HARD BLOCK"                 # live trading gate breached
+
+  # ── CRITICAL: data loss / audit trail broken / unhandled exceptions ─────────
+  critical_patterns:
+    - "NoSuchBucket"               # S3 bucket missing — ticks/audit not persisted
+    - "re-buffered"                # S3 writer accumulating — memory leak risk
+    - '"level": "CRITICAL"'        # explicit CRITICAL log from any service
+    - "dynamo_write_error"         # DynamoDB write failure on critical path
+    - "universe_snapshot_missing"  # execution blocked — no universe for today
+
+  # ── WARNING: degraded-but-continuing conditions ──────────────────────────────
+  warning_patterns:
+    - '"level": "ERROR"'           # any service-level ERROR log
+    - "Traceback"                  # unhandled exception (broad — includes non-critical like CloudWatch)
+    - "Failed to persist"          # S3 / DynamoDB persistence failure (non-fatal)
+    - "signal_age_rejected"        # signals older than RISK_MAX_SIGNAL_AGE_SECONDS
+    - "universe_rejected"          # order rejected by UniverseOrderValidator
+    - "idempotency_skipped"        # duplicate signal detected — suppressed
+    - "CloudWatch metric flush"    # metrics pipeline degraded (expected in local dev)
+    - "stale_ltp"                  # LTP not updated within max_age threshold
+
+# ── Notification policy (Slack only in Phase 1) ───────────────────────────────
+notifications:
+  min_status: degraded         # alert on degraded/down (set "unknown" to also alert on blindness)
+  repeat_suppression_seconds: 900   # Phase 2: throttle re-alerts on an unchanged problem
+  slack:
+    enabled: true              # actual delivery still requires SLACK_WEBHOOK_URL in env

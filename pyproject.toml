@@ -1,0 +1,51 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "TID",    # flake8-tidy-imports (includes TID251 banned-api)
+    "RUF",    # ruff-specific rules
+]
+ignore = [
+    "E501",   # line-length (black handles this)
+    "B008",   # do not perform function calls in default arguments
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# ── SQS IS BANNED ──────────────────────────────────────────────────────────────
+# Inter-service communication is Kafka-only (MSK Serverless).
+# SQS has been fully removed from the trading path.
+# Adding SQS back would split the event model and break trace_id propagation.
+#
+# If you need async decoupling outside the hot path, use Kafka with a new topic.
+# If you believe SQS is required, open an ADR and get architecture approval first.
+"boto3.client" = { msg = "Use Kafka (confluent_kafka) for all inter-service messaging. boto3.client('sqs') is forbidden — see ARCHITECTURE.md." }
+"shared.aws.clients.get_sqs_client" = { msg = "get_sqs_client is removed. Use KafkaTickPublisher, KafkaSignalPublisher, KafkaApprovedPublisher, or KafkaOrderEventsPublisher — see ARCHITECTURE.md." }
+"botocore.client.SQS" = { msg = "SQS client is forbidden. All messaging goes through Kafka MSK Serverless — see ARCHITECTURE.md." }
+
+[tool.ruff.lint.isort]
+known-first-party = ["shared", "data_ingestion", "strategy_engine", "risk_engine", "execution_engine", "ai_engine"]
+force-sort-within-sections = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # allow assert in tests
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+pythonpath = ["services"]

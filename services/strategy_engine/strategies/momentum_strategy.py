@@ -24,7 +24,8 @@ from typing import Optional
 
 from shared.logging.logger import get_logger
 
-from strategy_engine.signals.signal import Direction, Signal
+from shared.models.signal import Direction, Signal
+from strategy_engine.strategies._position_sizer import size_position
 from strategy_engine.strategies.base_strategy import Bar, BaseStrategy
 
 logger = get_logger(__name__, service_name="strategy_engine")
@@ -56,8 +57,7 @@ class MomentumStrategy(BaseStrategy):
         atr_stop_multiplier: float = 2.0,
         atr_tp_multiplier: float = 3.0,
         min_confidence: float = 0.55,
-        risk_pct_per_trade: float = 0.01,
-        capital: float = 1_000_000.0,
+        nav: float = 1_000_000.0,
     ) -> None:
         super().__init__(name=name, symbols=symbols or [], market=market)
         if short_window >= long_window:
@@ -71,8 +71,7 @@ class MomentumStrategy(BaseStrategy):
         self._atr_stop_mult = atr_stop_multiplier
         self._atr_tp_mult = atr_tp_multiplier
         self._min_confidence = min_confidence
-        self._risk_pct = risk_pct_per_trade
-        self._capital = capital
+        self._nav = nav
 
         # Per-symbol price history (close prices)
         self._closes: dict[str, deque[float]] = {}
@@ -186,18 +185,6 @@ class MomentumStrategy(BaseStrategy):
         raw = divergence_pct / max(atr_pct, 1e-9)
         return max(0.0, min(1.0, raw))
 
-    def _compute_quantity(self, price: float, stop_distance: float) -> int:
-        """
-        Risk-based position sizing.
-
-        qty = (capital × risk_pct) / stop_distance
-        Ensures that if the stop is hit, we lose at most risk_pct of capital.
-        """
-        if stop_distance <= 0 or price <= 0:
-            return 1
-        risk_capital = self._capital * self._risk_pct
-        qty = risk_capital / stop_distance
-        return max(1, math.floor(qty))
 
     def _build_signal(
         self,
@@ -220,7 +207,8 @@ class MomentumStrategy(BaseStrategy):
             stop_loss = price + stop_distance
             take_profit = price - tp_distance
 
-        quantity = self._compute_quantity(price, stop_distance)
+        sizing = size_position(price, stop_distance, self._nav, confidence)
+        quantity = sizing.qty if sizing.qty > 0 and not sizing.rejected_if_exceeds_cap else 1
 
         signal = Signal(
             symbol=bar.symbol,
@@ -240,6 +228,7 @@ class MomentumStrategy(BaseStrategy):
                 "atr_tp_mult": self._atr_tp_mult,
                 "stop_distance": round(stop_distance, 4),
                 "risk_reward_ratio": round(tp_distance / stop_distance, 2),
+                **sizing.to_metadata(),
             },
         )
 

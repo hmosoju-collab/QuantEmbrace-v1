@@ -247,6 +247,30 @@ class ExitOrderRouter:
                     self._live_counters.router_failed_routes += 1
                 return False
 
+        if self._kafka_publisher is not None:
+            try:
+                await self._kafka_publisher.publish_fill(
+                    order_id=exit_order_id,
+                    signal_id=request.exit_id,
+                    risk_decision_id="exit-auto",
+                    trace_id="",
+                    symbol=request.symbol,
+                    market=request.market,
+                    direction=request.close_side,
+                    quantity_ordered=int(request.close_qty),
+                    quantity_filled=int(request.close_qty),
+                    avg_fill_price=fill_price,
+                    broker_order_id=exit_order_id,
+                    strategy_id="",
+                    product_type=request.product_type,
+                )
+            except Exception:
+                logger.exception(
+                    "exit_router.paper_exit_kafka_error",
+                    exit_id=request.exit_id,
+                    symbol=request.symbol,
+                )
+
         if self._live_counters is not None:
             self._live_counters.router_paper_exits += 1
             entry = request.avg_entry_price

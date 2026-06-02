@@ -1,0 +1,23 @@
+{
+  "enabled": true,
+  "name": "Sync Docs on Source Change",
+  "description": "Watches Python source files, YAML configs, and Terraform files. When any of these change, asks the agent to update the README or /docs folder to reflect the changes.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "services/**/*.py",
+      "tests/**/*.py",
+      "scripts/**/*.py",
+      "configs/**/*.yaml",
+      "configs/**/*.yml",
+      "infra/terraform/**/*.tf",
+      "pyproject.toml",
+      "services/requirements.txt"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "A source file was just edited. Review the change and determine if any documentation needs to be updated. Check the README.md at the project root and the /docs folder (if it exists). Update the relevant documentation to reflect any changes in behavior, configuration, API, architecture, or usage. Focus on: new/removed features, changed configuration options, updated dependencies, modified service behavior, or altered CLI commands. Only update docs if the source change warrants it — skip trivial changes like formatting or internal refactors that don't affect documented behavior."
+  }
+}

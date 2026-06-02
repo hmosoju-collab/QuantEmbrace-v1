@@ -102,14 +102,31 @@ output "daily_cost_alarm_arn" {
   value       = aws_cloudwatch_metric_alarm.daily_cost.arn
 }
 
+# ── Zerodha Rate-Limit Alarms (ADR-012) ──────────────────────────────────────
+
+output "zerodha_rate_limit_errors_alarm_arn" {
+  description = "ARN of the Zerodha 429-error P0 alarm (fires SNS alerts + kill_switch)"
+  value       = aws_cloudwatch_metric_alarm.zerodha_rate_limit_errors.arn
+}
+
+output "zerodha_token_bucket_depletion_alarm_arn" {
+  description = "ARN of the Zerodha token bucket sustained-depletion P1 alarm"
+  value       = aws_cloudwatch_metric_alarm.zerodha_token_bucket_depletion.arn
+}
+
+output "zerodha_fill_detection_latency_alarm_arn" {
+  description = "ARN of the Zerodha fill detection P95-latency P1 alarm"
+  value       = aws_cloudwatch_metric_alarm.zerodha_fill_detection_latency.arn
+}
+
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 output "dashboard_name" {
   description = "CloudWatch dashboard name"
-  value       = aws_cloudwatch_dashboard.trading.dashboard_name
+  value       = aws_cloudwatch_dashboard.main.dashboard_name
 }
 
 output "dashboard_arn" {
   description = "CloudWatch dashboard ARN"
-  value       = aws_cloudwatch_dashboard.trading.dashboard_arn
+  value       = aws_cloudwatch_dashboard.main.dashboard_arn
 }

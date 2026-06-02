@@ -16,7 +16,7 @@ rules:
     description: |
       NEVER use AWS Lambda for continuous polling, streaming data,
       or WebSocket connections. Lambda's cold start latency and
-      15-minute timeout make it unsuitable. Use ECS Fargate instead.
+      15-minute timeout make it unsuitable. Use EC2 ARM64 ASGs instead. ECS Fargate has been removed.
     applies_to: infra/terraform/**
     check: "No aws_lambda_function resources for data ingestion or trading"
 
@@ -41,12 +41,13 @@ rules:
       - risk_state
       - strategy_state
 
-  - name: fargate_spot_for_non_critical
+  - name: ec2_spot_for_non_critical
     severity: medium
     description: |
-      Use Fargate Spot for non-critical workloads: backtesting,
+      Use EC2 Spot instances for non-critical workloads: backtesting,
       batch analytics, AI training. Never use Spot for execution
-      engine or risk engine.
+      engine, risk engine, or data ingestion in production.
+      ECS Fargate has been fully removed — do not reintroduce it.
     spot_eligible:
       - ai_engine
       - backtesting_tasks
@@ -79,7 +80,7 @@ rules:
 
 cost_review_checklist:
   - "Is this resource needed 24/7 or can it be scheduled?"
-  - "Can this workload run on Fargate Spot?"
+  - "Can this workload run on EC2 Spot (non-critical) or can scaling be scheduled?"
   - "Is data in the cheapest appropriate storage tier?"
   - "Are VPC endpoints configured to avoid NAT charges?"
   - "Are there unused or oversized resources to clean up?"

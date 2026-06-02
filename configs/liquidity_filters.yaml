@@ -1,0 +1,98 @@
+# QuantEmbrace — Liquidity Filter Configuration
+#
+# These thresholds are applied during universe snapshot generation.
+# Symbols that fail any enabled check are excluded from the approved universe.
+#
+# ALL monetary values are in Indian Rupees (INR).
+# ADV = Average Daily (traded) Value.
+# ADV volume = Average Daily Volume in shares.
+#
+# Sources of liquidity data (production):
+#   - NSE Bhavcopy (daily OHLCV + delivery data, free public download)
+#   - Zerodha Kite historical API (OHLCV, requires access token)
+#   - MSEI/BSE equivalent for cross-validation
+#
+# Stub: If liquidity data is unavailable, symbols are INCLUDED by default
+# (permissive fallback) with a WARNING log. Override with
+# liquidity_unavailable_policy: EXCLUDE for stricter production behavior.
+
+liquidity_unavailable_policy: INCLUDE   # INCLUDE | EXCLUDE — what to do when data is absent
+liquidity_data_staleness_warn_hours: 48  # warn if liquidity data older than 48 hours
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEFAULT thresholds — apply when mode-specific values are not set
+# ─────────────────────────────────────────────────────────────────────────────
+defaults:
+  enabled: true
+
+  # Average Daily Traded Value (₹ crores, 20-day rolling)
+  min_adv_crores_20d: 5.0
+
+  # Average Daily Volume (shares, 20-day rolling)
+  min_adv_volume_20d: 50000
+
+  # Free-float market capitalisation (₹ crores)
+  min_free_float_mcap_crores: 500.0
+
+  # Bid-ask spread (basis points) — upper bound; exceed = illiquid
+  max_bid_ask_spread_bps: 100.0
+
+  # Minimum number of active trading days in the past 20 sessions
+  # (handles stocks that have hit circuit limits and stopped trading)
+  min_active_days_last_20: 15
+
+  # Delivery volume as fraction of total traded volume (20-day average)
+  # Low delivery fraction signals speculative/manipulated trading
+  min_delivery_pct: 0.10
+
+  # 60-day rolling checks (secondary validation; applied if 20d passes)
+  min_adv_crores_60d: 4.0
+  min_adv_volume_60d: 40000
+  min_active_days_last_60: 45
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODE OVERRIDES — stricter or relaxed per mode
+# ─────────────────────────────────────────────────────────────────────────────
+by_mode:
+
+  PAPER_SAFE_START:
+    # NIFTY 50 stocks are all highly liquid — apply moderate thresholds
+    # to catch unexpected delistings or trading halts.
+    enabled: true
+    min_adv_crores_20d: 20.0          # NIFTY 50 floor: ₹20 Cr ADV
+    min_adv_volume_20d: 100000
+    min_free_float_mcap_crores: 5000.0  # NIFTY 50 are large-caps
+    max_bid_ask_spread_bps: 50.0
+    min_active_days_last_20: 18
+    min_delivery_pct: 0.15
+    min_adv_crores_60d: 15.0
+    min_adv_volume_60d: 80000
+    min_active_days_last_60: 54
+
+  PAPER_EXPAND:
+    # NIFTY 100 + F&O — wider universe, moderate liquidity bar
+    enabled: true
+    min_adv_crores_20d: 10.0
+    min_adv_volume_20d: 75000
+    min_free_float_mcap_crores: 1000.0
+    max_bid_ask_spread_bps: 75.0
+    min_active_days_last_20: 16
+    min_delivery_pct: 0.12
+    min_adv_crores_60d: 8.0
+    min_adv_volume_60d: 60000
+    min_active_days_last_60: 48
+
+  LIVE_ADVANCED:
+    # Live trading — stricter than paper on every dimension.
+    # Fail-safe: unknown liquidity = excluded (do not trade what you can't measure).
+    liquidity_unavailable_policy: EXCLUDE
+    enabled: true
+    min_adv_crores_20d: 25.0          # ₹25 Cr ADV — ensures meaningful liquidity
+    min_adv_volume_20d: 150000
+    min_free_float_mcap_crores: 2000.0
+    max_bid_ask_spread_bps: 40.0      # Tighter spread cap for live execution
+    min_active_days_last_20: 18
+    min_delivery_pct: 0.20            # Higher delivery fraction for quality
+    min_adv_crores_60d: 20.0
+    min_adv_volume_60d: 120000
+    min_active_days_last_60: 54

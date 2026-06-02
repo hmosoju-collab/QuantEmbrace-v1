@@ -40,7 +40,7 @@ steps:
     data_sources:
       - cloudwatch_metrics: [CPUUtilization, MemoryUtilization, NetworkIn, NetworkOut]
       - cost_explorer: [service_costs, resource_costs, daily_breakdown]
-      - ecs_task_metrics: [task_count, cpu_reserved, memory_reserved, cpu_used, memory_used]
+      - ec2_asg_metrics: [GroupDesiredCapacity, CPUUtilization, MemoryUtilization, instance_count]
       - dynamodb_metrics: [ReadCapacityUnits, WriteCapacityUnits, ConsumedRCU, ConsumedWCU]
       - s3_metrics: [BucketSizeBytes, NumberOfObjects, StorageClass]
 
@@ -48,17 +48,17 @@ steps:
     action: analyze
     description: Identify compute optimization opportunities.
     checks:
-      ecs_right_sizing:
-        description: Compare reserved vs actual CPU/memory usage across all ECS tasks.
-        threshold: "Flag tasks where average utilization is below 40%."
-        recommendation: Reduce task definition CPU/memory to match actual usage.
-      fargate_spot_candidates:
-        description: Identify non-critical workloads that could run on Fargate Spot.
+      ec2_right_sizing:
+        description: Compare instance type vs actual CPU/memory usage across all EC2 ASG instances.
+        threshold: "Flag instances where average utilization is below 40%."
+        recommendation: Downsize instance type (e.g., c6g.large → c6g.medium) or reduce ASG max.
+      ec2_spot_candidates:
+        description: Identify non-critical workloads that could run on EC2 Spot.
         eligible: [backtesting, batch_analytics, data_download]
         savings_estimate: "Up to 70% for eligible workloads."
       lambda_misuse:
         description: Flag any Lambda functions being used for streaming or long-running workloads.
-        action: Recommend migration to ECS Fargate.
+        action: Recommend migration to EC2 ARM64 ASG process. ECS Fargate is not in use.
 
   - name: analyze_storage
     action: analyze
@@ -112,7 +112,7 @@ steps:
     description: Compile all findings into an actionable cost optimization report.
     sections:
       - executive_summary: total current spend, total potential savings, top 5 recommendations
-      - compute_findings: ECS right-sizing, Fargate Spot opportunities
+      - compute_findings: EC2 ASG right-sizing, EC2 Spot opportunities, scheduled scaling analysis
       - storage_findings: S3 lifecycle, DynamoDB optimization
       - networking_findings: VPC endpoints, NAT Gateway
       - monitoring_findings: CloudWatch optimization

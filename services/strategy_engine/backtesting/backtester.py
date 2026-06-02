@@ -25,12 +25,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 from shared.logging.logger import get_logger
 
-from strategy_engine.signals.signal import Direction, Signal
+from shared.models.signal import Direction, Signal
 from strategy_engine.strategies.base_strategy import Bar, BaseStrategy
 
 logger = get_logger(__name__, service_name="strategy_engine")
@@ -57,9 +57,11 @@ class TradeRecord:
         exit_reason: "signal", "stop_loss", "take_profit", or "eod" (end of data).
         pnl:         Net profit/loss after commissions.
         commission:  Total commission paid (both legs).
+        slippage:    Total adverse slippage paid across entry and exit.
     """
 
     symbol: str
+    market: str
     direction: Direction
     entry_price: float
     exit_price: float
@@ -69,6 +71,7 @@ class TradeRecord:
     exit_reason: str
     pnl: float
     commission: float
+    slippage: float = 0.0
 
     @property
     def is_winner(self) -> bool:
@@ -130,6 +133,11 @@ class BacktestResult:
     largest_win: float = 0.0
     largest_loss: float = 0.0
     total_commission: float = 0.0
+    total_costs: float = 0.0
+    total_slippage: float = 0.0
+    rejected_orders: int = 0
+    lookahead_violations: int = 0
+    drawdown_stress: dict[str, float] = field(default_factory=dict)
 
     signals_generated: int = 0
     buy_signals: int = 0
@@ -150,8 +158,28 @@ class BacktestResult:
             f"Sortino={self.sortino_ratio:.3f} | "
             f"Trades={self.total_trades} | "
             f"WinRate={self.win_rate:.1f}% | "
-            f"PF={self.profit_factor:.2f}"
+            f"PF={self.profit_factor:.2f} | "
+            f"Costs={self.total_costs:.2f} | "
+            f"Rejected={self.rejected_orders}"
         )
+
+
+@dataclass(frozen=True)
+class IndianCostModel:
+    """
+    Conservative NSE equity intraday cost model.
+
+    Percent fields are actual percentages, not fractions. The defaults model
+    common Indian equity intraday charges: STT on sell side, exchange charges,
+    SEBI turnover fee, stamp duty on buy side, and GST on brokerage/exchange/SEBI.
+    """
+
+    enabled: bool = True
+    stt_sell_pct: float = 0.025
+    exchange_txn_pct: float = 0.00345
+    sebi_turnover_pct: float = 0.0001
+    stamp_buy_pct: float = 0.003
+    gst_pct: float = 18.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +192,7 @@ class _OpenPosition:
     """Internal tracker for an open position."""
 
     symbol: str
+    market: str
     direction: Direction
     quantity: int
     entry_price: float
@@ -171,6 +200,7 @@ class _OpenPosition:
     stop_loss: Optional[float]
     take_profit: Optional[float]
     entry_commission: float
+    entry_slippage: float
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +229,11 @@ class Backtester:
         commission_pct: float = 0.03,
         risk_free_rate_annual: float = 0.06,
         allow_short: bool = False,
+        slippage_bps: float = 0.0,
+        spread_bps: float = 0.0,
+        max_order_bar_volume_pct: float = 100.0,
+        indian_cost_model: Optional[IndianCostModel] = None,
+        gap_stop_behavior: bool = True,
     ) -> None:
         """
         Initialise the backtester.
@@ -211,12 +246,22 @@ class Backtester:
             risk_free_rate_annual:  Annual risk-free rate for Sharpe calculation.
                                     Default 6% (INR government bond proxy).
             allow_short:            If False, SELL signals on flat positions are ignored.
+            slippage_bps:           Adverse execution slippage applied to every fill.
+            spread_bps:             Bid/ask spread; half-spread is paid on each fill.
+            max_order_bar_volume_pct: Reject orders that exceed this percent of bar volume.
+            indian_cost_model:      Indian statutory charges model. Enabled by default.
+            gap_stop_behavior:      If True, gap-through stops fill at the worse bar open.
         """
         self._strategy = strategy
         self._initial_capital = initial_capital
         self._commission_pct = commission_pct / 100.0  # Convert to fraction
         self._rf_annual = risk_free_rate_annual
         self._allow_short = allow_short
+        self._slippage_bps = max(0.0, slippage_bps)
+        self._spread_bps = max(0.0, spread_bps)
+        self._max_order_bar_volume_pct = max(0.0, max_order_bar_volume_pct)
+        self._indian_cost_model = indian_cost_model or IndianCostModel()
+        self._gap_stop_behavior = gap_stop_behavior
 
     async def run(self, bars: list[Bar]) -> BacktestResult:
         """
@@ -268,7 +313,11 @@ class Backtester:
             # ── Step 2: Process pending entry signal from previous bar ──────
             if bar.symbol in pending_signals and bar.symbol not in open_positions:
                 sig = pending_signals.pop(bar.symbol)
-                cash, pos = self._open_position(sig, bar.close, bar.timestamp, cash)
+                cash, pos, rejected, lookahead_violation = self._open_position(sig, bar, cash)
+                if rejected:
+                    result.rejected_orders += 1
+                if lookahead_violation:
+                    result.lookahead_violations += 1
                 if pos is not None:
                     open_positions[bar.symbol] = pos
 
@@ -283,6 +332,10 @@ class Backtester:
                 else:
                     result.sell_signals += 1
 
+                # Backtest execution is strictly next-bar. Stamp generated_at
+                # with the bar that produced the signal so no-lookahead tests
+                # can prove fills never occur on the same timestamp.
+                signal.generated_at = bar.timestamp
                 pending_signals[signal.symbol] = signal  # Enter at *next* bar open/close
 
             # ── Step 4: Mark-to-market portfolio value ─────────────────────
@@ -329,6 +382,7 @@ class Backtester:
         result.final_capital = cash
         result.max_drawdown_pct = max_dd_pct
         result.max_drawdown_abs = max_dd_abs
+        result.drawdown_stress = self._compute_drawdown_stress(max_dd_pct, max_dd_abs)
 
         # ── Metrics computation ────────────────────────────────────────────
         self._compute_trade_metrics(result)
@@ -345,21 +399,45 @@ class Backtester:
     def _open_position(
         self,
         signal: Signal,
-        price: float,
-        timestamp: datetime,
+        bar: Bar,
         cash: float,
-    ) -> tuple[float, Optional[_OpenPosition]]:
-        """Open a new position. Returns (updated_cash, position or None if rejected)."""
+    ) -> tuple[float, Optional[_OpenPosition], bool, bool]:
+        """
+        Open a new position.
+
+        Returns ``(updated_cash, position, rejected, lookahead_violation)``.
+        """
+        timestamp = bar.timestamp
+        lookahead_violation = timestamp <= signal.generated_at
+        if lookahead_violation:
+            return cash, None, True, True
+
         if signal.direction == Direction.SELL and not self._allow_short:
-            return cash, None
+            return cash, None, True, False
+
+        if (
+            self._max_order_bar_volume_pct > 0
+            and bar.volume > 0
+            and signal.quantity > (bar.volume * self._max_order_bar_volume_pct / 100.0)
+        ):
+            return cash, None, True, False
+
+        price, slippage = self._apply_execution_price(
+            reference_price=bar.close,
+            side=signal.direction,
+        )
 
         trade_value = price * signal.quantity
-        commission = trade_value * self._commission_pct
+        commission = self._estimate_costs(
+            trade_value=trade_value,
+            side=signal.direction,
+            market=signal.market,
+        )
 
         if signal.direction == Direction.BUY:
             cost = trade_value + commission
             if cost > cash:
-                return cash, None  # Insufficient capital
+                return cash, None, True, False  # Insufficient capital
             cash -= cost
         else:
             # Short: receive proceeds minus commission
@@ -367,6 +445,7 @@ class Backtester:
 
         pos = _OpenPosition(
             symbol=signal.symbol,
+            market=signal.market,
             direction=signal.direction,
             quantity=signal.quantity,
             entry_price=price,
@@ -374,8 +453,9 @@ class Backtester:
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
             entry_commission=commission,
+            entry_slippage=slippage * signal.quantity,
         )
-        return cash, pos
+        return cash, pos, False, False
 
     def _close_position(
         self,
@@ -386,31 +466,44 @@ class Backtester:
         cash: float,
     ) -> tuple[TradeRecord, float]:
         """Close an open position. Returns (trade_record, updated_cash)."""
+        exit_side = Direction.SELL if pos.direction == Direction.BUY else Direction.BUY
+        executed_exit_price, exit_slippage_per_share = self._apply_execution_price(
+            reference_price=exit_price,
+            side=exit_side,
+        )
         trade_value = exit_price * pos.quantity
-        exit_commission = trade_value * self._commission_pct
+        trade_value = executed_exit_price * pos.quantity
+        exit_commission = self._estimate_costs(
+            trade_value=trade_value,
+            side=exit_side,
+            market=pos.market,
+        )
         total_commission = pos.entry_commission + exit_commission
+        total_slippage = pos.entry_slippage + (exit_slippage_per_share * pos.quantity)
 
         if pos.direction == Direction.BUY:
             proceeds = trade_value - exit_commission
             cash += proceeds
-            pnl = (exit_price - pos.entry_price) * pos.quantity - total_commission
+            pnl = (executed_exit_price - pos.entry_price) * pos.quantity - total_commission
         else:
             # Short: we sold high, need to buy back
             cost = trade_value + exit_commission
             cash -= cost
-            pnl = (pos.entry_price - exit_price) * pos.quantity - total_commission
+            pnl = (pos.entry_price - executed_exit_price) * pos.quantity - total_commission
 
         trade = TradeRecord(
             symbol=pos.symbol,
+            market=pos.market,
             direction=pos.direction,
             entry_price=pos.entry_price,
-            exit_price=exit_price,
+            exit_price=executed_exit_price,
             quantity=pos.quantity,
             entry_time=pos.entry_time,
             exit_time=exit_time,
             exit_reason=exit_reason,
             pnl=pnl,
             commission=total_commission,
+            slippage=total_slippage,
         )
         return trade, cash
 
@@ -421,16 +514,19 @@ class Backtester:
         Check if stop-loss or take-profit was triggered on this bar.
 
         Returns (reason, fill_price) or (None, 0.0) if no exit.
-        We assume the stop/TP was breached at exactly the trigger price
-        (conservative: could have slipped further intrabar).
+        Gap-through stops fill at the worse bar open when enabled.
         """
         if pos.direction == Direction.BUY:
             if pos.stop_loss is not None and bar.low <= pos.stop_loss:
+                if self._gap_stop_behavior and bar.open < pos.stop_loss:
+                    return "stop_loss_gap", bar.open
                 return "stop_loss", pos.stop_loss
             if pos.take_profit is not None and bar.high >= pos.take_profit:
                 return "take_profit", pos.take_profit
         else:  # SHORT
             if pos.stop_loss is not None and bar.high >= pos.stop_loss:
+                if self._gap_stop_behavior and bar.open > pos.stop_loss:
+                    return "stop_loss_gap", bar.open
                 return "stop_loss", pos.stop_loss
             if pos.take_profit is not None and bar.low <= pos.take_profit:
                 return "take_profit", pos.take_profit
@@ -445,6 +541,51 @@ class Backtester:
             # Short: value is the unrealised gain (pos.entry_price - price) × qty
             return pos.quantity * (pos.entry_price - price)
 
+    def _apply_execution_price(
+        self,
+        *,
+        reference_price: float,
+        side: Direction,
+    ) -> tuple[float, float]:
+        """Apply adverse spread/slippage and return (fill_price, per-share slippage)."""
+        adverse_bps = self._slippage_bps + (self._spread_bps / 2.0)
+        if adverse_bps <= 0:
+            return reference_price, 0.0
+        direction = 1.0 if side == Direction.BUY else -1.0
+        fill_price = reference_price * (1.0 + direction * adverse_bps / 10_000.0)
+        return fill_price, abs(fill_price - reference_price)
+
+    def _estimate_costs(
+        self,
+        *,
+        trade_value: float,
+        side: Direction,
+        market: str,
+    ) -> float:
+        """Estimate brokerage plus statutory Indian equity costs for one leg."""
+        brokerage = trade_value * self._commission_pct
+        model = self._indian_cost_model
+        if not model.enabled or market.upper() not in {"NSE", "BSE"}:
+            return brokerage
+
+        exchange = trade_value * (model.exchange_txn_pct / 100.0)
+        sebi = trade_value * (model.sebi_turnover_pct / 100.0)
+        stt = trade_value * (model.stt_sell_pct / 100.0) if side == Direction.SELL else 0.0
+        stamp = trade_value * (model.stamp_buy_pct / 100.0) if side == Direction.BUY else 0.0
+        gst = (brokerage + exchange + sebi) * (model.gst_pct / 100.0)
+        return brokerage + exchange + sebi + stt + stamp + gst
+
+    @staticmethod
+    def _compute_drawdown_stress(max_dd_pct: float, max_dd_abs: float) -> dict[str, float]:
+        """Return simple stressed drawdown scenarios for report visibility."""
+        return {
+            "observed_pct": max_dd_pct,
+            "observed_abs": max_dd_abs,
+            "stress_1_5x_pct": min(100.0, max_dd_pct * 1.5),
+            "stress_2x_pct": min(100.0, max_dd_pct * 2.0),
+            "stress_2x_abs": max_dd_abs * 2.0,
+        }
+
     # ─────────────────────────────────────────────────────────────────────────
     # Metrics
     # ─────────────────────────────────────────────────────────────────────────
@@ -454,6 +595,8 @@ class Backtester:
         trades = result.trades
         result.total_trades = len(trades)
         result.total_commission = sum(t.commission for t in trades)
+        result.total_costs = result.total_commission
+        result.total_slippage = sum(t.slippage for t in trades)
 
         if not trades:
             return

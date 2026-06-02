@@ -1,0 +1,175 @@
+name: kill_switch_integrity
+type: pre_merge
+priority: 1
+mandatory: true
+
+description: |
+  The kill switch is a critical safety mechanism that halts all trading activity.
+  It must never be bypassed, weakened, or removed. It operates via two independent
+  mechanisms that must both remain active:
+
+    1. KillSwitchValidator — validator #2 in risk_engine's 11-validator chain.
+       Reads kill switch state from DynamoDB with ConsistentRead=True.
+    2. KafkaKillSwitchListener — a background listener in EVERY service that
+       monitors the risk.kill-switch Kafka topic for real-time activation.
+
+  Known historical self-refire bugs (all fixed — regressions must be caught):
+    Bug #1: kill_switch_cli.py fired its own kill switch event on startup
+    Bug #2: KafkaKillSwitchListener re-published kill-switch event on receipt
+    Bug #3: record_data_tick() called AFTER signal age validation — if kill switch
+            fired during age validation, tick was never recorded, causing cascading
+            failures on restart
+    Bug #4: No startup grace period — service received its own startup events and
+            triggered kill switch immediately after deployment
+
+  DynamoDB schema for kill switch state (table: risk-state):
+    PK: "kill_switch"
+    active: Boolean — true = all trading halted
+    status: String — "active" | "inactive" | "partial"
+    triggered_by: String — reason/operator ID
+    triggered_at: String — ISO-8601 timestamp
+
+trigger:
+  event: pre_merge
+  paths:
+    - "services/risk_engine/**"
+    - "services/execution_engine/**"
+    - "services/strategy_engine/**"
+    - "services/data_ingestion/**"
+    - "services/ai_engine/**"
+    - "scripts/kill_switch_cli.py"
+
+checks:
+  - id: kill_switch_validator_position
+    description: |
+      KillSwitchValidator must always be validator #2 in risk_engine's validator list.
+      Validator #1 is typically the schema/type validator. Kill switch at #2 ensures
+      no signal processing continues once the switch is active.
+    detect_violation: |
+      # VIOLATION: kill switch validator not at index 1 (0-based = #2)
+      self._validators = [
+          SchemaValidator(),
+          AgeValidator(),        # Kill switch must be here, not AgeValidator
+          KillSwitchValidator(),  # WRONG position
+          ...
+      ]
+    correct_pattern: |
+      self._validators = [
+          SchemaValidator(),       # #1 — type/schema check
+          KillSwitchValidator(),   # #2 — MUST be here
+          SignalAgeValidator(),    # #3
+          UniverseValidator(),     # #4
+          RiskLimitValidator(),    # #5
+          # ... up to 11 validators
+      ]
+
+  - id: kill_switch_consistent_read
+    description: |
+      DynamoDB read for kill switch state must use ConsistentRead=True.
+      Eventually consistent reads may return stale data, allowing signals
+      through after the kill switch has been activated.
+    detect_violation: |
+      # VIOLATION: eventual consistency read
+      response = self._dynamo.get_item(
+          TableName="risk-state",
+          Key={"pk": {"S": "kill_switch"}},
+          # ConsistentRead missing or False
+      )
+    correct_pattern: |
+      response = self._dynamo.get_item(
+          TableName="risk-state",
+          Key={"pk": {"S": "kill_switch"}},
+          ConsistentRead=True,  # REQUIRED — kill switch must be strongly consistent
+      )
+
+  - id: kafka_kill_switch_listener_registered
+    description: |
+      Every service must register a KafkaKillSwitchListener that monitors
+      the risk.kill-switch Kafka topic. This provides real-time kill switch
+      propagation independent of the DynamoDB validator path.
+    detect_violation: |
+      # VIOLATION: service __init__ or startup without KafkaKillSwitchListener
+      class MyService:
+          def __init__(self):
+              self._kafka = KafkaConsumer(...)
+              # No KafkaKillSwitchListener registered
+    correct_pattern: |
+      class MyService:
+          def __init__(self):
+              self._kafka = KafkaConsumer(...)
+              self._kill_switch_listener = KafkaKillSwitchListener(
+                  kafka_client=self._kafka,
+                  topic="risk.kill-switch",
+                  on_activate=self._handle_kill_switch_activated,
+              )
+
+          async def start(self):
+              await self._kill_switch_listener.start()
+              # ... rest of service startup
+
+  - id: startup_grace_period_present
+    description: |
+      Services must implement a startup grace period before processing Kafka events.
+      Without a grace period, a service that restarts during an active kill switch
+      may receive its own startup events from Kafka and immediately re-trigger the
+      kill switch (Bug #4).
+    detect_violation: |
+      # VIOLATION: processing events immediately on startup with no grace period
+      async def start(self):
+          await self._consumer.start()
+          async for msg in self._consumer:
+              await self._process(msg)  # No grace period
+    correct_pattern: |
+      STARTUP_GRACE_SECONDS = 10  # Minimum: allow topic offsets to settle
+
+      async def start(self):
+          await self._consumer.start()
+          self._startup_grace_until = time.monotonic() + STARTUP_GRACE_SECONDS
+          async for msg in self._consumer:
+              if time.monotonic() < self._startup_grace_until:
+                  logger.info("kill_switch.startup_grace", msg_skipped=True)
+                  continue
+              await self._process(msg)
+
+  - id: record_data_tick_before_age_validation
+    description: |
+      In data_ingestion, record_data_tick() must be called BEFORE signal age
+      validation. Bug #3: if kill switch fires during age validation, the tick
+      is never recorded, causing cascading failures on restart when the service
+      tries to replay events from a missing checkpoint.
+    detect_violation: |
+      # VIOLATION: age check before tick recording
+      if signal_age > self._max_age:
+          return  # Bug: tick not recorded
+      await self._record_data_tick(signal)
+    correct_pattern: |
+      # CORRECT: record tick first, then validate age
+      await self._record_data_tick(signal)  # Always record, regardless of age
+      if signal_age > self._max_age:
+          logger.warning("signal.age_exceeded", age=signal_age, limit=self._max_age)
+          return
+
+  - id: no_kill_switch_bypass
+    description: |
+      No conditional logic may skip or bypass the kill switch check.
+      Common violations: checking kill switch only for certain signal types,
+      only during market hours, or only for certain strategies.
+    detect_violation: |
+      # VIOLATION: conditional kill switch check
+      if signal.source != "manual_override":
+          await self._kill_switch_validator.validate(signal)
+
+      # VIOLATION: kill switch only checked during market hours
+      if self._is_market_hours():
+          await self._kill_switch_validator.validate(signal)
+
+on_violation:
+  - action: block_merge
+  - action: critical_alert
+    message: |
+      CRITICAL: kill_switch_integrity rule triggered.
+      The kill switch is a safety-critical mechanism. Any regression in kill
+      switch coverage, positioning, consistency, or listener registration is
+      a production safety risk.
+      DO NOT merge without senior review and explicit confirmation that all
+      kill switch invariants are maintained.

@@ -16,3 +16,6 @@ build/
 htmlcov/
 *.log
 .DS_Store
+
+# Paper trading session archives (contain fill data / DynamoDB dumps)
+session-archives/

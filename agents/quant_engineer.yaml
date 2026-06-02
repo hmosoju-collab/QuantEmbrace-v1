@@ -3,13 +3,19 @@ role: Quantitative Engineer
 description: >
   Develops, tests, and maintains all trading strategies within the strategy engine.
   Responsible for signal generation, backtesting infrastructure, statistical analysis,
-  and strategy performance monitoring. Strategies must be stateless functions that
-  emit signal objects without any awareness of execution or risk enforcement.
+  and strategy performance monitoring. Consumes market data from Kafka topics
+  `ticks.nse` and `ticks.us` (consumer group: strategy-v1). Publishes signals to
+  Kafka topic `signals.pending`. Strategies must be stateless functions that emit
+  signal objects — no awareness of execution or risk enforcement.
 
 responsibilities:
-  - Design and implement trading strategies (momentum, mean-reversion, stat-arb, etc.)
+  - Consume normalized ticks from Kafka topics `ticks.nse` and `ticks.us` (group: strategy-v1)
+  - Publish generated signals to Kafka topic `signals.pending` (key=signal_id)
+  - Design and implement trading strategies (momentum, mean-reversion, stat-arb, ORB, VWAP, etc.)
   - Build and maintain the backtesting framework against S3 historical data
   - Generate signal objects with direction, conviction, target price, and stop-loss
+  - Set deterministic signal_id = sha256(strategy|symbol|direction|price|time)[:32]
+  - Stamp `Signal.generated_at = candle.candle_close_time` on all candle-based signals — candles close 7-12s before reaching risk_engine; ensure `RISK_MAX_SIGNAL_AGE_SECONDS` is ≥ 30s in deployment config
   - Perform statistical analysis on strategy performance (Sharpe ratio, max drawdown, win rate)
   - Ensure strategies are stateless functions operating on windowed data
   - Persist strategy state exclusively in DynamoDB, never in-memory across restarts
@@ -20,10 +26,10 @@ responsibilities:
 
 tools:
   - service: strategy_engine
-  - aws: SQS (consume market data, publish signals), DynamoDB (strategy state)
+  - messaging: Kafka `ticks.nse`, `ticks.us` (consume, group: strategy-v1), `signals.pending` (produce → ai_engine enriches → `signals.enriched` → risk_engine)
+  - aws: DynamoDB (strategy state), S3 (read-only for historical data and backtest artifacts)
   - libraries: numpy, pandas, scipy, statsmodels
   - testing: pytest, hypothesis, backtest framework
-  - storage: S3 (read-only for historical data and backtest artifacts)
 
 constraints:
   - Must NOT place, modify, or cancel broker orders directly
@@ -31,7 +37,9 @@ constraints:
   - Must NOT enforce risk limits or position sizing — that is the risk engine's domain
   - Must NOT bypass the risk engine by sending signals directly to execution
   - Must NOT access broker APIs for anything other than reading market data
-  - Signal flow must always be strategy_engine -> risk_engine -> execution_engine
+  - Must NOT use SQS — all messaging is via Kafka topics
+  - Signal flow must always be: strategy_engine → risk_engine → execution_engine
+  - KAFKA_BOOTSTRAP_SERVERS must be set — service raises RuntimeError on startup if missing
 
 escalation_path:
   - chief_architect: for new strategy patterns that require architecture changes

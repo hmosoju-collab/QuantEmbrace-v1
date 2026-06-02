@@ -2,12 +2,14 @@
 Tick Processor — validates and fans out normalized ticks to all backends.
 
 Receives NormalizedTick objects from connectors, validates them, then
-dispatches to four output destinations:
+dispatches to all output destinations:
 
-    1. S3Writer       — batched historical archive (all ticks)
-    2. DynamoWriter   — latest price snapshot per symbol (fast lookups)
-    3. SQSTickPublisher — streams latest-per-symbol to Strategy Engine
-    4. In-memory stats — tick counts and last-price tracking
+    1. S3Writer            — batched historical archive (all ticks)
+    2. DynamoWriter        — latest price snapshot per symbol (fast lookups)
+    3. KafkaTickPublisher  — streams v3.0 TICK events to ticks.nse / ticks.us
+
+All destinations are optional — the processor runs with whichever backends
+are injected, making it easy to test in isolation.
 
 Adding a new output destination: inject it via __init__ and call it in
 process_tick(). Never modify connector or storage code for routing changes.
@@ -26,8 +28,7 @@ from data_ingestion.storage.dynamo_writer import DynamoWriter
 from data_ingestion.storage.s3_writer import S3Writer
 
 if TYPE_CHECKING:
-    # Avoid circular imports — SQSTickPublisher is injected at runtime
-    from data_ingestion.publishers.sqs_publisher import SQSTickPublisher
+    from data_ingestion.publishers.kafka_tick_publisher import KafkaTickPublisher
 
 logger = get_logger(__name__, service_name="data_ingestion")
 
@@ -37,19 +38,19 @@ class TickProcessor:
     Validates and fans out normalized ticks to all configured backends.
 
     Routing:
-        S3Writer          → every valid tick (batched, historical archive)
-        DynamoWriter      → every valid tick (latest-value per symbol)
-        SQSTickPublisher  → every valid tick (buffered; strategy engine reads)
+        S3Writer           → every valid tick (batched, historical archive)
+        DynamoWriter       → every valid tick (latest-value per symbol)
+        KafkaTickPublisher → every valid tick (ticks.nse / ticks.us topics)
 
-    All three destinations are optional — the processor runs with whichever
-    backends are injected, making it easy to test in isolation.
+    All destinations are optional so the processor is fully testable without
+    any external dependencies.
     """
 
     def __init__(
         self,
         s3_writer: Optional[S3Writer] = None,
         dynamo_writer: Optional[DynamoWriter] = None,
-        sqs_publisher: Optional["SQSTickPublisher"] = None,
+        kafka_publisher: Optional["KafkaTickPublisher"] = None,
         stale_threshold_seconds: float = 60.0,
     ) -> None:
         """
@@ -58,14 +59,12 @@ class TickProcessor:
         Args:
             s3_writer: Writer for batched historical data to S3.
             dynamo_writer: Writer for latest prices to DynamoDB.
-            sqs_publisher: Publisher that forwards ticks to the Strategy Engine
-                           via SQS. If None, ticks are not forwarded downstream.
-            stale_threshold_seconds: Max age (seconds) of a tick before it is
-                                     considered stale and rejected.
+            kafka_publisher: Publishes v3.0 TICK events to Kafka ticks topics.
+            stale_threshold_seconds: Max age (seconds) before a tick is rejected.
         """
         self._s3_writer = s3_writer
         self._dynamo_writer = dynamo_writer
-        self._sqs_publisher = sqs_publisher
+        self._kafka_publisher = kafka_publisher
         self._stale_threshold = stale_threshold_seconds
         self._last_prices: dict[str, float] = {}
         self._last_timestamps: dict[str, datetime] = {}
@@ -80,8 +79,8 @@ class TickProcessor:
             1. Validate (non-zero price, timezone-aware timestamp, not stale).
             2. Update in-memory tracking stats.
             3. Dispatch to S3 (historical archive).
-            4. Dispatch to DynamoDB (latest price).
-            5. Dispatch to SQS (strategy engine feed).
+            4. Dispatch to DynamoDB (latest price snapshot).
+            5. Dispatch to Kafka (ticks.nse / ticks.us — v3.0 TICK event).
 
         Args:
             tick: The normalized tick received from a broker connector.
@@ -104,9 +103,9 @@ class TickProcessor:
         if self._dynamo_writer is not None:
             await self._dynamo_writer.write_tick(tick)
 
-        # 3. Strategy engine feed (SQS, latest-value-per-symbol batching)
-        if self._sqs_publisher is not None:
-            await self._sqs_publisher.publish(tick)
+        # 3. Kafka: ticks.nse / ticks.us (v3.0 event schema, trace_id set here)
+        if self._kafka_publisher is not None:
+            await self._kafka_publisher.publish(tick)
 
     def _validate_tick(self, tick: NormalizedTick) -> bool:
         """

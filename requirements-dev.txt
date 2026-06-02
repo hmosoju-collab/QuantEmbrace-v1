@@ -1,0 +1,4 @@
+# Development-only dependencies can be added here as the test suite grows.
+#
+# Runtime, test, and lint dependencies are currently consolidated in
+# services/requirements.txt for Phase 1 CI stability.

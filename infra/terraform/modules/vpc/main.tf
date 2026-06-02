@@ -1,7 +1,7 @@
 ###############################################################################
 # QuantEmbrace — VPC Module
 # Provides networking foundation: VPC, subnets, NAT, VPC endpoints, and
-# security groups for ECS Fargate tasks.
+# security groups for EC2 ASG instances.
 ###############################################################################
 
 terraform {
@@ -168,8 +168,8 @@ resource "aws_route_table_association" "private" {
 
 # Gateway endpoint: S3 (free)
 resource "aws_vpc_endpoint" "s3" {
-  vpc_id       = aws_vpc.main.id
-  service_name = "com.amazonaws.${data.aws_region.current.name}.s3"
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${data.aws_region.current.name}.s3"
   vpc_endpoint_type = "Gateway"
 
   route_table_ids = concat(
@@ -184,8 +184,8 @@ resource "aws_vpc_endpoint" "s3" {
 
 # Gateway endpoint: DynamoDB (free)
 resource "aws_vpc_endpoint" "dynamodb" {
-  vpc_id       = aws_vpc.main.id
-  service_name = "com.amazonaws.${data.aws_region.current.name}.dynamodb"
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${data.aws_region.current.name}.dynamodb"
   vpc_endpoint_type = "Gateway"
 
   route_table_ids = concat(
@@ -240,6 +240,48 @@ resource "aws_vpc_endpoint" "logs" {
   })
 }
 
+
+
+# Interface endpoint: Secrets Manager
+# Removes secrets retrieval from NAT path — also removes a startup dependency
+# on internet connectivity when containers are initializing.
+resource "aws_vpc_endpoint" "secretsmanager" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.secretsmanager"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project}-${var.environment}-vpce-secretsmanager"
+  })
+}
+
+# MSK (Kafka) — Interface endpoint.
+# MSK Serverless uses port 9098 (SASL/OAUTHBEARER IAM).  Without this endpoint
+# all broker traffic would egress through the NAT Gateway, adding ~$0.045/GB
+# in NAT data-processing charges and routing Kafka traffic over the public
+# internet (SASL_SSL is still encrypted, but VPC-private is always preferred).
+#
+# NOTE: The MSK Serverless VPC connectivity feature requires an additional
+# vpc_id attachment on the MSK cluster itself.  That attachment is managed by
+# the kafka module (aws_msk_serverless_cluster → vpc_config block) which
+# creates its own private ENI.  This VPC endpoint is the client-side binding
+# so EC2 instances resolve the MSK bootstrap hostname to private IPs.
+resource "aws_vpc_endpoint" "msk" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.kafka-broker"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.msk_endpoint.id]
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project}-${var.environment}-vpce-msk"
+  })
+}
+
 # ---------------------------------------------------------------------------
 # Security Groups
 # ---------------------------------------------------------------------------
@@ -274,10 +316,41 @@ resource "aws_security_group" "vpc_endpoints" {
   }
 }
 
+# SG for MSK VPC endpoint — allows port 9098 (SASL/OAUTHBEARER) from EC2 instances.
+# Separate from the generic vpce SG (port 443) because MSK uses a non-standard port.
+resource "aws_security_group" "msk_endpoint" {
+  name_prefix = "${var.project}-${var.environment}-vpce-msk-"
+  description = "Allow MSK Serverless broker port 9098 from EC2 instances"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "MSK Serverless SASL/OAUTHBEARER from EC2 ASG instances"
+    from_port       = 9098
+    to_port         = 9098
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs_tasks.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${var.project}-${var.environment}-vpce-msk-sg"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # SG for ECS tasks
 resource "aws_security_group" "ecs_tasks" {
   name_prefix = "${var.project}-${var.environment}-ecs-tasks-"
-  description = "Security group for ECS Fargate tasks"
+  description = "Security group for EC2 ARM64 ASG instances"
   vpc_id      = aws_vpc.main.id
 
   # Allow all traffic between ECS tasks (inter-service communication)

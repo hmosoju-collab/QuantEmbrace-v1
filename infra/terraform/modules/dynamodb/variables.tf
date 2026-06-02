@@ -30,3 +30,15 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "enable_pitr" {
+  description = "Enable point-in-time recovery on all DynamoDB tables"
+  type        = bool
+  default     = true
+}
+
+variable "data_bucket_name" {
+  description = "S3 bucket name for market data — used to add Phase 5 features/ lifecycle rule. Leave empty to skip lifecycle creation."
+  type        = string
+  default     = ""
+}

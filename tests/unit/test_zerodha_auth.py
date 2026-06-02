@@ -80,10 +80,12 @@ def _install_shared_stubs() -> None:
     sys.modules["shared.config.settings"].get_settings = get_settings
     sys.modules["shared.config.settings"].AppSettings = _AppSettings
     sys.modules["shared.logging.logger"].get_logger = lambda *a, **k: __import__("logging").getLogger("test")
+    sys.modules["shared.logging.logger"].set_correlation_id = lambda *a, **k: None
 
     _NOW = datetime(2025, 10, 1, 10, 0, 0, tzinfo=timezone.utc)  # after 02:00 UTC
     sys.modules["shared.utils.helpers"].utc_now = lambda: _NOW
     sys.modules["shared.utils.helpers"].utc_iso = lambda: _NOW.isoformat()
+    sys.modules["shared.utils.helpers"].generate_order_id = lambda: "test-order-id"
 
     # Wire sub-packages
     sys.modules["shared"].config = sys.modules["shared.config"]
@@ -94,21 +96,111 @@ def _install_shared_stubs() -> None:
     sys.modules["shared.utils"].helpers = sys.modules["shared.utils.helpers"]
 
 
-_install_shared_stubs()
-
-# Stub kiteconnect before importing auth module
-_kite_mod = types.ModuleType("kiteconnect")
-_MockKiteConnect = MagicMock()
-_kite_mod.KiteConnect = _MockKiteConnect
-sys.modules["kiteconnect"] = _kite_mod
-
-from execution_engine.auth.zerodha_auth import (  # noqa: E402
-    TokenExpiredError,
-    ZerodhaTokenManager,
-    _TOKEN_EXPIRY_UTC_HOUR,
-    _TOKEN_PK,
-    _TOKEN_SK,
+# ---------------------------------------------------------------------------
+# Module-level placeholders — NO side-effects at import/collection time
+# ---------------------------------------------------------------------------
+_MODULES_SNAPSHOT: frozenset = frozenset()
+_MISSING = object()
+_MODULES_ORIGINALS: dict[str, object] = {}
+_PARENT_ATTR_ORIGINALS: dict[tuple[str, str], object] = {}
+_OVERWRITTEN_MODULE_KEYS = (
+    "shared",
+    "shared.config",
+    "shared.config.settings",
+    "shared.logging",
+    "shared.logging.logger",
+    "shared.utils",
+    "shared.utils.helpers",
+    "kiteconnect",
+    "execution_engine.auth.zerodha_auth",
+    "execution_engine.brokers.zerodha_broker",
 )
+_OVERWRITTEN_PARENT_ATTRS = (
+    ("shared", "config"),
+    ("shared", "logging"),
+    ("shared", "utils"),
+    ("shared.config", "settings"),
+    ("shared.logging", "logger"),
+    ("shared.utils", "helpers"),
+    ("execution_engine.auth", "zerodha_auth"),
+    ("execution_engine.brokers", "zerodha_broker"),
+)
+_MockKiteConnect = None
+ZerodhaTokenManager = None
+TokenExpiredError = None
+_TOKEN_EXPIRY_UTC_HOUR = None
+_TOKEN_PK = None
+_TOKEN_SK = None
+
+
+def setUpModule() -> None:  # noqa: N802
+    """Called by pytest/unittest AFTER collection, BEFORE running tests."""
+    global _MODULES_SNAPSHOT, _MockKiteConnect, ZerodhaTokenManager
+    global TokenExpiredError, _TOKEN_EXPIRY_UTC_HOUR, _TOKEN_PK, _TOKEN_SK
+    global _MODULES_ORIGINALS, _PARENT_ATTR_ORIGINALS
+
+    _MODULES_SNAPSHOT = frozenset(sys.modules.keys())
+    _MODULES_ORIGINALS = {
+        key: sys.modules.get(key, _MISSING)
+        for key in _OVERWRITTEN_MODULE_KEYS
+    }
+    _PARENT_ATTR_ORIGINALS = {
+        (module_name, attr): getattr(sys.modules[module_name], attr, _MISSING)
+        for module_name, attr in _OVERWRITTEN_PARENT_ATTRS
+        if module_name in sys.modules
+    }
+
+    _install_shared_stubs()
+    sys.modules.pop("execution_engine.auth.zerodha_auth", None)
+    auth_pkg = sys.modules.get("execution_engine.auth")
+    if auth_pkg is not None and hasattr(auth_pkg, "zerodha_auth"):
+        delattr(auth_pkg, "zerodha_auth")
+    sys.modules.pop("execution_engine.brokers.zerodha_broker", None)
+    brokers_pkg = sys.modules.get("execution_engine.brokers")
+    if brokers_pkg is not None and hasattr(brokers_pkg, "zerodha_broker"):
+        delattr(brokers_pkg, "zerodha_broker")
+
+    # Stub kiteconnect before importing auth module
+    _kite_mod = types.ModuleType("kiteconnect")
+    _MockKiteConnect = MagicMock()
+    _kite_mod.KiteConnect = _MockKiteConnect
+    sys.modules["kiteconnect"] = _kite_mod
+
+    from execution_engine.auth.zerodha_auth import (  # noqa: E402
+        TokenExpiredError as _TE,
+        ZerodhaTokenManager as _ZTM,
+        _TOKEN_EXPIRY_UTC_HOUR as _HOUR,
+        _TOKEN_PK as _PK,
+        _TOKEN_SK as _SK,
+    )
+    TokenExpiredError = _TE
+    ZerodhaTokenManager = _ZTM
+    _TOKEN_EXPIRY_UTC_HOUR = _HOUR
+    _TOKEN_PK = _PK
+    _TOKEN_SK = _SK
+
+
+def tearDownModule() -> None:  # noqa: N802
+    """Restore every sys.modules entry and package attr touched by setUpModule."""
+    added = frozenset(sys.modules.keys()) - _MODULES_SNAPSHOT
+    for key in added:
+        sys.modules.pop(key, None)
+    for key, original in _MODULES_ORIGINALS.items():
+        if original is _MISSING:
+            sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = original
+    for (module_name, attr), original in _PARENT_ATTR_ORIGINALS.items():
+        parent = sys.modules.get(module_name)
+        if parent is None:
+            continue
+        if original is _MISSING:
+            try:
+                delattr(parent, attr)
+            except AttributeError:
+                pass
+        else:
+            setattr(parent, attr, original)
 
 
 # ---------------------------------------------------------------------------

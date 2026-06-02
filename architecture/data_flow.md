@@ -1,696 +1,378 @@
 # QuantEmbrace - Data Flow
 
+_Last updated: 2026-05-27 — Phase 6 enriched signal path (signals.enriched) active; Phase 8 hardening in progress; ADR-019 universe model (PAPER_SAFE_START/PAPER_EXPAND/LIVE_ADVANCED) and daily snapshot refresh loop added to execution_engine; ADR-020 paper readiness fixes (signal age 5s→30s, NAV ₹50L→₹10L, strategy config seeding, duplicate suppression)._
+
+---
+
 ## Overview
 
-This document traces every data path in QuantEmbrace from market tick ingestion through
-order execution and back into monitoring. Every flow is designed to be traceable,
-recoverable, and auditable.
+This document traces every data path in QuantEmbrace from market tick ingestion through order execution and back into monitoring. All inter-service flows are Kafka-based. SQS has been permanently removed — there is no migration window or fallback path.
 
 ---
 
-## End-to-End Data Flow Summary
+## End-to-End Data Flow Summary (Phase 3)
 
 ```
-+----------+       +----------+
-| Zerodha  |       |  Alpaca  |
-| Kite WS  |       |    WS    |
-+----+-----+       +----+-----+
-     |                   |
-     | raw ticks         | raw ticks
-     v                   v
-+----+-------------------+-----+
-|     DATA INGESTION           |
-|  (normalize + fan out)       |
-+-----------+------------------+
-            |
-            | MarketTick (normalized)
-            |
-     +------+------+
-     |             |
-     v             v
-+----+----+  +----+--------+
-|DynamoDB |  |    S3        |
-| latest  |  | tick history |
-| prices  |  | (parquet)    |
-+---------+  +----+---------+
-     |             |
-     | real-time   | batch (nightly)
-     v             v
-+----+----+  +----+---------+
-|Strategy |  |   AI/ML      |
-| Engine  |<-+ Feature Pipe |
-+---------+  +--------------+
-     |
-     | Signal
-     v
-+----+----+
-|  RISK   |-----> REJECTED (logged + alerted)
-| ENGINE  |
-+----+----+
-     |
-     | ApprovedOrder
-     v
-+----+------+
-| EXECUTION |
-|  ENGINE   |
-+----+------+
-     |
-     | broker API calls
-     |
-+----+----+----------+
-|         |          |
-v         v          v
-Zerodha   Alpaca   DynamoDB
- API       API     (orders +
-                   positions)
-```
-
----
-
-## Flow 1: Market Data Ingestion
-
-### Zerodha NSE Path
-
-```
-Zerodha Kite Ticker (WebSocket)
-        |
-        | on_ticks() callback
-        | raw payload: {instrument_token, ltp, bid, ask, volume, ...}
-        v
-+-------+--------+
-| NSE Ingestion  |
-| Service        |
-|                |
-| 1. Parse raw   |
-| 2. Normalize   |
-|    to MarketTick|
-| 3. Fan out     |
-+---+--------+---+
-    |        |
-    v        v
-DynamoDB    S3
-```
-
-**Step-by-step:**
-
-1. **WebSocket Connect**: At market open (09:00 IST), the `data-ingestion-nse` service
-   establishes a WebSocket connection to Zerodha Kite Ticker.
-
-2. **Subscribe**: Subscribes to configured instruments in `full` mode:
-   ```python
-   kws.subscribe([instrument_tokens])
-   kws.set_mode(kws.MODE_FULL, [instrument_tokens])
-   ```
-
-3. **Receive Ticks**: `on_ticks` callback fires with batched tick data (Kite batches
-   ticks and delivers them roughly every second).
-
-4. **Normalize**: Each raw tick is converted to a `MarketTick`:
-   ```python
-   def normalize_zerodha_tick(raw: dict) -> MarketTick:
-       return MarketTick(
-           market="NSE",
-           instrument=f"NSE:{token_to_symbol[raw['instrument_token']]}",
-           ltp=Decimal(str(raw['last_price'])),
-           bid=Decimal(str(raw['depth']['buy'][0]['price'])),
-           ask=Decimal(str(raw['depth']['sell'][0]['price'])),
-           volume=raw['volume_traded'],
-           timestamp=datetime.utcnow(),
-           raw=raw,
-       )
-   ```
-
-5. **Write to DynamoDB** (hot path):
-   ```
-   Table: latest-prices
-   Key: {market}#{instrument} = "NSE#RELIANCE"
-   Attributes: ltp, bid, ask, volume, timestamp
-   Conditional write: only if incoming timestamp > stored timestamp
-   ```
-
-6. **Buffer and Write to S3** (cold path):
-   - Ticks are buffered in memory (list of MarketTick objects)
-   - Every 5 minutes, buffer is flushed to S3 as a Parquet file
-   - Path: `s3://quantembrace-market-data-history/NSE/{symbol}/{date}/{hour}/ticks_{minute}.parquet`
-   - Buffer flush is async -- does not block tick processing
-
-### Alpaca US Path
-
-Identical flow pattern with Alpaca-specific normalization:
-
-```
-Alpaca WebSocket (wss://stream.data.alpaca.markets)
-        |
-        | on_trade / on_quote callbacks
-        v
-+-------+---------+
-| US Ingestion    |
-| Service         |
-|                 |
-| 1. Parse raw    |
-| 2. Normalize    |
-|    to MarketTick|
-| 3. Fan out      |
-+---+---------+---+
-    |         |
-    v         v
-DynamoDB     S3
-```
-
-**Key difference**: Alpaca provides separate trade and quote streams. The service
-merges these into a single `MarketTick` using the latest available data for each field.
-
-### Reconnection Logic
-
-Both ingestion services implement the same reconnection strategy:
-
-```
-on_disconnect:
-  attempt = 0
-  while attempt < MAX_RECONNECT_ATTEMPTS (5):
-      wait = min(2^attempt, 30) seconds  # exponential backoff, cap at 30s
-      sleep(wait)
-      try:
-          reconnect()
-          resubscribe()
-          log("reconnected after {attempt} attempts")
-          return
-      except:
-          attempt += 1
-
-  # All attempts exhausted
-  trigger_alert("CRITICAL: WebSocket reconnection failed after 5 attempts")
-  activate_kill_switch()  # Safety: no data = no trading
+  Zerodha Kite Ticker          Alpaca WebSocket
+  (NSE — full mode)            (US trades + quotes)
+        │                              │
+        │ raw ticks (WebSocket)        │ raw ticks (WebSocket)
+        ▼                              ▼
+  ┌─────────────────────────────────────────────┐
+  │  Data Ingestion Service                      │
+  │  ┌──────────────────────────────────────┐   │
+  │  │  Normalize → MarketTick (v3.0)       │   │
+  │  │  Assign trace_id (uuid4, per tick)   │   │
+  │  │  Assign sequence_id (monotonic)      │   │
+  │  └──────────────────────────────────────┘   │
+  └─────────┬────────────────────┬──────────────┘
+            │                    │
+            │                    │ OHLCV candles (IntradayCandleStream)
+            │                    ▼
+            │          DynamoDB: candle-cache          ← Phase 3
+            │          (TTL 2h, GSI: candle_open_time)
+            │
+         ┌──┴────────────────────────────────────┐
+         │                                        │
+         ▼                                        ▼
+  Kafka: ticks.nse / ticks.us             DynamoDB: latest-prices
+  (v3.0 TICK, 2 partitions)               (hot cache, TTL 24h)
+         │                                        │
+         │                                        ▼
+         │                                  S3: tick-data/
+         │                                  (Parquet, partitioned)
+         │
+         ├───── consumer group: strategy-v1      ┌──── poll every 500ms ← Phase 3
+         │             │                          │
+         │       ┌─────┴──────────────────────────┴──────────────────────────────┐
+         │       │  Strategy Engine Service (4-loop asyncio.gather)              │
+         │       │                                                                │
+         │       │  Loop A — Kafka tick path:                                    │
+         │       │    KafkaTickConsumer → StrategyRunner(TICK) → dispatch_tick() │
+         │       │    └─► MomentumStrategy                                       │
+         │       │                                                                │
+         │       │  Loop B — DynamoDB candle path (Phase 3):                    │
+         │       │    DynamoCandleConsumer.poll_new_candles()                    │
+         │       │    → route by candle_interval + symbols                       │
+         │       │    → StrategyRunner(CANDLE) → dispatch_bar()                  │
+         │       │    └─► ORBStrategy (15min)                                    │
+         │       │    └─► Scalp1mStrategy (1min)                                 │
+         │       │    └─► VWAPReversionStrategy (5min)                           │
+         │       │    └─► IntradayTrend15mStrategy (15min)                       │
+         │       │    └─► PreCloseMomentumStrategy (15min)                       │
+         │       │                                                                │
+         │       │  Loop C — Config refresh (Phase 3):                          │
+         │       │    StrategyConfigLoader.refresh_all() every 60s              │
+         │       │    reads DynamoDB: strategy-config                            │
+         │       │    → StrategyRunner.apply_config() (hot-reload, no restart)  │
+         │       │                                                                │
+         │       │  Loop D — Kill switch listener:                              │
+         │       │    Kafka kill.switch topic                                    │
+         │       │                                                                │
+         │       │  Each StrategyRunner has its own CircuitBreaker:             │
+         │       │    OPEN on 5 consecutive errors OR 10 errors/5min            │
+         │       │    → returns None, does not affect other runners              │
+         │       │                                                                │
+         │       │  Signal stamping (Phase 3):                                   │
+         │       │    signal.paper_trade ← strategy-config.paper_trade          │
+         │       │    → KafkaSignalPublisher → signals.pending                  │
+         │       └────────────────────────────────────────────────┬─────────────┘
+         │                                                         │
+         │                                              Kafka: signals.pending
+         │                                              (SIGNAL_PENDING, 2 parts)
+         │                                              (signal_id = sha256 determ.)
+         │                                              (expires_at = +30s)
+         │                                              (paper_trade = from config)
+         │
+         └───── consumer group: risk-v1
+                                        │
+                                  ┌─────┴──────────────────────┐
+                                  │  Risk Engine                 │
+                                  │  ┌────────────────────────┐ │
+                                  │  │ validate(signal):       │ │
+                                  │  │  1. kill_switch_check  │ │
+                                  │  │  2. position_limit     │ │
+                                  │  │  3. exposure_check     │ │
+                                  │  │  4. stop_loss_check    │ │
+                                  │  │  5. drawdown_check     │ │
+                                  │  │  6. instrument_limit   │ │
+                                  │  │  7. margin_check       │ │
+                                  │  └────────────────────────┘ │
+                                  │   APPROVED → signals.approved│
+                                  │   REJECTED → ops.audit only  │
+                                  └─────┬────────────────────────┘
+                                        │
+                          Kafka: signals.approved      DynamoDB: risk-state
+                          (SIGNAL_APPROVED, 2 parts)   (P&L, kill switch)
+                          (paper_trade preserved)
+                                  │
+                consumer group: execution-v1
+                                  │
+                           ┌──────┴──────────────────────┐
+                           │  Execution Engine             │
+                           │  → validate signal not stale  │
+                           │  → DynamoDB idempotency check │
+                           │  → paper_trade=True  → Alpaca paper endpoint
+                           │  → paper_trade=False → live broker
+                           │  → poll for fill (300ms)      │
+                           │  → KafkaOrderEventsPublisher  │
+                           └──────┬──────────────────────┘
+                                  │
+                       ┌──────────┴──────────┐
+                       ▼                      ▼
+                  Zerodha API            Alpaca API
+                  (NSE live orders)      (US live / paper)
+                       │                      │
+                       └──────────┬───────────┘
+                                  │ fill confirmed
+                                  ▼
+                          Kafka: orders.events
+                          (ORDER_FILLED / ORDER_REJECTED)
+                                  │
+                          consumed by risk-v1
+                          (real-time P&L update)
+                                  │
+                          DynamoDB: positions + orders
+                          S3: trading-logs/ (audit)
 ```
 
 ---
 
-## Flow 2: Signal Generation
+## Phase 3: Candle-Cache Data Flow
+
+The DynamoDB candle-cache path is how all five candle-based strategies receive market data without touching the Zerodha API rate limit budget.
 
 ```
-+------------------+      +------------------+
-|    DynamoDB      |      |     AI/ML        |
-|  latest-prices   |      |  Enrichment      |
-+--------+---------+      +--------+---------+
-         |                         |
-         | poll / stream           | predictions
-         v                         v
-+--------+-------------------------+---------+
-|              STRATEGY ENGINE               |
-|                                            |
-|  for each active strategy:                 |
-|    1. Receive latest MarketTick            |
-|    2. Update internal state (indicators)   |
-|    3. Check signal conditions              |
-|    4. If triggered: create Signal          |
-|    5. Enrich with ML predictions (optional)|
-|    6. Emit Signal to Risk Engine           |
-|                                            |
-+--------------------+-----------------------+
-                     |
-                     | Signal
-                     v
-              [Risk Engine]
+data_ingestion / IntradayCandleStream
+    │  writes every closed candle (1m, 5m, 15m intervals)
+    │  PK = "{market}#{instrument}#{interval}#{candle_open_time}"
+    │  TTL = 2h (auto-evict stale candles)
+    ▼
+DynamoDB: {prefix}-candle-cache
+    ▲
+    │  poll every 500ms
+    │  FilterExpression: candle_open_time >= (now - 3min)
+    │  in-memory dedup: trace_id → timestamp
+    │    (prevents same candle dispatching twice)
+    │    (eviction: every 30s, remove entries > 5min old)
+strategy_engine / DynamoCandleConsumer
+    │
+    ▼  route by interval + symbols
+StrategyRunner(CANDLE).dispatch_bar(bar)
+    │
+    ▼
+strategy.on_bar(bar) → strategy.generate_signal()
+    │
+    ▼
+signal (paper_trade stamped from strategy-config)
+    │
+    ▼
+KafkaSignalPublisher → signals.pending
 ```
 
-**Data Access Pattern:**
+**Why DynamoDB, not Kafka, for candles:**
 
-The Strategy Engine reads from DynamoDB `latest-prices` table using a polling loop:
-
-```python
-while market_is_open():
-    # Batch read all subscribed instruments
-    ticks = dynamodb.batch_get_items(
-        table="latest-prices",
-        keys=[f"{market}#{inst}" for inst in instruments]
-    )
-
-    for strategy in active_strategies:
-        for tick in ticks:
-            signal = strategy.on_tick(tick)
-            if signal:
-                emit_to_risk_engine(signal)
-
-    await asyncio.sleep(0.5)  # 500ms polling interval
-```
-
-**Why polling instead of DynamoDB Streams:**
-- Streams add latency (processing delay) and cost
-- Polling gives consistent, predictable latency
-- 500ms is fast enough for our strategies (not HFT)
-- Simpler to implement and debug
+Candles at 1m/5m/15m are low-frequency (at most 1 per symbol per interval per minute). DynamoDB Scan with a 3-minute lookback window reads ~150 items maximum (50 symbols × 3 intervals). At 0.5 RCU per Scan with the candle_open_time GSI, the daily cost is negligible. The overlapping lookback + dedup guarantees at-least-once delivery without a Kafka consumer group or offset management.
 
 ---
 
-## Flow 3: Risk Validation
+## Phase 3: paper_trade Pipeline
+
+Every signal carries a `paper_trade` boolean (added in Phase 3, schema v3.0, safe default `False`). The flag is controlled exclusively by DynamoDB strategy-config — strategies never set it directly.
 
 ```
-Signal arrives from Strategy Engine
-        |
-        v
-+-------+--------+
-|   RISK ENGINE   |
-|                 |
-|   Sequential    |
-|   Checks:       |
-|                 |
-|   1. kill_switch|----> REJECT: "kill switch active"
-|   2. pos_limit  |----> REJECT: "max positions reached"
-|   3. exposure   |----> REJECT: "exposure limit exceeded"
-|   4. stop_loss  |----> REJECT: "no stop-loss provided"
-|   5. drawdown   |----> REJECT: "daily drawdown exceeded"
-|   6. instrument |----> REJECT: "instrument limit exceeded"
-|   7. margin     |----> REJECT: "insufficient margin"
-|                 |
-|   ALL PASS:     |
-|   Signal ->     |
-|   ApprovedOrder |
-+-------+---------+
-        |
-        | ApprovedOrder (or RejectedSignal)
-        v
-+-------+---------+
-|                  |
-| Write to DynamoDB|
-| risk-state table |
-| (audit trail)    |
-|                  |
-+------------------+
+DynamoDB: strategy-config
+  paper_trade = True   ←── default for all strategies (until 5-day paper validation)
+       │
+       │ read every 60s by StrategyConfigLoader
+       ▼
+StrategyRunner._apply_paper_flag(signal)
+  signal.paper_trade = True
+       │
+       ▼
+signals.pending  ──►  risk_engine  ──►  signals.approved
+                                              │
+                                              ▼
+                                    execution_engine
+                                    if paper_trade=True:
+                                        → Alpaca paper API endpoint
+                                        → no real broker call
+                                    if paper_trade=False:
+                                        → live broker (Zerodha / Alpaca live)
 ```
 
-**Risk Engine Data Dependencies:**
+**Go-live flow for a strategy:**
+1. Operator monitors paper signals for 5 trading days — confirms P&L logic is correct
+2. Operator runs: `python scripts/strategy/config.py go-live nse_orb_15m --env production`
+3. CLI requires typing the strategy name to confirm (prevents accidental promotion)
+4. DynamoDB: `strategy-config.paper_trade = False`
+5. StrategyConfigLoader picks up the change within 60s — no service restart
+
+---
+
+## Phase 3: Hot-Reload Config Flow
 
 ```
-                      +----------+
-                      | DynamoDB |
-                      +----+-----+
-                           |
-          +----------------+----------------+
-          |                |                |
-   +------+-----+  +------+-----+  +------+------+
-   | positions  |  | risk-state |  | risk-config |
-   | table      |  | table      |  | table       |
-   |            |  |            |  |             |
-   | Current    |  | Daily PnL  |  | Limits      |
-   | open       |  | Kill switch|  | Thresholds  |
-   | positions  |  | Drawdown   |  | Parameters  |
-   +------------+  +------------+  +-------------+
+DynamoDB: strategy-config
+  (operator updates via scripts/strategy/config.py)
+       │
+       │ polled every 60s
+       ▼
+StrategyConfigLoader.refresh_all()
+  for each registered runner:
+    config, reset_cb = _load_config(strategy_name)
+    runner.apply_config(config, reset_cb=reset_cb)
+    if reset_cb and apply returned True:
+        _clear_reset_flag(strategy_name)   ← writes reset=False back to DynamoDB
+
+Configurable per strategy:
+  enabled                              → skip dispatch immediately
+  paper_trade                          → stamp on outgoing signals
+  max_signals_per_day                  → daily hard cap (UTC day)
+  circuit_breaker_threshold_consecutive → open after N consecutive errors
+  circuit_breaker_threshold_rate        → open after N errors/5min
+  circuit_breaker_reset                → operator-set flag for manual reset
 ```
 
-**Every rejected signal is logged with full context:**
+**Circuit breaker manual reset flow:**
+```
+Operator sets:  scripts/strategy/reset_circuit_breaker.py nse_orb_15m --env production
+                → DynamoDB: circuit_breaker_reset = True
 
-```json
-{
-    "event": "signal_rejected",
-    "signal_id": "abc-123",
-    "strategy": "momentum_breakout",
-    "instrument": "NSE:RELIANCE",
-    "direction": "BUY",
-    "quantity": 100,
-    "rejection_reason": "daily_drawdown_exceeded",
-    "risk_state": {
-        "current_daily_pnl": -31500.00,
-        "max_daily_drawdown": -30000.00,
-        "kill_switch_activated": true
-    }
-}
+Within 60s:     StrategyConfigLoader detects reset_cb=True
+                → CircuitBreaker.reset() → OPEN → CLOSED immediately
+                → StrategyConfigLoader._clear_reset_flag() → reset=False in DynamoDB
+
+CloudWatch log: strategy_runner.circuit_breaker_reset_manual strategy=nse_orb_15m
 ```
 
 ---
 
-## Flow 4: Order Execution
+## trace_id Propagation
+
+Every trade lifecycle is traceable via a single `trace_id` UUID set at tick origin and never modified.
 
 ```
-ApprovedOrder from Risk Engine
-        |
-        v
-+-------+---------+
-| EXECUTION ENGINE |
-|                  |
-| 1. Check idempotency (DynamoDB orders table)
-|    - If order_id exists with PLACED/FILLED: skip
-|    - If order_id exists with FAILED: retry
-|    - If new: proceed
-|                  |
-| 2. Write PENDING to DynamoDB orders table
-|                  |
-| 3. Select broker adapter based on market
-|    - NSE -> ZerodhaAdapter
-|    - US  -> AlpacaAdapter
-|                  |
-| 4. Place order via adapter
-|    - Translate to broker-specific format
-|    - Submit API call
-|    - Receive broker_order_id
-|                  |
-| 5. Update DynamoDB orders table
-|    - status: PLACED
-|    - broker_order_id: <received>
-|                  |
-| 6. Start fill monitoring
-|    - Poll broker for order status
-|    - Update on fill/partial/reject
-|                  |
-+-------+---------+
-        |
-        | OrderResult
-        v
-+-------+---------+
-|  POST-EXECUTION  |
-|                  |
-| 1. Update DynamoDB positions table
-|    - Add/modify position
-|    - Update average price
-|                  |
-| 2. Notify Risk Engine
-|    - New position info
-|    - PnL update
-|                  |
-| 3. Log execution details
-|    - Fill price, slippage, latency
-|                  |
-+------------------+
+KafkaTickPublisher              sets trace_id = uuid4()       [TICK event]
+    │
+    ▼
+strategy_engine                 propagates trace_id unchanged  [SIGNAL_PENDING event]
+    │
+    ▼
+risk_engine                     propagates trace_id unchanged  [SIGNAL_APPROVED event]
+    │
+    ▼
+execution_engine                propagates trace_id unchanged  [ORDER_FILLED event]
 ```
 
-### Zerodha Order Placement Detail
+**CloudWatch Logs Insights query to trace a full trade lifecycle:**
 
-```python
-def place_order_zerodha(order: ApprovedOrder) -> OrderResult:
-    try:
-        broker_order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NSE,
-            tradingsymbol=order.instrument.split(":")[1],
-            transaction_type=kite.TRANSACTION_TYPE_BUY if order.direction == "BUY"
-                           else kite.TRANSACTION_TYPE_SELL,
-            quantity=order.quantity,
-            product=kite.PRODUCT_MIS,  # or CNC for delivery
-            order_type=MAP_ORDER_TYPE[order.order_type],
-            price=float(order.limit_price) if order.limit_price else None,
-            trigger_price=float(order.stop_price) if order.stop_price else None,
-            tag=order.order_id[:20],  # Kite allows 20-char tag for tracking
-        )
-        return OrderResult(
-            order_id=order.order_id,
-            broker_order_id=str(broker_order_id),
-            status="PLACED",
-            placed_at=datetime.utcnow(),
-        )
-    except KiteException as e:
-        return OrderResult(
-            order_id=order.order_id,
-            status="FAILED",
-            error=str(e),
-            retryable=e.code in RETRYABLE_ERROR_CODES,
-        )
+```
+fields @timestamp, service, event_type, signal_id, order_id, direction, price_at_signal
+| filter trace_id = "your-trace-id-here"
+| sort @timestamp asc
 ```
 
-### Alpaca Order Placement Detail
+Returns: TICK → SIGNAL_PENDING → SIGNAL_APPROVED → ORDER_FILLED, with latencies at each hop.
 
-```python
-def place_order_alpaca(order: ApprovedOrder) -> OrderResult:
-    try:
-        alpaca_order = api.submit_order(
-            symbol=order.instrument.split(":")[1],
-            qty=order.quantity,
-            side="buy" if order.direction == "BUY" else "sell",
-            type=MAP_ORDER_TYPE[order.order_type],
-            time_in_force="day",
-            limit_price=str(order.limit_price) if order.limit_price else None,
-            stop_price=str(order.stop_price) if order.stop_price else None,
-            client_order_id=order.order_id,  # Alpaca supports client order IDs natively
-        )
-        return OrderResult(
-            order_id=order.order_id,
-            broker_order_id=alpaca_order.id,
-            status="PLACED",
-            placed_at=datetime.utcnow(),
-        )
-    except APIError as e:
-        return OrderResult(
-            order_id=order.order_id,
-            status="FAILED",
-            error=str(e),
-            retryable=e.status_code in [429, 500, 502, 503],
-        )
+---
+
+## Signal ID Determinism
+
+```
+signal_id = sha256(
+    strategy_name + "|" +
+    symbol        + "|" +
+    direction     + "|" +
+    f"{price:.4f}" + "|" +
+    signal_time.isoformat()
+)[:32 hex chars]
+```
+
+**Why deterministic:** A restarted strategy engine replaying the same tick produces the same `signal_id`. The risk engine's DynamoDB conditional write (`attribute_not_exists(signal_id)`) silently discards duplicate signal decisions. No duplicate orders are placed.
+
+---
+
+## Kill Switch Data Flow
+
+The kill switch is the highest-priority control plane path. It bypasses the normal message processing order.
+
+```
+Trigger sources:
+  Manual:     ops script → DynamoDB risk-state.kill_switch = ACTIVE
+  CloudWatch: alarm → SNS → Lambda → DynamoDB risk-state.kill_switch = ACTIVE
+  Any service: produce to Kafka kill.switch topic
+
+  Kafka kill.switch topic (1 partition, replicated to all consumer groups)
+       │
+       ├──► risk_engine kill-switch-listener task
+       │    → reject all new signals immediately
+       │    → publish KILL_SWITCH_ACTIVE to ops.audit
+       │
+       ├──► strategy_engine kill-switch-listener task
+       │    → suppress all signal generation immediately
+       │
+       └──► execution_engine kill-switch-listener task
+            → cancel all open broker orders
+            → halt all new order placement
+
+DynamoDB risk-state.kill_switch is also polled at every processing loop
+iteration as a fallback for services that missed the Kafka event.
 ```
 
 ---
 
-## Flow 5: Position Tracking
+## DynamoDB Read/Write Patterns
 
-```
-+------------------+     +------------------+
-| Execution Engine |     |  Broker API      |
-| (fill received)  |     | (position sync)  |
-+--------+---------+     +--------+---------+
-         |                        |
-         | on each fill           | periodic reconciliation
-         v                        v
-+--------+------------------------+---------+
-|              POSITION MANAGER              |
-|                                            |
-|  1. Update position in DynamoDB            |
-|     - Instrument, qty, avg_price, side     |
-|     - Unrealized PnL (using latest price)  |
-|     - Realized PnL (on closes)             |
-|                                            |
-|  2. Reconcile with broker positions        |
-|     - Every 5 minutes during market hours  |
-|     - Flag discrepancies for manual review |
-|                                            |
-|  3. Feed risk engine                       |
-|     - Total exposure update                |
-|     - Per-instrument exposure update       |
-|     - PnL update                           |
-|                                            |
-+--------------------+-----------------------+
-                     |
-                     v
-              +------+------+
-              |  DynamoDB   |
-              |  positions  |
-              |  table      |
-              +------+------+
-                     |
-                     | Risk Engine reads
-                     v
-              +------+------+
-              | Risk Engine |
-              | (monitors   |
-              |  exposure)  |
-              +-------------+
-```
+| Table              | Writer(s)                          | Reader(s)                                           | Key Pattern                                            |
+|-------------------|------------------------------------|-----------------------------------------------------|--------------------------------------------------------|
+| `latest-prices`   | data_ingestion                     | strategy_engine (indicator seed)                    | `{MARKET}#{INSTRUMENT}` (PK)                           |
+| `orders`          | execution_engine                   | execution_engine (idempotency check)                | `order_id` (PK)                                        |
+| `positions`       | execution_engine, risk_engine      | risk_engine (exposure check)                        | `{market}#{instrument}` (PK)                           |
+| `risk-state`      | risk_engine, kill-switch Lambda    | risk_engine (every loop iteration)                  | `key` (PK): `kill_switch`, `daily_pnl_{date}`          |
+| `strategy-state`  | strategy_engine                    | strategy_engine (startup rehydrate)                 | `{strategy_name}#{symbol}` (PK)                        |
+| `candle-cache`    | data_ingestion (IntradayCandleStream) | strategy_engine (DynamoCandleConsumer, 500ms poll) | `{market}#{instrument}#{interval}#{candle_open_time}` (PK); GSI on `candle_open_time` |
+| `strategy-config` | ops CLI (scripts/strategy/config.py), StrategyConfigLoader (reset flag clear) | strategy_engine (every 60s) | `STRATEGY#{name}` (PK), `CONFIG#{env}` (SK) |
 
-### DynamoDB Positions Table Schema
-
-```
-Table: positions
-Partition Key: market#instrument (e.g., "NSE#RELIANCE")
-
-Attributes:
-  market:           String   "NSE"
-  instrument:       String   "RELIANCE"
-  direction:        String   "LONG" or "SHORT"
-  quantity:         Number   100
-  avg_entry_price:  Number   2450.50
-  current_price:    Number   2465.00
-  unrealized_pnl:   Number   1450.00
-  realized_pnl:     Number   0.00
-  stop_loss_price:  Number   2401.49
-  opened_at:        String   "2026-04-23T10:15:00Z"
-  last_updated:     String   "2026-04-23T11:30:00Z"
-  strategy:         String   "momentum_breakout"
-  order_ids:        List     ["abc-123", "def-456"]
-```
-
-### Reconciliation Process
-
-```
-Every 5 minutes:
-
-  broker_positions = adapter.get_positions()
-  db_positions = dynamodb.scan("positions", market=market)
-
-  for each instrument:
-      broker_qty = broker_positions.get(instrument, 0)
-      db_qty = db_positions.get(instrument, 0)
-
-      if broker_qty != db_qty:
-          log.error("POSITION MISMATCH", instrument=instrument,
-                    broker=broker_qty, db=db_qty)
-          alert("Position mismatch detected for {instrument}")
-          # Do NOT auto-correct. Flag for manual review.
-          # Auto-correction could mask bugs and compound errors.
-```
+**DynamoDB consistency rules:**
+- Kill switch reads: `ConsistentRead=True` (never stale)
+- Position reads before risk decision: `ConsistentRead=True`
+- All other reads: eventual consistency (cheaper, acceptable)
+- All writes: conditional expressions to prevent race conditions
 
 ---
 
-## Flow 6: AI/ML Pipeline
+## S3 Write Patterns
 
-```
-+---------------------+
-|  S3                  |
-|  market-data-history |
-|  (Parquet files)     |
-+---------+-----------+
-          |
-          | read historical data
-          v
-+---------+-----------+
-|  FEATURE PIPELINE   |  (runs nightly as batch ECS task)
-|                     |
-|  1. Load N days of  |
-|     tick data       |
-|  2. Resample to     |
-|     bars (1m, 5m)   |
-|  3. Compute features|
-|     - SMA, EMA      |
-|     - RSI, MACD     |
-|     - Volatility    |
-|     - Volume profile|
-|     - Correlation   |
-|  4. Store feature   |
-|     dataset in S3   |
-+---------+-----------+
-          |
-          | feature datasets
-          v
-+---------+-----------+
-|  MODEL TRAINING     |  (runs weekly or on-demand)
-|                     |
-|  1. Load features   |
-|  2. Train models    |
-|     - XGBoost for   |
-|       volatility    |
-|     - Random Forest |
-|       for regime    |
-|  3. Evaluate on     |
-|     holdout set     |
-|  4. If improved:    |
-|     save to S3      |
-|     model registry  |
-+---------+-----------+
-          |
-          | model artifacts (ONNX/pickle)
-          v
-+---------+-----------+
-|  S3 MODEL REGISTRY  |
-|                     |
-|  models/            |
-|    vol_predictor/   |
-|      v1.0.0/        |
-|    regime_clf/      |
-|      v1.0.0/        |
-+---------+-----------+
-          |
-          | loaded at startup
-          v
-+---------+-----------+
-|  STRATEGY ENGINE    |
-|  (inference)        |
-|                     |
-|  On each tick:      |
-|  1. Extract live    |
-|     features        |
-|  2. Run model       |
-|     inference       |
-|  3. Enrich signal   |
-|     with prediction |
-|     (e.g., vol adj  |
-|      position size) |
-+---------------------+
-```
-
-### AI/ML Output Integration
-
-The AI/ML layer does NOT generate signals directly. It enriches strategy signals:
-
-```python
-@dataclass
-class MLEnrichment:
-    predicted_volatility: float     # Next-hour predicted volatility
-    regime: str                     # "trending", "ranging", "volatile"
-    regime_confidence: float        # 0.0 - 1.0
-    suggested_position_scale: float # 0.5 - 1.5 multiplier
-
-# Strategy uses enrichment to adjust signal:
-signal.quantity = int(base_quantity * enrichment.suggested_position_scale)
-signal.metadata["ml_regime"] = enrichment.regime
-signal.metadata["ml_volatility"] = enrichment.predicted_volatility
-```
+| Bucket              | Written by        | Format        | Partitioning                          | Lifecycle         |
+|--------------------|-------------------|---------------|---------------------------------------|-------------------|
+| `tick-data`         | data_ingestion    | Parquet       | `{market}/{instrument}/{date}/{hour}` | Glacier 90d (dev/staging), 365d (prod) |
+| `ohlcv-data`        | data_ingestion    | Parquet       | `{market}/{instrument}/{date}`        | Glacier 90d       |
+| `trading-logs`      | risk_engine, execution_engine | JSON (newline-delimited) | `{service}/{date}` | Glacier 90d |
+| `model-artifacts`   | offline training  | ONNX / pickle | `models/{name}/{version}/`            | No expiry         |
 
 ---
 
-## Flow 7: Monitoring and Alerting
+## Monitoring Data Flow
 
 ```
-All Services
-     |
-     | structured JSON logs
-     v
-+----+----------+
-|  CloudWatch   |
-|  Logs         |
-+----+----------+
-     |
-     | metric filters
-     v
-+----+----------+
-|  CloudWatch   |
-|  Metrics      |
-|               |
-|  Custom:      |
-|  - trade_count|
-|  - pnl_daily  |
-|  - latency_ms |
-|  - error_count|
-|  - ws_status  |
-+----+----------+
-     |
-     | threshold alarms
-     v
-+----+----------+
-|  CloudWatch   |
-|  Alarms       |
-|               |
-|  CRITICAL:    |
-|  - ws_disconn |    +----------+
-|    > 60s      +--->|   SNS    |---> Email + SMS
-|  - error_rate |    +----------+
-|    > 10%      |
-|  - drawdown   |
-|    > threshold|
-|  - ecs_crash  |
-+---------------+
+All services emit:
+  → CloudWatch Logs (structured JSON, service log group)
+  → CloudWatch Metrics (custom namespace per service)
+
+Key custom metrics:
+  TradingSystem/OrderPlacementLatencyMs   (execution_engine)
+  TradingSystem/TickToSignalLatencyMs     (strategy_engine)
+  TradingSystem/WebSocketGapSeconds       (data_ingestion)
+  TradingSystem/DailyPnL                  (risk_engine)
+  ZerodhaRateLimit/TokenBucketLevel       (execution_engine)
+  ZerodhaRateLimit/FillDetectionLatencyMs (execution_engine)
+  KafkaConsumerLag/{topic}/{group}        (all services)
+
+CloudWatch Alarms:
+  WebSocket gap > 10s  → SNS → Lambda → DynamoDB kill_switch = ACTIVE
+  Kafka consumer lag spike → SNS → ops alert (signals not being consumed)
+  P&L drawdown ≥ halt  → SNS → Lambda → DynamoDB kill_switch = ACTIVE
+  Order rejection > 20%→ SNS → ops alert
+  Consumer lag spike   → SNS → ops alert
 ```
-
-### Key Metrics Tracked
-
-| Metric                    | Source           | Alarm Threshold           | Action            |
-|---------------------------|------------------|---------------------------|--------------------|
-| ws_connected              | Data Ingestion   | 0 for > 60s              | Alert + kill switch|
-| tick_lag_seconds           | Data Ingestion   | > 5s                     | Alert              |
-| signals_generated_count    | Strategy Engine  | 0 for > 30min (mkt open) | Alert              |
-| signals_rejected_count     | Risk Engine      | > 20 in 5min             | Alert              |
-| orders_placed_count        | Execution Engine | Informational             | Dashboard          |
-| order_failure_rate         | Execution Engine | > 10% in 5min            | Alert + kill switch|
-| daily_pnl                  | Risk Engine      | < -drawdown_limit        | Kill switch        |
-| execution_latency_ms       | Execution Engine | p99 > 2000ms             | Alert              |
-| position_mismatch_count    | Position Manager | > 0                      | Alert              |
-
----
-
-## Data Retention Policy
-
-| Data Type          | Storage     | Retention    | Format   | Access Pattern         |
-|--------------------|-------------|--------------|----------|------------------------|
-| Live prices        | DynamoDB    | 24h TTL      | JSON     | Real-time reads        |
-| Tick history       | S3 Standard | 90 days      | Parquet  | Backtesting, ML        |
-| Tick history (old) | S3 Glacier  | 3 years      | Parquet  | Rare analysis          |
-| Orders             | DynamoDB    | 1 year       | JSON     | Audit, debugging       |
-| Positions          | DynamoDB    | Current only | JSON     | Real-time monitoring   |
-| Logs               | CloudWatch  | 30 days      | JSON     | Debugging              |
-| Logs (archived)    | S3          | 1 year       | JSON.gz  | Compliance, audit      |
-| Model artifacts    | S3          | All versions | ONNX/pkl | Inference, rollback    |
-| Feature datasets   | S3          | 90 days      | Parquet  | Model training         |

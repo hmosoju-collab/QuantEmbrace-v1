@@ -458,42 +458,60 @@ class TestExitIdFormat:
 
 
 class TestPriceFallback:
-    """TEE resolves last price from prices table, falling back to position record."""
+    """TEE resolves last price via LtpResolver (prices table → position fill fallback)."""
 
     def setup_method(self) -> None:
         self.tee = _make_tee()
 
+    @staticmethod
+    def _ltp_result(price: float, *, is_stale: bool = False, source: str = "prices_table"):
+        """Build a minimal LtpResult-compatible SimpleNamespace for patching."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            price=price,
+            is_stale=is_stale,
+            source=source,
+            age_seconds=1.0 if not is_stale else 60.0,
+            captured_at=None,
+        )
+
     async def test_prices_table_takes_priority(self) -> None:
+        """When LtpResolver returns a fresh prices-table price, it takes priority."""
         pos = _open_position("SYM", "LONG", 10.0, stop_price=90.0, last_price=85.0)
-        # _get_last_price only calls _read_price_from_table when prices_table is configured
-        self.tee._prices_table = "test-prices"
+        result = self._ltp_result(88.0, is_stale=False, source="prices_table")
 
-        with patch.object(self.tee, "_read_price_from_table", AsyncMock(return_value=88.0)):
-            price = await self.tee._get_last_price("SYM", pos)
-
-        assert price == 88.0, "prices table value must take priority"
-
-    async def test_falls_back_to_position_last_price(self) -> None:
-        pos = _open_position("SYM", "LONG", 10.0, stop_price=90.0, last_price=87.5)
-        self.tee._prices_table = None  # no prices table configured
-
+        self.tee._ltp_resolver.resolve = AsyncMock(return_value=result)
         price = await self.tee._get_last_price("SYM", pos)
 
+        assert price == 88.0, "fresh prices-table value must take priority"
+
+    async def test_falls_back_to_position_last_price(self) -> None:
+        """When LtpResolver falls back to the position fill price, it is returned."""
+        pos = _open_position("SYM", "LONG", 10.0, stop_price=90.0, last_price=87.5)
+        result = self._ltp_result(87.5, is_stale=True, source="position_fill")
+
+        self.tee._ltp_resolver.resolve = AsyncMock(return_value=result)
+        price = await self.tee._get_last_price("SYM", pos)
+
+        # Stale is allowed in paper mode (router.mode == paper); only blocked in live.
         assert price == 87.5
 
     async def test_returns_none_when_no_price_available(self) -> None:
+        """When LtpResolver returns None (no price at all), _get_last_price returns None."""
         pos = _open_position("SYM", "LONG", 10.0, stop_price=90.0, last_price=None)
-        self.tee._prices_table = None
 
+        self.tee._ltp_resolver.resolve = AsyncMock(return_value=None)
         price = await self.tee._get_last_price("SYM", pos)
 
         assert price is None
 
     async def test_falls_back_to_position_when_table_returns_none(self) -> None:
+        """When prices table yields None, LtpResolver falls back to position fill."""
         pos = _open_position("SYM", "LONG", 10.0, stop_price=90.0, last_price=92.0)
+        result = self._ltp_result(92.0, is_stale=True, source="position_fill")
 
-        with patch.object(self.tee, "_read_price_from_table", AsyncMock(return_value=None)):
-            price = await self.tee._get_last_price("SYM", pos)
+        self.tee._ltp_resolver.resolve = AsyncMock(return_value=result)
+        price = await self.tee._get_last_price("SYM", pos)
 
         assert price == 92.0
 
@@ -597,6 +615,9 @@ class TestPositionExitState:
     """PositionExitState lifecycle enumeration."""
 
     def test_all_required_states_present(self) -> None:
+        # The minimum set of states that must be present in the enum.
+        # Production may add additional states (TARGET_1_HIT, TARGET_2_HIT,
+        # MIS-lifecycle states, etc.) — use issubset so additions don't break this test.
         required = {
             "OPEN",
             "EXIT_POLICY_ATTACHED",
@@ -611,7 +632,9 @@ class TestPositionExitState:
             "RECONCILED",
         }
         actual = {s.value for s in PositionExitState}
-        assert required == actual
+        assert required.issubset(actual), (
+            f"PositionExitState is missing required states: {required - actual}"
+        )
 
     def test_state_is_string_enum(self) -> None:
         assert PositionExitState.OPEN == "OPEN"

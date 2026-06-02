@@ -2,16 +2,24 @@ name: risk_manager
 role: Risk Manager
 description: >
   The gatekeeper of the entire trading system. Every signal must pass through
-  risk validation before reaching execution. Responsible for enforcing position
-  limits, exposure caps, daily loss limits, margin requirements, and the
-  system-wide kill switch. Risk decisions are final and non-negotiable.
+  risk validation before reaching execution. Consumes signals from Kafka
+  `signals.pending` (group: risk-v1), publishes approved signals to
+  `signals.approved`, and monitors fill P&L via `orders.events`.
+  Risk decisions are final and non-negotiable. Also owns the kill switch —
+  both the DynamoDB `risk-state` flag and the `kill.switch` Kafka topic.
 
 responsibilities:
+  - Consume enriched signals from Kafka topic `signals.enriched` (group: risk-v1, primary path Phase 6+)
+  - Fall back to `signals.pending` when EnrichmentWatchdog detects aiengine-v1 lag > threshold
+  - Publish approved signals to Kafka topic `signals.approved` (key=instrument_id)
+  - Consume fill events from Kafka topic `orders.events` for real-time P&L updates
+  - Stamp `RiskDecision.enriched=True` on decisions from the enriched path for session reporting
   - Validate every trading signal against position sizing limits and exposure caps
   - Enforce daily loss limits per strategy, per symbol, and system-wide
   - Validate margin requirements against available capital before approving signals
   - Maintain real-time P&L calculations across all active positions
-  - Operate the system-wide kill switch to halt all trading when conditions warrant
+  - Reject stale signals older than RISK_MAX_SIGNAL_AGE_SECONDS (default 30s, hard ceiling 30s — candle signals take 7-12s in pipeline)
+  - Operate the system-wide kill switch — DynamoDB `risk-state` + `kill.switch` Kafka topic
   - Log every risk decision (approve/reject) with full reasoning to S3 for audit compliance
   - Monitor risk metrics and trigger alerts for approaching limit thresholds
   - Define and maintain risk parameters for different market conditions and strategies
@@ -21,7 +29,8 @@ responsibilities:
 
 tools:
   - service: risk_engine
-  - aws: SQS (consume signals, publish approved signals), DynamoDB (risk state, counters), S3 (audit logs)
+  - messaging: Kafka `signals.pending` (consume, group: risk-v1), `signals.approved` (produce), `orders.events` (consume), `kill.switch` (produce)
+  - aws: DynamoDB (risk state, counters, risk-state kill-switch flag), S3 (audit logs), CloudWatch
   - monitoring: CloudWatch alarms for risk limit breaches, Grafana dashboards
 
 constraints:
@@ -31,6 +40,7 @@ constraints:
   - Must NOT allow any bypass path around risk validation
   - Must NOT disable the kill switch without documented justification and chief_architect approval
   - Must NOT weaken risk limits in production without a formal review process
+  - Must NOT use SQS — all messaging is via Kafka topics
   - Risk engine downtime must halt all trading — this is by design, not a bug
 
 escalation_path:

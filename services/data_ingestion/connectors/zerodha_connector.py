@@ -29,6 +29,7 @@ from data_ingestion.connectors.base import (
     BaseConnector,
     Market,
     NormalizedTick,
+    RECONNECT_GAP_TICKS,
     TickCallback,
 )
 
@@ -101,6 +102,17 @@ class ZerodhaConnector(BaseConnector):
         self._instrument_map: dict[str, int] = {}
         # instrument_token -> symbol  (reverse lookup for incoming ticks)
         self._reverse_map: dict[int, str] = {}
+
+        # ── Gap detection state ───────────────────────────────────────────────
+        # After a WebSocket reconnect, indicator windows are stale. We mark the
+        # first RECONNECT_GAP_TICKS ticks per symbol with gap_detected=True so
+        # the strategy engine can suppress signal generation during warm-up.
+        #
+        # _reconnect_count: incremented each time _on_reconnect_callback fires.
+        # _gap_ticks_remaining: per-symbol countdown. Decremented on each tick;
+        #   when > 0, the tick is marked gap_detected=True.
+        self._reconnect_count: int = 0
+        self._gap_ticks_remaining: dict[str, int] = {}  # symbol -> ticks left
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -272,19 +284,63 @@ class ZerodhaConnector(BaseConnector):
         best_bid = float(buy_levels[0].get("price", 0.0)) if buy_levels else 0.0
         best_ask = float(sell_levels[0].get("price", 0.0)) if sell_levels else 0.0
 
-        # Kite timestamps are IST (Asia/Kolkata) and may be timezone-naive
+        # Kite timestamps are IST (Asia/Kolkata, UTC+05:30) and may arrive as:
+        #   - datetime (naive IST)  — most common in MODE_FULL
+        #   - str "YYYY-MM-DD HH:MM:SS" — seen in some API versions
+        #   - None                  — pre-open / auction ticks
+        # In all cases we coerce to UTC. Using wall-clock as a fallback would
+        # silently corrupt every tick timestamp — we warn instead.
         ts = raw_tick.get("exchange_timestamp")
         if isinstance(ts, datetime):
             if ts.tzinfo is None:
-                # Assume IST (UTC+05:30) and convert to UTC
+                # Assume IST and convert to UTC
                 try:
                     from zoneinfo import ZoneInfo  # Python 3.9+
                     ts = ts.replace(tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(timezone.utc)
                 except Exception:
-                    # Fallback: treat as UTC (slight timestamp error, non-critical)
-                    ts = ts.replace(tzinfo=timezone.utc)
+                    # Fallback: subtract IST offset manually (5h30m = 19800s)
+                    from datetime import timedelta
+                    ts = (ts - timedelta(seconds=19800)).replace(tzinfo=timezone.utc)
+            else:
+                ts = ts.astimezone(timezone.utc)
+        elif isinstance(ts, str) and ts:
+            # Parse "YYYY-MM-DD HH:MM:SS" string from Kite (IST, naive)
+            try:
+                from zoneinfo import ZoneInfo
+                parsed = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                ts = parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(timezone.utc)
+            except Exception:
+                logger.warning(
+                    "Could not parse exchange_timestamp string %r for token %s — "
+                    "using arrival time. This tick's timestamp is unreliable.",
+                    ts,
+                    instrument_token,
+                )
+                ts = datetime.now(timezone.utc)
         else:
+            # None or unexpected type — use arrival time but log it so it's
+            # visible; this is expected for pre-open / auction ticks only.
+            if ts is not None:
+                logger.warning(
+                    "Unexpected exchange_timestamp type %s for token %s — "
+                    "using arrival time.",
+                    type(ts).__name__,
+                    instrument_token,
+                )
             ts = datetime.now(timezone.utc)
+
+        # ── Gap detection ─────────────────────────────────────────────────────
+        # Check whether this symbol is still in its post-reconnect warm-up window.
+        gap = False
+        remaining = self._gap_ticks_remaining.get(symbol, 0)
+        if remaining > 0:
+            gap = True
+            self._gap_ticks_remaining[symbol] = remaining - 1
+            if remaining == 1:
+                logger.info(
+                    "Gap warm-up complete for %s after reconnect #%d",
+                    symbol, self._reconnect_count,
+                )
 
         return NormalizedTick(
             symbol=symbol,
@@ -296,6 +352,7 @@ class ZerodhaConnector(BaseConnector):
             timestamp=ts,
             broker="zerodha",
             raw=raw_tick,
+            gap_detected=gap,
         )
 
     # ── KiteTicker callbacks (called from background thread) ─────────────────
@@ -372,9 +429,26 @@ class ZerodhaConnector(BaseConnector):
         )
 
     def _on_reconnect_callback(self, ws: Any, attempts_count: int) -> None:
-        """Callback on reconnect attempt."""
-        logger.info(
-            "Zerodha WebSocket reconnecting (attempt %d of 50)", attempts_count
+        """Callback on reconnect attempt.
+
+        Resets the gap-detection countdown for all subscribed symbols so that
+        the strategy engine suppresses signal generation until indicator windows
+        have re-warmed after the reconnection gap.
+        """
+        self._reconnect_count += 1
+        # Arm the gap counter for every subscribed symbol.
+        # _on_connect_callback will re-subscribe tokens; by the time ticks
+        # flow in, all symbols are already in _gap_ticks_remaining.
+        for symbol in list(self._instrument_map.keys()):
+            self._gap_ticks_remaining[symbol] = RECONNECT_GAP_TICKS
+
+        logger.warning(
+            "Zerodha WebSocket reconnecting (attempt %d/50, reconnect #%d) — "
+            "gap detection armed for %d symbols (%d ticks warm-up each)",
+            attempts_count,
+            self._reconnect_count,
+            len(self._gap_ticks_remaining),
+            RECONNECT_GAP_TICKS,
         )
 
     def _on_noreconnect_callback(self, ws: Any) -> None:

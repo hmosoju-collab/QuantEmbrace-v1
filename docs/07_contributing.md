@@ -481,12 +481,12 @@ isort services/ tests/ --profile black
 # services/execution_engine/service.py
 from strategy_engine.signals.signal import Signal  # DON'T DO THIS
 
-# ✅ CORRECT: Use shared models or SQS message deserialization
+# ✅ CORRECT: Use shared models (deserialized from Kafka messages)
 # services/execution_engine/service.py
 from shared.models.signal import ApprovedSignal  # Use shared models
 ```
 
-**Why:** Cross-imports create tight coupling. Services should only share data through SQS messages and DynamoDB — never through Python imports.
+**Why:** Cross-imports create tight coupling. Services should only share data through Kafka topics and DynamoDB — never through Python imports.
 
 ### Mistake 2: Placing orders without risk_decision_id
 
@@ -615,8 +615,9 @@ kite = KiteConnect(api_key=settings.kite_api_key, api_secret=settings.kite_api_s
 | **ONNX** | Open Neural Network Exchange — a standard format for ML model files |
 | **Conditional Write** | DynamoDB feature — only update a record if it's currently in a specific state (prevents race conditions) |
 | **Correlation ID** | A UUID that tags all log entries for a single transaction across multiple services |
-| **Dead Letter Queue (DLQ)** | A SQS queue that receives messages that failed processing too many times |
-| **ECS Fargate** | AWS managed container service — runs Docker containers without managing servers |
+| **Consumer Group** | A named set of Kafka consumers that share the work of reading a topic. Each partition goes to exactly one member. QuantEmbrace uses groups: `strategy-v1`, `aiengine-v1`, `risk-v1`, `execution-v1` |
+| **Dead Letter Queue (DLQ)** | A Kafka topic (e.g., `signals.pending.dlq`) that receives messages which failed processing too many times — preserves them for investigation without blocking the main topic |
+| **ECS Fargate** | AWS managed container service (runs Docker containers without managing servers). **Not used in QuantEmbrace** — all services run on EC2 ARM64 ASGs instead |
 | **ECR** | Elastic Container Registry — AWS's Docker image storage |
 | **Exponential Backoff** | Retry strategy where wait time doubles between each retry (1s, 2s, 4s...) |
 | **FIFO Queue** | First-In-First-Out queue — guarantees messages are processed in the order they arrive |
@@ -624,15 +625,20 @@ kite = KiteConnect(api_key=settings.kite_api_key, api_secret=settings.kite_api_s
 | **IAM** | Identity and Access Management — AWS service for controlling who can access what |
 | **Idempotent** | An operation that produces the same result whether called once or many times |
 | **IaC** | Infrastructure as Code — defining cloud resources in code (Terraform) rather than manual clicks |
-| **LocalStack** | A local AWS simulator — runs S3, SQS, DynamoDB etc. on your laptop for development |
+| **Kafka** | Distributed event streaming platform. QuantEmbrace uses AWS MSK Serverless. All inter-service trading data flows through Kafka topics |
+| **Kafka Topic** | A named channel for messages. Producers write to it; consumers read from it. Examples: `signals.pending`, `signals.approved`, `orders.events` |
+| **LocalStack** | A local AWS simulator — runs S3, DynamoDB, etc. on your laptop for development (replaces real AWS during local testing) |
+| **MSK Serverless** | Amazon Managed Streaming for Apache Kafka — Serverless tier. No cluster to provision or scale. QuantEmbrace uses SASL/OAUTHBEARER IAM auth on port 9098 |
 | **Parquet** | A columnar storage file format — efficient for analytics queries on large datasets |
 | **Protocol (Python)** | Python's structural subtyping — defines an interface without requiring explicit inheritance |
 | **Pydantic** | Python library for data validation using type hints — all models in this system use it |
+| **Redpanda** | A Kafka-compatible broker used for local development (runs in Docker). It's faster to start than Apache Kafka and needs no ZooKeeper. Configured with PLAINTEXT auth |
 | **ruff** | A fast Python linter — checks for code quality issues |
-| **SQS** | Simple Queue Service — AWS managed message queue for decoupling services |
-| **SNS** | Simple Notification Service — AWS managed pub/sub for sending alerts (email, SMS, webhooks) |
+| **SASL/OAUTHBEARER** | Kafka authentication mechanism. QuantEmbrace uses it with IAM short-lived tokens (`aws-msk-iam-sasl-signer-python`) for MSK in production |
+| **SNS** | Simple Notification Service — AWS managed pub/sub for sending alerts (email, SMS, webhooks). Used for CloudWatch alarm notifications |
+| **SQS** | Simple Queue Service — AWS managed message queue. **Not used in QuantEmbrace** — all inter-service messaging uses Kafka MSK Serverless instead |
 | **Structured Logging** | Logging in JSON format instead of plain text — makes logs easily queryable |
-| **Task Role (ECS)** | An IAM role assigned to a specific ECS task — defines what AWS services it can access |
+| **Instance Profile (EC2)** | An IAM role attached to an EC2 instance — defines what AWS services the code on that instance can access (replaces ECS Task Roles in this architecture) |
 | **Terraform** | Infrastructure as Code tool — defines AWS resources in `.tf` files |
 | **TTL** | Time To Live — DynamoDB feature that automatically deletes records after a specified time |
 | **VPC** | Virtual Private Cloud — an isolated network within AWS |
@@ -662,13 +668,13 @@ A: Our signal latency target is seconds-to-minutes, not microseconds. Python's q
 
 A: The `stop_price` in the signal is the **price level** at which we want to exit if the trade goes wrong. The execution engine is responsible for converting that into an actual broker stop-loss order (SL-M on Zerodha, stop on Alpaca). The risk engine also reads this price to validate that it exists before approving.
 
-**Q: Why SQS instead of Kafka for messaging?**
+**Q: Why Kafka instead of SQS for messaging?**
 
-A: Our message volumes are relatively low (<1000 signals/day). SQS is serverless — no cluster to manage. Kafka requires a cluster (MSK on AWS is expensive). SQS's at-least-once delivery with deduplication (FIFO) is sufficient for our needs. If we ever reach millions of messages/day, we'd revisit Kafka.
+A: Three reasons. First, **consumer groups** — multiple independent consumers can read the same topic simultaneously without one stealing messages from another. Our risk engine and AI engine both need to read signals, and Kafka makes that trivial. SQS would require duplicate queues or complex fan-out via SNS. Second, **replay** — if a service is down and restarts, it can re-read messages from the last committed offset, catching up on everything it missed. SQS messages are deleted after one consumer reads them. Third, **ordering guarantees** — Kafka partitions guarantee in-order delivery per symbol/key, which matters for position tracking. We use AWS MSK Serverless, which is serverless (no cluster to manage) and charges only for what you use, so cost is not a concern at our volumes.
 
 **Q: How does the system handle the Zerodha daily token expiry?**
 
-A: Zerodha issues a new access token each trading day after login. The `zerodha_refresh_token.py` script handles this — it opens a browser for login, exchanges the authorization code for a token, and saves it to AWS Secrets Manager. The data_ingestion and execution services read from Secrets Manager, so they automatically get the new token on next load. This process should be run once per day before market hours (it can be automated with a scheduled ECS task that runs at 08:00 IST).
+A: Zerodha issues a new access token each trading day after login. The `zerodha_refresh_token.py` script handles this — it opens a browser for login, exchanges the authorization code for a token, and saves it to AWS Secrets Manager. The data_ingestion and execution services read from Secrets Manager, so they automatically get the new token on next load. This process should be run once per day before market hours (automate it as a cron job on the EC2 instance running at 08:00 IST, or run `make zerodha-login` manually each morning).
 
 **Q: What happens if the drawdown limit is hit? Can I override it?**
 
@@ -680,4 +686,4 @@ A: Check the CloudWatch dashboard for your strategy's signal rate, and check the
 
 ---
 
-*Last updated: 2026-04-24 | Update the glossary whenever new technical or trading concepts are introduced. Update the FAQ whenever newcomers repeatedly ask the same questions.*
+*Last updated: 2026-05-15 | Update the glossary whenever new technical or trading concepts are introduced. Update the FAQ whenever newcomers repeatedly ask the same questions.*

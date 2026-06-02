@@ -16,12 +16,12 @@ Using AWS Lambda for workloads that require persistent connections or continuous
 
 - Lambda has a hard 15-minute execution limit. WebSocket connections for market data must persist for the entire trading session (6+ hours).
 - Lambda cold starts introduce unpredictable latency (100ms to several seconds). Trading workloads require consistent, low-latency responses.
-- Repeatedly invoking Lambda every few seconds for polling is more expensive than a continuously running Fargate task for workloads that run during market hours.
+- Repeatedly invoking Lambda every few seconds for polling is more expensive than a continuously running EC2 ASG process for workloads that run during market hours.
 - Lambda cannot maintain WebSocket connections natively. Workarounds (API Gateway WebSocket + Lambda) add complexity without benefit for server-initiated connections to broker APIs.
 
 ### What To Do Instead
 
-Use ECS Fargate for all workloads that:
+Use EC2 ARM64 ASGs for all workloads that:
 - Require persistent connections (WebSocket, long-polling).
 - Run continuously for more than a few minutes.
 - Need predictable, low latency.
@@ -310,3 +310,311 @@ async def connect_and_stream(instruments: list[str]):
 - Both brokers provide WebSocket APIs specifically designed for streaming market data.
 - Implement automatic reconnection with exponential backoff for connection drops.
 - REST APIs are acceptable for non-real-time operations: fetching historical data, account information, instrument lists, and order status (where WebSocket events are not available).
+
+---
+
+## 9. Background asyncio Task Without a Watchdog
+
+### The Anti-Pattern
+
+Creating an `asyncio.create_task()` for a critical background loop and never checking whether it has died.
+
+```python
+# WRONG: fire-and-forget task creation
+async def start(self):
+    self._candle_stream_task = asyncio.create_task(
+        self._candle_stream.start(),
+        name="candle_stream",
+    )
+    # No watchdog — if this task dies, nobody knows
+```
+
+### Why It Is Wrong
+
+- `asyncio.CancelledError` is a `BaseException` (not `Exception`) in Python 3.8+. An `except Exception` handler in the task body does NOT catch it. A stray `.cancel()` call, a timeout cancellation inside `asyncio.wait_for`, or a WebSocket disconnect can kill the task silently.
+- Once a task is done (`.done() == True`), it never restarts itself. Critical streams go silent indefinitely.
+- `task.exception()` and `task.cancel()` only work on live tasks — there is no automatic alerting when a task exits unexpectedly.
+
+### What To Do Instead
+
+Every critical background `asyncio.Task` must have a companion watchdog:
+
+```python
+async def _candle_stream_watchdog(self) -> None:
+    while self._running:
+        try:
+            await asyncio.sleep(30.0)
+        except asyncio.CancelledError:
+            break
+        task = self._candle_stream_task
+        if task is None or not task.done():
+            continue
+        reason = "cancelled" if task.cancelled() else str(task.exception())
+        logger.critical("candle_stream_watchdog.task_dead", reason=reason)
+        self._candle_stream_task = asyncio.create_task(
+            self._candle_stream.start(), name="candle_stream"
+        )
+        logger.info("candle_stream_watchdog.restarted")
+```
+
+- Always cancel the watchdog BEFORE stopping the managed task in `stop()` (otherwise the watchdog restarts the task after it's intentionally stopped).
+- Log CRITICAL on task death so the event is visible in CloudWatch alarms.
+
+---
+
+## 10. Calling `record_data_tick` After Validation Logic
+
+### The Anti-Pattern
+
+Calling `record_data_tick()` (or any health-heartbeat update) inside `validate_signal()` after one or more validators have already run.
+
+```python
+# WRONG: record_data_tick after age check
+async def validate_signal(self, signal):
+    age_result = await self._signal_age_validator.validate(signal)
+    if not age_result.approved:
+        return reject(age_result)  # <-- record_data_tick never reached
+    # ...
+    self._kill_switch_monitor.record_data_tick(signal.market)  # Too late!
+```
+
+### Why It Is Wrong
+
+- Candle signals arrive 7-12 seconds old. During service startup warmup (5-10 min), candle strategies emit no signals at all. During that window, the staleness clock is frozen.
+- If `record_data_tick` is gated behind a passing age check, ANY period of age-rejected signals (including normal warmup) advances the staleness clock toward the kill switch threshold.
+- The kill switch fires during service restart warmup, not because the data feed is actually stale, but because no signals passed the age check during the warmup gap.
+
+### What To Do Instead
+
+Call `record_data_tick` as the VERY FIRST statement in `validate_signal()`, before any validation:
+
+```python
+async def validate_signal(self, signal):
+    # Reset staleness clock immediately — signal arrival confirms feed is live.
+    # Do this before age check so warmup/rejected signals still tick the clock.
+    self._kill_switch_monitor.record_data_tick(signal.market)
+
+    age_result = await self._signal_age_validator.validate(signal)
+    if not age_result.approved:
+        return reject(age_result)
+    # ...
+```
+
+The staleness threshold protects against the data feed going completely silent (no signals at all). It must not fire because signals are arriving but failing age checks.
+
+---
+
+## 11. DynamoDB Key Constants Mismatched Between Setup Script and Service Code
+
+### The Anti-Pattern
+
+Defining DynamoDB PK/SK prefix constants in a service without verifying they match what the setup/seeding script actually writes.
+
+```python
+# In strategy_config_loader.py (WRONG):
+_PK_PREFIX = "STRATEGY#"      # setup_local_tables.py writes "STRATEGY_CONFIG#"
+_SK_PREFIX = "CONFIG#"         # setup_local_tables.py writes "ENV#"
+```
+
+### Why It Is Wrong
+
+- Every `get_item` call returns `None` silently. No `ItemNotFoundException` is raised.
+- The code falls back to `_DEFAULT_CONFIG` values, which have conservative defaults (e.g., `max_signals_per_day=10`).
+- After 10 signals fire, ALL subsequent signals are blocked for the entire trading day — with no error in logs, only `daily_cap_reached cap=10`.
+- This is a silent, session-destroying bug that is very hard to diagnose because both the setup script and the service code appear to be working correctly in isolation.
+
+### What To Do Instead
+
+1. Keep PK/SK prefix constants co-located with or cross-referenced to the setup script.
+2. After any schema change, run a verification: `aws dynamodb scan --table-name <table> --endpoint-url http://localhost:4566 | jq '.Items[] | {PK, SK}'` and compare against the service's `_PK_PREFIX` / `_SK_PREFIX` constants.
+3. Add a startup log that shows the resolved PK/SK for at least the first lookup — makes mismatches immediately visible in logs.
+4. Write a startup assertion or integration test that scans the table for known keys and fails loudly if none are found.
+
+---
+
+## 12. Calling Live Broker API from a Sub-System Without a Paper Mode Guard
+
+### The Anti-Pattern
+
+A service component (MIS square-off, fill poller, reconciliation, etc.) calls `self._broker.place_order()` or any live broker API unconditionally, without checking whether the system is in paper trading mode.
+
+```python
+# WRONG: MIS square-off with no paper check
+async def _place_mis_close_order(self, symbol, side, qty, ...):
+    order_id = await self._zerodha.place_order(
+        symbol=symbol,
+        side=side,
+        quantity=qty,
+        order_type="MARKET",
+        product="MIS",
+    )
+    return order_id
+```
+
+### Why It Is Wrong
+
+- In paper mode, the Zerodha account is not whitelisted for order placement (only for market data). Every call raises `PermissionException: IP not allowed`.
+- The sub-system interprets the Zerodha rejection as a trading failure — not a configuration error — and escalates through its error path (MIS triggers kill switch when all close orders fail past the deadline).
+- The kill switch activates mid-session or on every container restart after market close, with a misleading root cause in logs (Zerodha IP error, not "paper mode misconfiguration").
+- The bug is silent during development (no integration test exercises the real rejection path) and only manifests in live paper sessions.
+
+### What To Do Instead
+
+Every sub-system that places orders must gate on paper mode before calling any live broker API:
+
+```python
+async def _place_mis_close_order(self, position, symbol, close_side, close_qty, order_id):
+    if self._paper_trading:
+        fill_price = position.get("last_price") or position.get("avg_entry_price", 0.0)
+        await self._order_manager.apply_fill_to_position(
+            symbol=symbol,
+            side=close_side,
+            filled_quantity=close_qty,
+            avg_fill_price=fill_price,
+            last_price=fill_price,
+            market="NSE",
+            order_id=order_id,
+            signal_id=f"mis-square-off-{symbol}",
+            risk_decision_id="mis-auto-close",
+        )
+        logger.info("mis_square_off.paper_close_simulated", symbol=symbol)
+        return order_id  # simulated
+
+    # Live path: only reached when _paper_trading is False
+    return await self._zerodha.place_order(...)
+```
+
+Rules:
+- All components that accept a `paper_trading` parameter must store it and check it before every broker call.
+- The paper path must still produce the correct side-effects (DynamoDB position update, Kafka event) — use `apply_fill_to_position` or equivalent.
+- Wire `paper_trading` from settings at construction time, never as a per-call argument (prevents accidental mismatch).
+
+---
+
+## 13. Time-Gated Background Task That Does Not Check Deadline at Startup
+
+### The Anti-Pattern
+
+A background task that runs at a specific time (e.g., MIS square-off at 15:05 IST) computes its wait time with `max(0.0, seconds_until_target)`. When the service restarts after the target time has passed, `max(0.0, ...)` returns `0.0` and the task fires immediately — as if it is right at the scheduled time.
+
+```python
+# WRONG: No past-deadline check
+async def run(self):
+    while True:
+        wait_secs = _seconds_until_ist("15:05")  # returns 0.0 when past 15:05
+        await asyncio.sleep(wait_secs)            # 0.0 → fires immediately
+        await self._execute()                     # finds positions open → escalates
+```
+
+### Why It Is Wrong
+
+- The task was designed to run once per trading day. After the deadline (e.g., 15:10 IST), execution is no longer safe (partial fills can't be managed). But the task doesn't know it's too late — it just sees "wait = 0s".
+- MIS square-off: fires on restart, fails to close positions via live broker (paper mode), hits deadline, activates kill switch. Kill switch fires on every post-market container restart.
+- Any similar pattern (end-of-day reconciliation, post-close archiver) with the same flaw will exhibit the same false-positive escalation behavior.
+
+### What To Do Instead
+
+Check whether the current time is already past the deadline at the top of the scheduling loop. If past deadline, skip today and sleep until tomorrow:
+
+```python
+async def run(self):
+    while True:
+        wait_secs = _seconds_until_ist(_CLOSE_TIME)
+
+        # Guard: if we're already past the deadline, skip this cycle
+        if wait_secs == 0.0 and _seconds_until_ist(_DEADLINE_TIME) == 0.0:
+            logger.warning(
+                "mis_square_off.skipped_past_deadline",
+                detail="Service started after deadline — skipping today",
+            )
+            await asyncio.sleep(86400)  # sleep until tomorrow
+            continue
+
+        await asyncio.sleep(wait_secs)
+        await self._execute()
+```
+
+- Always log `skipped_past_deadline` so the skip is visible in CloudWatch, not silent.
+- Use two guard times: the action time (15:05) and the hard deadline (15:10). Only skip if past the deadline — if between action and deadline, allow normal execution.
+
+---
+
+## 14. Instantiating Broker Clients Before DynamoDB Client Is Created
+
+### The Anti-Pattern
+
+Creating a `ZerodhaBrokerClient` (or any broker client that reads credentials from DynamoDB) before the DynamoDB client is wired, or without passing `dynamo_client` to the constructor.
+
+```python
+# WRONG: dynamo_client not passed; DynamoDB lookup silently returns None, None
+self._zerodha = ZerodhaBrokerClient(settings=self._settings)
+await self._zerodha.connect()  # falls back to stale env var ZERODHA_ACCESS_TOKEN
+
+dynamo = get_dynamodb_client()  # too late — broker already connected with stale token
+```
+
+### Why It Is Wrong
+
+- `ZerodhaTokenManager._load_token_from_dynamo()` begins with `if self._dynamo is None: return None, None`. Without an injected client, it never touches DynamoDB regardless of what token is stored there.
+- `connect()` catches `TokenExpiredError` and silently falls back to the `ZERODHA_ACCESS_TOKEN` env var — which may be an old, expired token from a prior session.
+- All downstream broker calls (`get_historical_candles`, `get_batch_quotes`, WebSocket auth) fail with `kiteconnect.exceptions.TokenException: Incorrect api_key or access_token`.
+- The silent fallback makes diagnosis non-obvious: logs say "authenticated" but API calls all fail.
+
+### What To Do Instead
+
+Create the DynamoDB client BEFORE instantiating broker clients, and pass it explicitly:
+
+```python
+# CORRECT: dynamo client created first, passed to broker constructor
+dynamo = get_dynamodb_client()
+self._dynamo = dynamo
+self._zerodha = ZerodhaBrokerClient(settings=self._settings, dynamo_client=dynamo)
+await self._zerodha.connect()  # reads fresh token from DynamoDB
+```
+
+- The correct startup log is: `"Zerodha authenticated via DynamoDB token"`.
+- The wrong startup log is: `"Zerodha authenticated via ZERODHA_ACCESS_TOKEN env var"` — this is a fallback path for local dev only.
+
+---
+
+## 15. Resolving Daily-Refreshed Credentials From Environment Variables Instead of the Durable Store
+
+### The Anti-Pattern
+
+Constructing a connector or client with a credential read directly from `settings.zerodha.access_token.get_secret_value()` (= `ZERODHA_ACCESS_TOKEN` env var) when a fresher version of that credential is stored in a durable store (DynamoDB) updated by the daily login flow.
+
+```python
+# WRONG: env var is stale after zerodha_login.py runs each morning
+zerodha = ZerodhaConnector(
+    api_key=self._settings.zerodha.api_key.get_secret_value(),
+    access_token=self._settings.zerodha.access_token.get_secret_value(),  # stale
+)
+```
+
+### Why It Is Wrong
+
+- Zerodha tokens expire daily. The daily `zerodha_login.py` run stores a fresh token in DynamoDB but does NOT update the running container's env var.
+- Any component initialized from the env var after the login run will use the expired token.
+- The failure mode is silent at construction: the connector creates successfully. The 403 only surfaces when the WebSocket upgrade is attempted — at which point the service is already "running" and the health check passes.
+- `ticks.nse` Kafka topic stays empty → tick-based strategies receive no input.
+
+### What To Do Instead
+
+Resolve daily-refreshed credentials from the durable store (DynamoDB via `ZerodhaTokenManager`) at service startup, before constructing the component that needs them. Fall back to the env var only if the durable lookup fails:
+
+```python
+_token = self._settings.zerodha.access_token.get_secret_value()  # fallback
+try:
+    from execution_engine.auth.zerodha_auth import ZerodhaTokenManager
+    from shared.aws.clients import get_dynamodb_client
+    _token = await ZerodhaTokenManager(
+        dynamo_client=get_dynamodb_client(), settings=self._settings
+    ).get_valid_token()
+except Exception:
+    logger.warning("DynamoDB token lookup failed — falling back to env var")
+
+zerodha = ZerodhaConnector(api_key=..., access_token=_token)
+```
+
+The correct startup log is: `"zerodha_connector.token_loaded_from_dynamodb"`.
+The fallback log is: `"zerodha_connector.token_fallback_env_var"` — investigate if this appears.

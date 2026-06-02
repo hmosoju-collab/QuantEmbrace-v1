@@ -76,7 +76,7 @@ This directory. Contains the rules that govern how the project is developed, str
 
 ### `/services/` -- Core Trading Services
 
-The heart of the platform. Each subdirectory is a self-contained microservice deployed as an independent ECS Fargate task. Services communicate through well-defined interfaces (SQS queues, SNS topics, or direct SDK calls where latency requires it).
+The heart of the platform. Each subdirectory is a self-contained microservice deployed as an independent EC2 ARM64 ASG process. Services communicate through Kafka topics (MSK Serverless) for real-time trading data flows. SQS and ECS Fargate have been permanently removed.
 
 #### `/services/data_ingestion/` -- Market Data Connectors, Processors, Storage
 
@@ -140,7 +140,7 @@ Shared code used across all services:
 
 All infrastructure-as-code and deployment automation:
 
-- **Terraform Modules**: Modular Terraform configs for VPC, ECS cluster, task definitions, S3 buckets, DynamoDB tables, SQS queues, IAM roles, CloudWatch alarms, and Secrets Manager entries.
+- **Terraform Modules**: Modular Terraform configs for VPC, ECS cluster, task definitions, S3 buckets, DynamoDB tables, Kafka topics, IAM roles, CloudWatch alarms, and Secrets Manager entries.
 - **Environments**: Separate tfvars files for `dev`, `staging`, and `prod` environments.
 - **Scripts**: Deployment scripts, database migration helpers, and operational runbooks.
 - **CI/CD**: GitHub Actions workflow definitions for build, test, and deploy pipelines.

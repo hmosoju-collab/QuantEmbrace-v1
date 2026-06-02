@@ -152,13 +152,13 @@ class Signal(BaseModel):
 ```hcl
 # Correct
 resource "aws_ecs_service" "strategy_engine" { ... }
-resource "aws_sqs_queue" "signal_queue" { ... }
+resource "aws_msk_topic" "signal_queue" { ... }
 resource "aws_iam_role" "ecs_task_execution_role" { ... }
 resource "aws_cloudwatch_metric_alarm" "high_daily_loss" { ... }
 
 # Incorrect
 resource "aws_ecs_service" "StrategyEngine" { ... }
-resource "aws_sqs_queue" "signal-queue" { ... }
+resource "aws_msk_topic" "signal-queue" { ... }
 ```
 
 ### Variable Names
@@ -184,7 +184,7 @@ infra/
     vpc_network/
     dynamodb_tables/
     s3_buckets/
-    sqs_queues/
+    kafka_topics/
     iam_roles/
     cloudwatch_alarms/
 ```
@@ -229,7 +229,7 @@ quantembrace-prod-instrument-metadata
 quantembrace-prod-strategy-state
 ```
 
-### ECS Services
+### ASG Services
 
 - **Convention**: `quantembrace-{env}-{service_name}`
 - **Rule**: Matches the service directory name from the project structure.
@@ -247,7 +247,7 @@ quantembrace-prod-risk-engine
 quantembrace-prod-ai-engine
 ```
 
-### ECS Task Definitions
+### ASG Task Definitions
 
 - **Convention**: `quantembrace-{env}-{service_name}-task`
 
@@ -258,7 +258,7 @@ quantembrace-prod-execution-engine-task
 quantembrace-prod-risk-engine-task
 ```
 
-### SQS Queues
+### Kafka Topics (MSK Serverless)
 
 - **Convention**: `quantembrace-{env}-{purpose}-queue`
 - **Rule**: Dead-letter queues append `-dlq`.

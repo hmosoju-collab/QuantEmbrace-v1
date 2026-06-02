@@ -22,19 +22,25 @@ class OrderStatus(str, Enum):
     Order lifecycle status.
 
     Transitions:
+        PENDING -> ACK_UNKNOWN
         PENDING -> PLACED -> FILLED
         PENDING -> PLACED -> PARTIALLY_FILLED -> FILLED
         PENDING -> PLACED -> CANCELLED
         PENDING -> PLACED -> REJECTED
         PENDING -> REJECTED  (pre-flight rejection)
+        ACK_UNKNOWN -> PLACED/PARTIALLY_FILLED/FILLED/CANCELLED/REJECTED
+        FILLED -> FLATTENING  (protective SL failed; emergency market flatten underway)
+        FLATTENING -> FILLED / CANCELLED  (flatten order resolved)
     """
 
     PENDING = "PENDING"
+    ACK_UNKNOWN = "ACK_UNKNOWN"
     PLACED = "PLACED"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
+    FLATTENING = "FLATTENING"  # protective SL failed; emergency market flatten in progress
 
 
 class OrderSide(str, Enum):
@@ -158,7 +164,14 @@ class StoredOrder(OrderResponse):
     quantity: float = Field(default=0.0, ge=0, description="Original requested quantity")
     limit_price: Optional[float] = Field(default=None, description="Limit price (LIMIT/STOP_LIMIT orders)")
     stop_price: Optional[float] = Field(default=None, description="Stop price (STOP/STOP_LIMIT orders)")
+    product_type: ProductType = Field(default=ProductType.DAY, description="Broker product type")
     order_created_at: Optional[datetime] = Field(default=None, description="Order creation timestamp")
+    parent_order_id: str = Field(default="", description="Parent entry order for protective children")
+    protective_type: str = Field(default="", description="Protective child order type, e.g. STOP_LOSS")
+    is_protective: bool = Field(default=False, description="Whether this is a protective child order")
+    protective_stop_order_id: str = Field(default="", description="Linked protective stop child order ID")
+    broker_idempotency_key: str = Field(default="", description="Broker-side idempotency key/client tag")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Original order metadata")
 
 
 class OrderStatusUpdate(BaseModel):

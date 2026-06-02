@@ -23,7 +23,7 @@ output "private_subnet_ids" {
 }
 
 output "ecs_tasks_security_group_id" {
-  description = "Security group ID for ECS Fargate tasks"
+  description = "Security group ID for EC2 ARM64 ASG instances"
   value       = aws_security_group.ecs_tasks.id
 }
 
@@ -35,4 +35,14 @@ output "vpc_endpoints_security_group_id" {
 output "nat_gateway_ids" {
   description = "IDs of the NAT gateways"
   value       = aws_nat_gateway.main[*].id
+}
+
+output "msk_endpoint_security_group_id" {
+  description = "Security group ID for the MSK VPC endpoint (port 9098)"
+  value       = aws_security_group.msk_endpoint.id
+}
+
+output "msk_vpc_endpoint_id" {
+  description = "VPC endpoint ID for MSK Serverless broker connectivity"
+  value       = aws_vpc_endpoint.msk.id
 }

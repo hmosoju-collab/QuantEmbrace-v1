@@ -2,7 +2,7 @@
 
 > **Prerequisite:** Read [01_introduction.md](01_introduction.md) first if you haven't already.
 
-This document explains the 6-layer architecture of QuantEmbrace. For each layer we cover:
+This document explains the 6-layer architecture. For each layer we cover:
 - What it does in plain English
 - Why it exists as a separate layer
 - What happens when it fails
@@ -15,11 +15,11 @@ This document explains the 6-layer architecture of QuantEmbrace. For each layer 
 1. [The 6-Layer Model — Overview](#the-6-layer-model--overview)
 2. [Layer 1 — Data Ingestion](#layer-1--data-ingestion)
 3. [Layer 2 — Strategy Engine](#layer-2--strategy-engine)
-4. [Layer 3 — Execution Engine](#layer-3--execution-engine)
-5. [Layer 4 — Risk Engine (Critical)](#layer-4--risk-engine-critical)
+4. [Layer 4 — Risk Engine (Critical)](#layer-4--risk-engine-critical)
+5. [Layer 3 — Execution Engine](#layer-3--execution-engine)
 6. [Layer 5 — AI/ML Engine](#layer-5--aiml-engine)
 7. [Layer 6 — Infrastructure](#layer-6--infrastructure)
-8. [How Layers Communicate](#how-layers-communicate)
+8. [How Layers Communicate — Kafka Topics](#how-layers-communicate--kafka-topics)
 9. [The Golden Rule — No Layer Skipping](#the-golden-rule--no-layer-skipping)
 10. [Failure Modes and Resilience](#failure-modes-and-resilience)
 
@@ -27,52 +27,57 @@ This document explains the 6-layer architecture of QuantEmbrace. For each layer 
 
 ## The 6-Layer Model — Overview
 
-Think of the system as a pipeline with strict one-way flow:
+Think of the system as a pipeline with strict one-way flow. Every message travels as an event on a Kafka topic — services never call each other directly.
 
 ```
                     RAW MARKET DATA
-                         │
-                         ▼
-          ┌──────────────────────────┐
-          │   LAYER 1: DATA          │  ← Collects & stores prices
-          │   data_ingestion/        │
-          └──────────────┬───────────┘
-                         │ normalized ticks (via SQS)
-                         ▼
-          ┌──────────────────────────┐
-          │   LAYER 2: STRATEGY      │  ← Decides "should we trade?"
-          │   strategy_engine/       │
-          └──────────────┬───────────┘
-                         │ signals (via SQS)
-                         ▼
-          ┌──────────────────────────┐
-          │   LAYER 4: RISK    ◄◄◄  │  ← Validates every signal  ◄── CRITICAL GATE
-          │   risk_engine/           │      No bypass exists
-          └──────────────┬───────────┘
-                         │ approved signals only (via SQS)
-                         ▼
-          ┌──────────────────────────┐
-          │   LAYER 3: EXECUTION     │  ← Places orders with brokers
-          │   execution_engine/      │
-          └──────────────┬───────────┘
-                         │ broker API calls (HTTPS)
-                    ┌────┴────┐
-                    ▼         ▼
-               Zerodha     Alpaca
-               (NSE)       (US)
-                    
-          ┌──────────────────────────┐
-          │   LAYER 5: AI/ML         │  ← Enriches signals with ML predictions
-          │   ai_engine/             │    (feeds into Layer 2)
-          └──────────────────────────┘
+                    (Zerodha + Alpaca)
+                          │
+                          ▼
+          ┌───────────────────────────┐
+          │   LAYER 1: DATA           │  ← Collects and normalises prices
+          │   data_ingestion          │
+          └───────────────┬───────────┘
+                          │  Kafka: ticks.nse, ticks.us
+                          ▼
+          ┌───────────────────────────┐
+          │   LAYER 2: STRATEGY       │  ← Decides "should we trade?"
+          │   strategy_engine         │    6 strategies run in parallel
+          └───────────────┬───────────┘
+                          │  Kafka: signals.pending
+                          ▼
+          ┌───────────────────────────┐
+          │   LAYER 5: AI/ML          │  ← Enriches signals with ML predictions
+          │   ai_engine               │    regime, quality_score, volatility
+          └───────────────┬───────────┘
+                          │  Kafka: signals.enriched
+                          ▼
+          ┌───────────────────────────┐
+          │   LAYER 4: RISK    ◄◄◄   │  ← Validates every signal  ← CRITICAL GATE
+          │   risk_engine             │    11 validators, no bypass
+          └───────────────┬───────────┘
+                          │  Kafka: signals.approved
+                          ▼
+          ┌───────────────────────────┐
+          │   LAYER 3: EXECUTION      │  ← Places orders with brokers
+          │   execution_engine        │
+          └───────────────┬───────────┘
+                          │  Kafka: orders.events
+                     ┌────┴────┐
+                     ▼         ▼
+                Zerodha     Alpaca
+                (NSE)        (US)
 
-          ┌──────────────────────────┐
-          │   LAYER 6: INFRA         │  ← AWS services, Terraform, monitoring
-          │   infra/                 │    (supports ALL layers above)
-          └──────────────────────────┘
+          ┌───────────────────────────┐
+          │   LAYER 6: INFRA          │  ← AWS EC2 ASGs, MSK Kafka, DynamoDB,
+          │   infra/terraform/        │    S3, VPC, Monitoring — supports all above
+          └───────────────────────────┘
 ```
 
-Notice that **Layer 3 (Execution) is numbered 3 but sits after Layer 4 (Risk)** in the actual flow. The numbering is by conceptual importance, not flow order. The flow is: Data → Strategy → **Risk** → Execution.
+**Important:** Layer numbering reflects conceptual importance, not flow order. The actual flow is:
+`Data (1) → Strategy (2) → AI (5) → Risk (4) → Execution (3)`
+
+The Risk Engine (4) intentionally sits above Execution (3) in the numbering to emphasise that it is the most critical gate in the system.
 
 ---
 
@@ -80,76 +85,54 @@ Notice that **Layer 3 (Execution) is numbered 3 but sits after Layer 4 (Risk)** 
 
 ### What It Does
 
-This layer is the "eyes" of the system. It watches prices in real time and feeds them to everything else.
+This layer is the "eyes" of the system. It connects to broker market data feeds, normalises every incoming tick into a unified internal format, and publishes those ticks to Kafka for downstream consumers.
 
 ```
-Zerodha WebSocket ──┐
-                    ├──► Normalize ──► DynamoDB (latest prices, hot cache)
-Alpaca WebSocket ───┘                 S3 (historical ticks, cold storage)
-                                      SQS (stream to Strategy Engine)
+Zerodha Kite WebSocket ──┐
+                          ├──► Normalise ──► Kafka: ticks.nse (key = symbol)
+Alpaca WebSocket    ───────┘                 Kafka: ticks.us  (key = symbol)
+                                             DynamoDB: latest-prices (hot cache)
+                                             S3: historical Parquet files
 ```
 
-### Two Separate Services
+### Data Normalisation
 
-Data ingestion runs as **two independent ECS Fargate tasks**:
-
-| Service | Market | Source | Hours |
-|---|---|---|---|
-| `data-ingestion-nse` | NSE India | Zerodha Kite Ticker WebSocket | 09:00–16:00 IST |
-| `data-ingestion-us` | US Equities | Alpaca WebSocket | 13:00–21:30 IST |
-
-**Why two services instead of one?** Markets trade at completely different times, have different APIs, different reconnection behavior, and different rate limits. If the NSE feed crashes, US trading should continue unaffected. Independent failure domains.
-
-### Data Normalization
-
-Every price tick from either broker gets converted into a single unified format before storage:
+Every tick from either broker is converted into one unified `MarketTick` format before anything else sees it. Downstream services never deal with broker-specific payloads:
 
 ```python
-# Zerodha sends this (broker-specific):
-{
-  "instrument_token": 738561,
-  "last_price": 2453.50,
-  "volume": 1234567,
-  "ohlc": {"open": 2440.0, "high": 2460.0, "low": 2435.0, "close": 2453.5}
-}
+# Zerodha sends a broker-specific binary/JSON packet:
+{"instrument_token": 738561, "last_price": 2453.50, "volume": 1234567, ...}
 
-# Alpaca sends this (completely different format):
-{
-  "T": "t",
-  "S": "AAPL",
-  "p": 182.15,
-  "s": 100,
-  "t": "2026-04-24T14:30:00.123456789Z"
-}
+# Alpaca sends a completely different format:
+{"T": "t", "S": "AAPL", "p": 182.15, "s": 100, "t": "2026-04-24T14:30:00Z"}
 
-# After normalization — BOTH become this unified MarketTick:
+# After normalisation — BOTH become this:
 MarketTick(
-    market="NSE",                    # or "US"
-    instrument="NSE:RELIANCE",       # or "US:AAPL"
+    market="NSE",                         # or "US"
+    instrument="NSE:RELIANCE",            # or "US:AAPL"
     ltp=Decimal("2453.50"),
     volume=1234567,
-    timestamp=datetime(2026, 4, 24, 3, 45, 0, tzinfo=UTC),  # Always UTC
-    raw={...}                        # Original payload kept for debugging
+    timestamp=datetime(2026, 4, 24, 3, 46, 3, tzinfo=UTC),  # Always UTC
+    bid=Decimal("2453.45"),
+    ask=Decimal("2453.55"),
 )
 ```
 
-Downstream services (strategy, risk) never see broker-specific formats. They only deal with `MarketTick`.
-
-### Storage
+### Storage Layers
 
 | Store | What goes there | Why |
 |---|---|---|
-| **DynamoDB** `latest-prices` | Current LTP for each instrument | Sub-millisecond reads, strategy needs latest price fast |
-| **S3** `quantembrace-market-data-history` | All historical ticks as Parquet | Cheap long-term storage, read during backtesting and ML training |
+| **Kafka** `ticks.nse` / `ticks.us` | Every normalised tick | Real-time stream for strategy_engine |
+| **DynamoDB** `latest-prices` | Current LTP per instrument | Sub-millisecond reads for risk and strategy |
+| **S3** `quantembrace-data/ticks/` | All historical ticks (Parquet) | Cheap long-term storage; read during backtesting and ML training |
 
-Key files:
-- `services/data_ingestion/connectors/zerodha_connector.py` — Kite WebSocket handler
-- `services/data_ingestion/connectors/alpaca_connector.py` — Alpaca WebSocket handler
-- `services/data_ingestion/processors/tick_processor.py` — Normalization logic
-- `services/data_ingestion/storage/s3_writer.py` — Writes Parquet to S3
-- `services/data_ingestion/storage/dynamo_writer.py` — Updates DynamoDB latest prices
+**Key files:**
+- [services/data_ingestion/service.py](../services/data_ingestion/service.py) — main event loop, WebSocket management
+- [services/data_ingestion/connectors/zerodha_connector.py](../services/data_ingestion/connectors/zerodha_connector.py) — Kite WebSocket handler
+- [services/data_ingestion/connectors/alpaca_connector.py](../services/data_ingestion/connectors/alpaca_connector.py) — Alpaca streaming handler
+- [services/data_ingestion/processors/tick_processor.py](../services/data_ingestion/processors/tick_processor.py) — normalisation logic
 
-**What happens if this layer fails?** Strategies stop receiving fresh data. Strategy engine sees stale prices and stops generating signals. Trading pauses safely — no stale signals reach execution. CloudWatch alarm fires if WebSocket is disconnected for > 60 seconds.
+**What happens if this layer fails?** Kafka topic `ticks.nse` or `ticks.us` stops receiving new messages. The strategy engine continues but stops generating signals on stale data (strategies detect the staleness). CloudWatch alarm fires if the last tick on either topic is > 60s old.
 
 ---
 
@@ -157,40 +140,41 @@ Key files:
 
 ### What It Does
 
-This layer is the "brain" of the system. It receives market data and decides whether a trading opportunity exists.
+This layer is the "brain" of the system. It consumes tick data and runs 6 independent strategies to find trading opportunities.
 
 ```
-Market Data (from SQS / DynamoDB)
-         │
-         ▼
-   ┌─────────────────────────────────────┐
-   │  Strategy Engine                    │
-   │                                     │
-   │  ┌─────────────────────────────┐   │
-   │  │ MomentumStrategy            │   │
-   │  │  - tracks price history     │   │
-   │  │  - computes moving averages │   │
-   │  │  → BUY signal if crossover  │   │
-   │  └─────────────────────────────┘   │
-   │                                     │
-   │  ┌─────────────────────────────┐   │
-   │  │ MeanReversionStrategy       │   │
-   │  │  - tracks z-score           │   │
-   │  │  → BUY if oversold (z < -2) │   │
-   │  └─────────────────────────────┘   │
-   │                                     │
-   │  (more strategies can be added)    │
-   └─────────────────┬───────────────────┘
-                     │
-                     ▼ Signal object (via SQS)
-              ┌──────────────┐
-              │ Risk Engine  │  (NOT directly to execution!)
-              └──────────────┘
+Kafka: ticks.nse, ticks.us
+            │
+            ▼
+   ┌──────────────────────────────────────┐
+   │  Strategy Engine                     │
+   │                                      │
+   │  ┌──────────────────────────────┐   │
+   │  │ MomentumStrategy             │   │  ← tick-based, moving average crossover
+   │  └──────────────────────────────┘   │
+   │  ┌──────────────────────────────┐   │
+   │  │ ORB (Opening Range Breakout) │   │  ← candle-based, first 15min range break
+   │  └──────────────────────────────┘   │
+   │  ┌──────────────────────────────┐   │
+   │  │ Scalp1m                      │   │  ← candle-based, 1-minute momentum
+   │  └──────────────────────────────┘   │
+   │  ┌──────────────────────────────┐   │
+   │  │ VWAPReversionStrategy        │   │  ← candle-based, mean reversion to VWAP
+   │  └──────────────────────────────┘   │
+   │  ┌──────────────────────────────┐   │
+   │  │ IntradayTrend15m             │   │  ← candle-based, 15-minute trend following
+   │  └──────────────────────────────┘   │
+   │  ┌──────────────────────────────┐   │
+   │  │ PreCloseMomentum             │   │  ← candle-based, pre-close momentum burst
+   │  └──────────────────────────────┘   │
+   └──────────────────┬───────────────────┘
+                      │
+                      ▼  Kafka: signals.pending (key = instrument)
 ```
 
 ### What a Signal Looks Like
 
-A signal is a structured object — not just "buy RELIANCE". It carries everything the system needs:
+A signal carries everything the downstream pipeline needs to evaluate and act on it:
 
 ```python
 Signal(
@@ -201,149 +185,86 @@ Signal(
     direction=Direction.BUY,
     quantity=20,
     order_type=OrderType.MARKET,
-    limit_price=None,               # Only for LIMIT orders
-    stop_price=Decimal("2420.00"),  # Stop-loss level
-    confidence=0.75,                # 0.0 = low, 1.0 = high conviction
+    stop_price=Decimal("2420.00"),  # Stop-loss — REQUIRED on every signal
+    confidence=0.75,                # 0.0 = low conviction, 1.0 = high conviction
+    paper_trade=True,               # True until operator promotes to live
     metadata={"reason": "golden_cross", "short_ma": 2420, "long_ma": 2400},
     created_at=datetime(2026, 4, 24, 4, 0, 0, tzinfo=UTC)
 )
 ```
 
-### The Strategy Interface
+### Signal Timing — Important Constraint
 
-All strategies implement the same interface (a "contract"). This makes them swappable:
+Candle-based strategies stamp `Signal.generated_at = candle.candle_close_time`. A 1-minute candle closing at T is written to DynamoDB at T+5s, polled at T+5.5s, enriched by ai_engine, and arrives at the risk engine at T+7–12s. This is why `RISK_MAX_SIGNAL_AGE_SECONDS` must be ≥ 30s. The default of 5s rejects every candle signal — this was the root cause of Days 1-4 zero fills.
 
-```python
-class BaseStrategy(ABC):
-    def on_tick(self, tick: MarketTick) -> Optional[Signal]:
-        """Called for every price tick. Return a Signal or None."""
-        
-    def on_bar(self, bar: OHLCV) -> Optional[Signal]:
-        """Called when a completed bar (1m, 5m, etc.) is formed."""
-        
-    def get_parameters(self) -> dict:
-        """Return current parameters — used for logging and audit."""
-```
+### What the Strategy Layer Must NEVER Do
 
-If you want to add a new strategy, you implement this interface and register it. No other code changes needed.
+- Call broker APIs (that is execution's job)
+- Check account balances or margin (that is risk's job)
+- Cancel or modify orders (that is execution's job)
+- Track P&L (that is risk's job)
 
-### What This Layer Must NEVER Do
+**Key files:**
+- [services/strategy_engine/service.py](../services/strategy_engine/service.py) — main service, strategy orchestration
+- [services/strategy_engine/strategies/](../services/strategy_engine/strategies/) — all 6 strategy implementations
 
-- ❌ Call broker APIs directly (that's execution's job)
-- ❌ Check account balances or margins (that's risk's job)
-- ❌ Cancel or modify orders (that's execution's job)
-- ❌ Track P&L (that's risk's job)
-
-Key files:
-- `services/strategy_engine/strategies/base_strategy.py` — Interface all strategies implement
-- `services/strategy_engine/strategies/momentum_strategy.py` — Momentum strategy implementation
-- `services/strategy_engine/signals/signal.py` — Signal data model
-- `services/strategy_engine/backtesting/backtester.py` — Replay historical data for testing
-
-**What happens if this layer fails?** No new signals are generated. No new orders are placed. Existing positions are unaffected (risk and execution don't depend on strategy being alive).
+**What happens if this layer fails?** No new signals are generated. Existing positions are unaffected — risk and execution don't depend on the strategy engine staying alive. Signals that were already in the pipeline continue flowing.
 
 ---
 
-## Layer 3 — Execution Engine
+## Layer 5 — AI/ML Engine
 
 ### What It Does
 
-This layer is the "hands" of the system. It translates approved trade decisions into actual broker orders.
+This layer runs between the strategy engine and the risk engine. It consumes every pending signal, adds machine-learning enrichment metadata, and republishes the enriched signal.
 
 ```
-Approved Signal (from Risk Engine via SQS)
-         │
-         ▼
-   ┌─────────────────────────────────────┐
-   │  Execution Engine                   │
-   │                                     │
-   │  1. Is this a duplicate? → skip     │
-   │  2. Which broker?                   │
-   │     market=NSE → Zerodha            │
-   │     market=US  → Alpaca             │
-   │  3. Place order via broker API      │
-   │  4. On failure → retry (max 3x)     │
-   │  5. Update DynamoDB with status     │
-   │  6. Track fills as they come in     │
-   └─────────────────────────────────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
- Zerodha    Alpaca
- KiteAPI    REST API
+Kafka: signals.pending  →  [ai_engine]  →  Kafka: signals.enriched
 ```
 
-### Idempotency — The Most Important Engineering Detail
+### What Enrichment Adds
 
-What happens if the service crashes right after placing an order but before recording it to DynamoDB? The service restarts, replays the signal from SQS, and tries to place the order again. Without idempotency checks, you'd get a **duplicate order**.
+```python
+# Signal BEFORE enrichment (signals.pending):
+Signal(instrument="NSE:RELIANCE", direction=BUY, confidence=0.75, ...)
 
-The solution: every order has a UUID (`signal_id`) that's created when the strategy generates the signal. Before placing any order:
-
-```
-1. Check DynamoDB: does an order with this signal_id already exist?
-   YES and status = FILLED    → skip, already done
-   YES and status = PLACED    → skip, already placed, wait for fill
-   YES and status = FAILED    → retry with the SAME signal_id
-   NO                         → create record with status=PENDING, then place
-```
-
-This guarantees: no matter how many times the system restarts, each signal results in exactly one order.
-
-### Smart Order Routing
-
-The execution engine uses an **adapter pattern** — each broker has its own adapter that translates internal order types to broker-specific ones:
-
-```
-Internal Order: BUY NSE:RELIANCE 20 shares MARKET
-         │
-         ▼ market=NSE
-ZerodhaAdapter.place_order()
-  → kite.place_order(
-        variety="regular",
-        exchange="NSE",
-        tradingsymbol="RELIANCE",
-        transaction_type="BUY",
-        quantity=20,
-        product="MIS",           # Intraday
-        order_type="MARKET"
-    )
+# Signal AFTER enrichment (signals.enriched):
+Signal(
+    ...,                                     # all original fields unchanged
+    quality_score=0.82,                      # ML confidence: how good is this signal?
+    market_regime="trending",                # is market in trend, ranging, or volatile mode?
+    volatility_estimate=0.018,               # expected next-hour volatility
+    enrichment_version="v1.2",
+)
 ```
 
-```
-Internal Order: BUY US:AAPL 10 shares LIMIT $182.10
-         │
-         ▼ market=US
-AlpacaAdapter.place_order()
-  → api.submit_order(
-        symbol="AAPL",
-        qty=10,
-        side="buy",
-        type="limit",
-        time_in_force="day",
-        limit_price=182.10
-    )
-```
+### Why a Separate Service?
 
-### Retry Logic
+The AI engine runs as an independent Kafka consumer, not as a library inside the strategy engine. This means:
+- Models can be updated without restarting the strategy engine
+- Enrichment can be scaled independently
+- If the AI engine falls behind, the `EnrichmentWatchdog` in the risk engine detects the lag and activates a **fallback path**: signals flow directly from `signals.pending` → risk engine without enrichment. Trading continues safely, just without ML quality filtering.
 
-Transient failures (network timeout, broker server 500 error) are retried with exponential backoff:
+### Fallback Path
 
 ```
-Attempt 1 → fails (timeout) → wait 1 second
-Attempt 2 → fails (500)     → wait 2 seconds
-Attempt 3 → fails           → GIVE UP, mark order FAILED, alert via SNS
+Normal path:
+  signals.pending → ai_engine → signals.enriched → risk_engine
+
+Fallback path (EnrichmentWatchdog activates when ai_engine lag > threshold):
+  signals.pending → risk_engine (directly, without enrichment metadata)
+
+Recovery:
+  EnrichmentWatchdog automatically switches back to normal path when lag clears.
+  No manual action needed.
 ```
 
-Non-retryable errors (insufficient margin, invalid symbol, auth expired) fail immediately without retry.
+**Key files:**
+- [services/ai_engine/service.py](../services/ai_engine/service.py) — Kafka consumer + inference loop
+- [services/ai_engine/inference/predictor.py](../services/ai_engine/inference/predictor.py) — model inference
+- [services/ai_engine/features/feature_pipeline.py](../services/ai_engine/features/feature_pipeline.py) — feature computation
 
-Key files:
-- `services/execution_engine/service.py` — Main service, order routing, SQS consumer
-- `services/execution_engine/brokers/zerodha_broker.py` — Zerodha adapter
-- `services/execution_engine/brokers/alpaca_broker.py` — Alpaca adapter
-- `services/execution_engine/orders/order_manager.py` — DynamoDB order tracking
-- `services/execution_engine/retry/retry_handler.py` — Retry with backoff
-
-**What happens if this layer fails?** Approved signals pile up in the SQS queue (SQS retains messages for up to 14 days). When execution restarts, it processes the queued signals. It reconciles with broker to catch any orders that were placed before the crash.
+**What happens if this layer fails?** The `EnrichmentWatchdog` in the risk engine detects the Kafka lag within seconds and activates fallback mode. Trading continues on `signals.pending` without enrichment. An SNS alert fires to notify the operator.
 
 ---
 
@@ -353,140 +274,159 @@ Key files:
 
 ### What It Does
 
-The Risk Engine is the gatekeeper. It sits between Strategy and Execution and has the authority to reject any signal for any reason. There is no way to bypass it.
+The Risk Engine is the mandatory gatekeeper. No signal can become an order without passing through it. There is no bypass path — not in production, not in staging, not in code.
 
 ```
-Strategy says: "BUY RELIANCE 1000 shares" (very large position)
+Every signal arrives here. 11 validators run in order:
 
-Risk Engine checks:
-  Kill switch active?                         → NO, continue
-  Max position size (5% portfolio)?           → 1000 × ₹2,453 = ₹24.5 lakh
-                                                Portfolio = ₹10 lakh
-                                                24.5L / 10L = 245% — WAY OVER LIMIT
-  Decision: REJECTED — position_size_exceeded
-  
-Signal dies here. Execution engine never sees it.
-```
-
-### The 7 Risk Checks (Executed in This Order)
-
-```
-SIGNAL ARRIVES
+SIGNAL IN
      │
      ▼
-┌────────────────────────┐
-│ 1. Kill Switch Check   │  Is kill switch ON? → REJECT all immediately
-└────────────┬───────────┘
-             ▼ (only if kill switch is OFF)
-┌────────────────────────┐
-│ 2. Position Limit      │  Too many open positions? → REJECT
-└────────────┬───────────┘
-             ▼
-┌────────────────────────┐
-│ 3. Exposure Check      │  Too much capital at risk total? → REJECT
-└────────────┬───────────┘
-             ▼
-┌────────────────────────┐
-│ 4. Stop-Loss Check     │  No stop-loss defined? → ADD DEFAULT STOP-LOSS
-└────────────┬───────────┘
-             ▼
-┌────────────────────────┐
-│ 5. Drawdown Check      │  Daily P&L loss too large? → REJECT + ACTIVATE KILL SWITCH
-└────────────┬───────────┘
-             ▼
-┌────────────────────────┐
-│ 6. Instrument Limits   │  Too much in one stock? → REJECT
-└────────────┬───────────┘
-             ▼
-┌────────────────────────┐
-│ 7. Margin Check        │  Enough margin in broker account? → REJECT if insufficient
-└────────────┬───────────┘
-             ▼
-         APPROVED
-     (sent to execution)
+1. SignalAgeValidator      — reject if signal > 30s old (stale)
+     │
+     ▼
+2. KillSwitchValidator     — reject all immediately if kill switch is ON
+     │
+     ▼
+3. PositionValidator       — reject if too many open positions (max 8)
+     │
+     ▼
+4. ExposureValidator       — reject if total portfolio exposure too high (max 50%)
+     │
+     ▼
+5. DailyLossValidator      — reject if daily P&L loss exceeds limit (2%); auto-fires kill switch at 3%
+     │
+     ▼
+6. MarginValidator         — reject if insufficient broker margin
+     │
+     ▼
+7. SlippageValidator       — reject if market moved > 0.15% since signal was generated
+     │
+     ▼
+8. SpreadGateValidator     — reject if bid-ask spread > 50 bps (illiquid conditions)
+     │
+     ▼
+9. SectorConcentrationValidator — reject if single sector > 20% of portfolio
+     │
+     ▼
+10. LiquidityValidator     — reject if order > 1% of average daily volume
+     │
+     ▼
+11. QualityScoreValidator  — reject if ai_engine quality_score < threshold (default 0.30)
+     │
+     ▼
+  APPROVED → Kafka: signals.approved
 ```
 
-**If any check fails, the pipeline short-circuits.** Checks 3-7 are skipped after any rejection.
+If any check fails, the pipeline short-circuits. All remaining validators are skipped.
 
 ### The Kill Switch
 
-The kill switch is a single boolean in DynamoDB that, when `true`, causes the Risk Engine to reject every single signal immediately, without running any other checks.
+The kill switch is stored as a record in DynamoDB. When active, the KillSwitchValidator rejects every incoming signal without running any other checks.
 
-It can be triggered three ways:
-- **Manually** — an authorized operator calls the kill switch API (e.g. "market is crashing, stop everything")
-- **Automatically** — the drawdown check finds that daily loss has exceeded the configured threshold
-- **Via CloudWatch alarm** — an infrastructure alert (e.g. broker API error rate too high) triggers it
+**Three ways it activates:**
+1. **Automatically** — the `DailyLossValidator` finds daily loss exceeds 3% of portfolio
+2. **Manually** — operator runs `make kill-switch-on` or `python scripts/kill_switch_cli.py activate`
+3. **Via `KillSwitchMonitor`** — background task that monitors for position drift, margin breach, or abnormal fill rates
 
-When the kill switch activates:
-1. All in-flight signals are rejected
-2. All open orders are cancelled (best-effort)
-3. Positions are held (not force-closed — that could cause more loss during a crash)
-4. SNS alert is sent to the operator
-5. Kill switch stays ON until manually deactivated for the next trading day
+**When activated:**
+- All in-flight signals are rejected immediately
+- All pending orders are cancelled (best-effort)
+- Positions are held (not force-closed — force-closing during a crash can make things worse)
+- SNS alert sent to operator
+- Kill switch stays ON until manually deactivated
 
-### Every Decision is Logged
+### Every Decision Is Logged
 
 Every risk decision — approve or reject — is written to S3 as a JSON audit record:
 
 ```json
 {
-    "risk_decision_id": "abc-789-xyz",
-    "signal_id": "f47ac10b-...",
-    "status": "REJECTED",
-    "reason": "daily_loss_limit_exceeded",
-    "validator_results": [
-        {"validator_name": "KillSwitchValidator", "approved": true},
-        {"validator_name": "PositionValidator", "approved": true},
-        {"validator_name": "ExposureValidator", "approved": true},
-        {"validator_name": "DailyLossValidator", "approved": false, 
-         "reason": "daily_loss_3.2%_exceeds_limit_3.0%"}
-    ],
-    "timestamp": "2026-04-24T06:30:00.000Z"
+  "risk_decision_id": "abc-789-xyz",
+  "signal_id": "f47ac10b-...",
+  "status": "APPROVED",
+  "validator_results": [
+    {"validator": "SignalAgeValidator",   "approved": true,  "reason": "age 0.3s < 30s limit"},
+    {"validator": "KillSwitchValidator", "approved": true,  "reason": "kill switch is OFF"},
+    {"validator": "PositionValidator",   "approved": true,  "reason": "4 positions < 8 max"},
+    ...all 11 validators...
+  ],
+  "timestamp": "2026-04-24T03:46:04.123Z"
 }
 ```
 
-This is stored at: `s3://quantembrace-trading-logs/risk-audit/2026-04-24/{risk_decision_id}.json`
+Path: `s3://quantembrace-{env}-logs/risk-audit/{YYYY-MM-DD}/{risk_decision_id}.json`
 
-Key files:
-- `services/risk_engine/service.py` — Main service, validation pipeline
-- `services/risk_engine/killswitch/killswitch.py` — Kill switch logic
-- `services/risk_engine/validators/position_validator.py` — Position size checks
-- `services/risk_engine/validators/exposure_validator.py` — Portfolio exposure checks
-- `services/risk_engine/validators/loss_validator.py` — Daily drawdown checks
-- `services/risk_engine/limits/risk_limits.py` — Configurable limit thresholds
+**Key files:**
+- [services/risk_engine/service.py](../services/risk_engine/service.py) — main service, validation pipeline
+- [services/risk_engine/validators/](../services/risk_engine/validators/) — all 11 validators
+- [configs/risk_limits_production.yaml](../configs/risk_limits_production.yaml) — limit thresholds
 
-**What happens if this layer fails?** Trading halts entirely. This is by design. The system is fail-safe, not fail-open. Strategy signals pile up in SQS. When risk engine restarts, it loads its state from DynamoDB and resumes.
+**What happens if this layer fails?** Trading halts entirely. By design. Signals pile up in the Kafka topic. When the risk engine restarts, it loads its state from DynamoDB and resumes processing from where Kafka left off.
 
 ---
 
-## Layer 5 — AI/ML Engine
+## Layer 3 — Execution Engine
 
 ### What It Does
 
-This layer provides machine-learning-based enrichment to improve strategy signal quality. It's intentionally lightweight — models augment human-designed strategies, they don't replace them.
+This layer is the "hands" of the system. It receives approved signals and translates them into real broker orders.
 
 ```
-Nightly batch (ECS task):
-  S3 historical ticks → Feature computation → Feature store (S3)
-  Feature store → Model training → Model registry (S3)
+Kafka: signals.approved  →  [execution_engine]
 
-During trading (in-process, no network hop):
-  StrategyEngine calls ai_engine.predict(features)
-  → returns: {"volatility_estimate": 0.023, "market_regime": "trending"}
-  Strategy uses this to scale position size or filter signals
+  1. Verify signal has risk_decision_id (proof it passed the risk engine)
+  2. Idempotency check: has this signal_id already been processed?
+  3. Universe check: is this symbol approved for today in the current UNIVERSE_MODE?
+  4. Route by market: NSE → Zerodha, US → Alpaca
+  5. Place the order with retry (3 attempts, exponential backoff)
+  6. Update DynamoDB: PENDING → PLACED → FILLED
+  7. Publish fill event to Kafka: orders.events
 ```
 
-### Design Choices — Why So Simple?
+### Trading Universe Enforcement
 
-- **No SageMaker:** Model training happens offline. Only inference runs in production. SageMaker is overkill and expensive for this scale.
-- **No separate inference server:** The AI engine runs as a library inside the strategy engine process. No network round-trip for predictions.
-- **ONNX/pickle models on S3:** Model artifacts are just files. No model serving infrastructure.
-- **Two models only:** Volatility predictor (help size positions) + Regime classifier (trending vs. ranging market). More than this is over-engineering.
+Every order (paper or live) must pass through the `UniverseOrderValidator` before reaching a broker. The validator checks the symbol against a daily immutable snapshot built at service start (and rebuilt at midnight IST via `_universe_snapshot_refresh_loop`).
 
-Key files:
-- `services/ai_engine/features/feature_pipeline.py` — Computes ML features from historical ticks
-- `services/ai_engine/models/model_registry.py` — Loads models from S3
-- `services/ai_engine/inference/predictor.py` — Runs inference, returns predictions
+Three universe modes (`UNIVERSE_MODE` env var):
+- `PAPER_SAFE_START` — NIFTY 50 only (default for paper sessions)
+- `PAPER_EXPAND` — NIFTY 100 + F&O eligible stocks
+- `LIVE_ADVANCED` — Full NSE universe (live mode only)
+
+Paper mode is permissive on stale snapshots; live mode blocks orders if no valid snapshot exists for today.
+
+### Paper Trading Simulator
+
+When `paper_trade=True` on a signal, the execution engine routes to a built-in simulator instead of the real broker. The simulator:
+- Uses a deterministic SHA256 hash of the signal_id to decide fill outcomes (same signal always produces the same outcome — reproducible)
+- Applies configurable slippage (default: 5 bps), spread (10 bps), and latency (250ms)
+- Writes the same DynamoDB records and Kafka events as a real fill
+- Never calls Zerodha or Alpaca
+
+This means paper trading exercises the entire code path, not just the strategy.
+
+### Idempotency — The Critical Detail
+
+What if the service crashes after placing an order but before writing to DynamoDB? On restart, the same signal would be re-processed from Kafka, and a duplicate order would be placed.
+
+The solution: every signal has a UUID (`signal_id`) created at strategy generation time. Before placing any order:
+
+```
+1. Does DynamoDB already have an order with this signal_id?
+   FILLED    → skip, already done
+   PLACED    → skip, already placed, wait for fill event
+   FAILED    → retry the placement
+   Not found → write PENDING to DynamoDB, THEN place order
+```
+
+This guarantees exactly-once order placement regardless of restarts or Kafka redeliveries.
+
+**Key files:**
+- [services/execution_engine/service.py](../services/execution_engine/service.py) — main service, order routing
+- [services/execution_engine/brokers/](../services/execution_engine/brokers/) — Zerodha and Alpaca adapters
+- [services/execution_engine/paper_simulator.py](../services/execution_engine/paper_simulator.py) — deterministic paper fill simulator
+
+**What happens if this layer fails?** Approved signals queue up in Kafka `signals.approved` (Kafka retains messages for 24h). When execution restarts, it reconciles with the broker to catch any orders placed before the crash, then resumes from the Kafka offset.
 
 ---
 
@@ -498,46 +438,74 @@ Everything that supports the other five layers: compute, storage, networking, mo
 
 See [06_aws_infrastructure.md](06_aws_infrastructure.md) for the full details.
 
-Brief summary:
-- **Compute:** AWS ECS Fargate (5 services, task-scheduled for market hours)
-- **Storage:** S3 (historical data + logs) + DynamoDB (state + orders)
-- **Networking:** VPC, private subnets, NAT Gateway, VPC endpoints
-- **Monitoring:** CloudWatch Logs + Metrics + Alarms → SNS → Email/SMS
-- **Secrets:** AWS Secrets Manager (API keys)
-- **CI/CD:** GitHub Actions → ECR → ECS rolling deploy
+**Brief summary:**
+- **Compute:** AWS EC2 ARM64 Auto Scaling Groups (c6g/t4g) — one ASG per service
+- **Messaging:** Kafka MSK Serverless — SASL/OAUTHBEARER IAM auth, port 9098
+- **State:** DynamoDB on-demand — orders, positions, risk-state, sessions, kill-switch
+- **Data:** S3 — ticks, audit logs, ML model artifacts
+- **Networking:** VPC, private subnets, VPC endpoints for S3 and DynamoDB
+- **Monitoring:** CloudWatch Logs + Metrics + Alarms → SNS → email/SMS
+- **CI/CD:** GitHub Actions → EC2 rolling deploy
 
 ---
 
-## How Layers Communicate
+## How Layers Communicate — Kafka Topics
 
-Layers never call each other directly (no function imports across service boundaries). They communicate through AWS messaging:
+Layers communicate exclusively through Kafka topics. No direct Python imports across service boundaries.
 
-| From → To | Transport | Why |
+### Topic Map
+
+| Topic | Producer | Consumer | Key | Purpose |
+|---|---|---|---|---|
+| `ticks.nse` | data_ingestion | strategy_engine | instrument symbol | NSE real-time tick stream |
+| `ticks.us` | data_ingestion | strategy_engine | instrument symbol | US real-time tick stream |
+| `signals.pending` | strategy_engine | ai_engine | instrument | Raw signals awaiting enrichment |
+| `signals.enriched` | ai_engine | risk_engine | instrument | ML-enriched signals awaiting risk validation |
+| `signals.approved` | risk_engine | execution_engine | instrument | Risk-approved signals ready for execution |
+| `orders.events` | execution_engine | risk_engine | order_id | Fill events for position tracking |
+| `risk.kill-switch` | risk_engine | execution_engine, risk_engine | — | Kill switch activate/clear events |
+| `signals.enriched.retry` | risk_engine (on failure) | KafkaRetryReplayer | — | Signals awaiting retry |
+| `signals.enriched.dlq` | KafkaRetryReplayer (max retries) | — (manual inspection) | — | Dead letter queue |
+
+### Consumer Groups
+
+| Consumer Group | Consumes | Service |
 |---|---|---|
-| Data Ingestion → Strategy | SQS queue | Decoupled, buffered, survives restarts |
-| Strategy → Risk | SQS FIFO queue | FIFO preserves signal order per symbol, deduplication built-in |
-| Risk → Execution | SQS FIFO queue | Same — order matters, idempotency built-in |
-| All layers → Storage | DynamoDB / S3 direct write | Each layer owns its tables |
-| AI/ML → Strategy | In-process function call | Same process, no latency |
-| Monitoring | CloudWatch | Each service emits structured logs and custom metrics |
+| `strategy-v1` | `ticks.nse`, `ticks.us` | strategy_engine |
+| `aiengine-v1` | `signals.pending` | ai_engine |
+| `risk-v1` | `signals.enriched` (+ `signals.pending` in fallback) | risk_engine |
+| `execution-v1` | `signals.approved` | execution_engine |
+| `execution-v1-kill-switch` | `risk.kill-switch` | execution_engine |
+| `risk-v1-order-events` | `orders.events` | risk_engine |
 
-The SQS FIFO queue between Risk and Execution is important: if two signals arrive for the same symbol, they're processed in order (first-in, first-out), preventing race conditions.
+Consumer group versioning matters: if a schema-breaking change is deployed, increment the group version (e.g., `risk-v2`) to start reading from the beginning of the topic without affecting other consumers.
+
+### Why Kafka Instead of SQS?
+
+- **Message ordering:** Kafka partitions guarantee that all messages for the same instrument (keyed by symbol) are processed in order by the same consumer thread. SQS FIFO queues offer this too, but only per MessageGroupId, with lower throughput.
+- **Replay and audit:** Kafka retains messages for a configurable period (24h+). A failed consumer can replay from any offset without re-inserting messages. SQS messages are deleted after processing.
+- **Consumer groups:** Multiple independent consumers can read the same topic with independent offsets. The `EnrichmentWatchdog` uses this to monitor lag on `signals.pending` without interfering with the ai_engine's reading.
+- **MSK Serverless pricing:** No idle cluster cost when markets are closed. Perfect for a trading system that only needs Kafka during market hours.
 
 ---
 
 ## The Golden Rule — No Layer Skipping
 
 ```
-✅ CORRECT:   Strategy → Risk → Execution
-❌ WRONG:     Strategy ──────────────────► Execution  (bypassing risk)
-❌ WRONG:     Strategy → Risk & Execution (mixing concerns)
-❌ WRONG:     Execution imports strategy code
-❌ WRONG:     Strategy checks broker margins
+✅ CORRECT:
+   Strategy → AI enrichment → Risk → Execution
+
+❌ CRITICAL DEFECT:
+   Strategy ────────────────────────────────► Execution  (bypassing AI and risk)
+   Strategy → Risk ─────────────────────────► Execution  (bypassing AI enrichment)
+   Execution imports strategy code
+   Strategy checks broker margin
+   Risk modifies signal content (it can only approve or reject)
 ```
 
-If you ever find code that violates this, it's a critical defect. Open an issue immediately.
+If you find code that violates this, it is a critical defect. Open a GitHub issue immediately.
 
-The `hooks/pre_trade_risk_validation.yaml` hook enforces this automatically by checking imports and code structure before any commit.
+The pre-commit hook `hooks/no_duplicate_services.yaml` enforces import boundaries automatically.
 
 ---
 
@@ -545,15 +513,16 @@ The `hooks/pre_trade_risk_validation.yaml` hook enforces this automatically by c
 
 | What Fails | Immediate Effect | Recovery |
 |---|---|---|
-| Data ingestion (NSE feed drops) | Strategy stops seeing NSE ticks, no new NSE signals | CloudWatch alarm → SNS alert. Service auto-restarts via ECS health check. Reconnects with exponential backoff. |
-| Strategy engine crashes | No new signals generated | ECS restarts service. Strategy state restored from DynamoDB. SQS retains unprocessed ticks. |
-| Risk engine crashes | All trading halts (SQS signals queue up) | ECS restarts service. Kill switch state loaded from DynamoDB. Processing resumes. |
-| Execution engine crashes | Approved signals queue up in SQS | ECS restarts. Reconcile with broker on startup. Process queued signals. |
-| Zerodha API down | NSE orders fail | Retry 3x, then mark FAILED and alert. Risk engine informed. US trading continues. |
-| DynamoDB throttle | Risk state reads may slow | On-demand capacity auto-scales. VPC endpoint prevents NAT bottleneck. |
-| S3 write fails | Audit log delayed | Non-critical for trading continuity. Retried async. Alert if >5 min behind. |
-| Kill switch ON | All new orders blocked | Manual deactivation by operator only. By design. |
+| `data_ingestion` (WebSocket drops) | No new ticks on Kafka. Strategies see stale prices. | CloudWatch alarm fires after 60s. EC2 ASG health check restarts the process. Reconnects with exponential backoff. |
+| `strategy_engine` crashes | No new signals on `signals.pending` | ASG auto-replaces instance. Strategy state restored from DynamoDB. Kafka consumer resumes from last committed offset. |
+| `ai_engine` lags | `EnrichmentWatchdog` activates fallback path | Trading continues on `signals.pending` → risk_engine directly. Alert fired. ASG auto-replaces unhealthy instance. |
+| `risk_engine` crashes | All trading halts. Signals queue on Kafka. | ASG restarts. Kill switch state loaded from DynamoDB. Kafka consumer resumes from last committed offset. |
+| `execution_engine` crashes | Approved signals queue on `signals.approved` | ASG restarts. Startup reconciliation checks broker for in-flight orders. Kafka consumer resumes. |
+| Zerodha API down | NSE orders rejected. US trading continues. | Retry 3x with backoff. Circuit breaker opens. Alert fired. |
+| MSK Kafka unreachable | All services retry with exponential backoff. | Services stay running, reconnect automatically. No manual restart needed. |
+| Kill switch activated | All new signals rejected immediately. | Manual deactivation by operator only. `make kill-switch-off` or `python scripts/kill_switch_cli.py deactivate`. |
+| DynamoDB throttle | Risk state reads slow. | On-demand capacity auto-scales. VPC endpoint prevents NAT bottleneck. |
 
 ---
 
-*Last updated: 2026-04-24 | Update this document whenever: a new layer is added, a service is split or merged, or inter-layer communication mechanism changes.*
+*Last updated: 2026-05-15 | Update this document when: a new layer is added, a service is split or merged, or Kafka topic names or consumer groups change.*

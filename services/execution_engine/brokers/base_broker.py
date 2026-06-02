@@ -79,6 +79,20 @@ class BrokerClient(ABC):
         """
         ...
 
+    async def find_order_by_client_order_id(
+        self,
+        client_order_id: str,
+        order: OrderRequest | None = None,
+    ) -> OrderResponse | None:
+        """
+        Return an existing broker order for a client idempotency key, if supported.
+
+        Execution uses this before retrying broker placement. If a previous
+        request reached the broker but the acknowledgement was lost, this lookup
+        prevents a second live order from being submitted.
+        """
+        return None
+
     @abstractmethod
     async def cancel_order(self, broker_order_id: str) -> OrderStatusUpdate:
         """
@@ -132,7 +146,10 @@ class BrokerClient(ABC):
 
 class BrokerAPIError(Exception):
     """
-    Raised when a broker API call fails.
+    Raised when a broker API call fails with a transient/retryable error.
+
+    Use this for 5xx server errors, network timeouts, and rate-limit (429)
+    responses where retrying after a backoff is appropriate.
 
     Attributes:
         broker: Name of the broker.
@@ -149,3 +166,36 @@ class BrokerAPIError(Exception):
         self.broker = broker
         self.status_code = status_code
         super().__init__(f"[{broker}] {message} (status={status_code})")
+
+
+class NonRetryableBrokerError(BrokerAPIError):
+    """
+    Raised for permanent broker errors that must NOT be retried.
+
+    Retrying these errors wastes broker API quota and can cause unintended
+    side effects (e.g. multiple order placements if the first "failed" due
+    to a misread 400 response that actually succeeded server-side).
+
+    Raise this for:
+        - 400 Bad Request: invalid symbol, bad quantity, malformed order
+        - 403 Forbidden: account suspended, permission denied
+        - 422 Unprocessable: insufficient margin, risk limit exceeded at broker
+        - Any error whose message explicitly identifies a permanent failure
+          (e.g. "Symbol not found", "Account restricted")
+
+    The RetryHandler catches this exception class and re-raises immediately
+    without sleeping or incrementing the retry counter. The circuit breaker
+    is NOT tripped by non-retryable errors — they indicate a logic error in
+    the order parameters, not an infrastructure failure.
+
+    Examples::
+
+        # Bad symbol — do not retry
+        raise NonRetryableBrokerError("Alpaca", "symbol XYZW not found", status_code=400)
+
+        # Insufficient funds — do not retry (funds won't appear between retries)
+        raise NonRetryableBrokerError("Zerodha", "insufficient margin", status_code=422)
+
+        # Rate limit — DO retry (use BrokerAPIError, not NonRetryableBrokerError)
+        raise BrokerAPIError("Alpaca", "rate limit exceeded", status_code=429)
+    """

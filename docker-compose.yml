@@ -31,6 +31,7 @@
 #   risk_engine    : http://localhost:8083/health
 #   execution_engine: http://localhost:8084/health
 #   ai_engine      : http://localhost:8085/health
+#   monitoring_agent: http://localhost:8086/health  (read-only observer, Phase 1)
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,9 @@ x-service-defaults: &service-defaults
     AWS_SECRET_ACCESS_KEY: test
     # DynamoDB table prefix for local dev
     DYNAMODB_TABLE_PREFIX: quantembrace-development
+    # S3 buckets — settings.py reads AWS_S3_BUCKET (env_prefix=AWS_); created by setup_local_tables.py
+    AWS_S3_BUCKET: quantembrace-market-data
+    AWS_S3_MODEL_BUCKET: quantembrace-ml-models
     # Paper trading safety net
     RISK_PROFILE: paper
     QE_ENVIRONMENT: development
@@ -147,6 +151,9 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       KAFKA_USE_IAM: "false"
       QE_ENVIRONMENT: development
+      # Align paper NAV with risk_limits_production.yaml portfolio_value: 1,000,000
+      # Default in code was 5,000,000 (5x mismatch causing over-permissive margin checks)
+      PAPER_SEED_NAV: "1000000"
     entrypoint: /bin/sh
     command:
       - -c
@@ -190,6 +197,7 @@ services:
       ZERODHA_API_KEY: ${ZERODHA_API_KEY:-paper_placeholder}
       ZERODHA_API_SECRET: ${ZERODHA_API_SECRET:-paper_placeholder}
       ZERODHA_ACCESS_TOKEN: ${ZERODHA_ACCESS_TOKEN:-}
+      AWS_S3_BUCKET: quantembrace-development-data
       # Allow last-known prices from reconnect dumps to pass through in paper mode
       DATA_INGESTION_TICK_STALE_THRESHOLD: "86400"
     volumes:
@@ -220,6 +228,11 @@ services:
       DYNAMODB_TABLE_PREFIX: quantembrace-development
       QE_ENVIRONMENT: development
       RISK_PROFILE: paper
+      # Dynamic universe — fetch NIFTY 100 / F&O symbol list from NSE archive
+      # CSVs at startup. Keeps strategy_engine, execution_engine universe gate,
+      # and LiveQuotePoller all on the same symbol set without manual sync.
+      UNIVERSE_USE_LIVE_API: "true"
+      UNIVERSE_MODE: PAPER_EXPAND
       LOG_LEVEL: INFO
       QE_HEALTH_CHECK_PORT: "8082"
     volumes:
@@ -251,6 +264,9 @@ services:
       QE_ENVIRONMENT: development
       RISK_PROFILE: paper
       RISK_DAILY_LOSS_HALT_PCT: "3.0"
+      # Signal age limit — matches risk_limits_production.yaml max_signal_age_seconds: 30.
+      # Default in code is 5.0s which rejects candle-based signals that take >5s to process.
+      RISK_MAX_SIGNAL_AGE_SECONDS: "30"
       LOG_LEVEL: INFO
       QE_HEALTH_CHECK_PORT: "8083"
     ports:
@@ -279,6 +295,13 @@ services:
       DYNAMODB_TABLE_PREFIX: quantembrace-development
       QE_ENVIRONMENT: development
       RISK_PROFILE: paper
+      # Universe mode — controls which symbols may be traded.
+      # Fetch live NIFTY 100 / F&O constituents from NSE archive CSVs at startup.
+      # Falls back to configs/universe_modes.yaml if NSE is unreachable.
+      UNIVERSE_USE_LIVE_API: "true"
+      # PAPER_EXPAND = NIFTY 100 + F&O (matches current STRATEGY_WATCHLIST_NSE scope).
+      # Promote to LIVE_ADVANCED only after passing promotion gates in configs/promotion_gates.yaml.
+      UNIVERSE_MODE: PAPER_EXPAND
       # Broker credentials — optional for paper trading (paper signals skip broker calls)
       # Set real values only when promoting to live trading
       ZERODHA_API_KEY: ${ZERODHA_API_KEY:-paper_placeholder}
@@ -296,9 +319,12 @@ services:
       EXECUTION_PAPER_RANDOM_SEED: quantembrace-paper-v1
       LOG_LEVEL: INFO
       QE_HEALTH_CHECK_PORT: "8084"
-      # NSE watchlist for LiveQuotePoller — writes QUOTE#NSE#{symbol}/LATEST to
-      # prices table so LtpResolver returns live prices instead of fill-price fallback.
-      STRATEGY_WATCHLIST_NSE: "HDFCBANK,ICICIBANK,KOTAKBANK,AXISBANK,SBIN,TCS,INFY,WIPRO,HCLTECH,TECHM,RELIANCE,ONGC,NTPC,HINDUNILVR,ITC,NESTLEIND,TATAMOTORS,MARUTI,BAJAJ-AUTO,TATASTEEL,JSWSTEEL,HINDALCO,SUNPHARMA,DRREDDY,CIPLA,DIVISLAB,APOLLOHOSP,BAJFINANCE,BAJAJFINSV,HDFCLIFE,LT,ADANIPORTS,ADANIENT,ADANIGREEN,ATGL,ADANIPOWER,TATAPOWER,NHPC,SJVN,TORNTPOWER,IOC,HINDPETRO,BPCL,OIL,HAL,BEL,BEML,BHEL,COCHINSHIP,MAZDOCK,DEEPAKFERT,GRASIM,INDIGO,TATAELXSI,PERSISTENT,DATAPATTNS,ZENTEC,TEXRAIL,WAAREEENER,WAAREERTL,IIFL,JIOFIN,PATELENG,JINDALSAW,PRAKASH,HSCL,PRAJIND,ETERNAL,SAMHI,TI,TILAKNAGAR"
+      # STRATEGY_WATCHLIST_NSE removed — LiveQuotePoller now reads symbols
+      # directly from _universe_validator.snapshot.approved_symbols (same
+      # NSE CSV source as the universe hard gate). No manual sync needed.
+    volumes:
+      # universe_modes.yaml + exclusion_lists.yaml are resolved relative to /app/configs
+      - ./configs:/app/configs:ro
     ports:
       - "8084:8084"
     healthcheck:
@@ -335,8 +361,70 @@ services:
       retries: 3
       start_period: 15s
 
+  # ── Monitoring Agent (Phase 1 — READ-ONLY observer) ──────────────────────────
+  # A sibling watcher, NOT a trading service. It probes the 5 services' /health,
+  # reads Kafka metadata + committed offsets, DescribeTable's DynamoDB, and infers
+  # broker freshness from the latest-prices table. It NEVER writes to the trading
+  # platform. DRY_RUN=true + ACTION_MODE=notify_only are hard safety defaults and
+  # Phase 1 wires no action layer at all. Does NOT use *service-defaults (separate
+  # image; must not be gated the same way as capital-path services).
+  monitoring_agent:
+    build:
+      context: .
+      dockerfile: infra/deployment/Dockerfile.monitoring_agent
+    environment:
+      # ── Safety contract (mandatory) ──
+      MONITORING_DRY_RUN: "true"
+      MONITORING_ACTION_MODE: notify_only
+      # ── Loop / health ──
+      MONITORING_POLL_INTERVAL_SECONDS: "30"
+      QE_HEALTH_CHECK_PORT: "8086"
+      LOG_LEVEL: INFO
+      # ── Kafka (read-only metadata + offsets via local Redpanda, PLAINTEXT) ──
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_USE_IAM: "false"
+      # ── AWS → LocalStack (read-only DescribeTable + bounded scans) ──
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_TABLE_PREFIX: quantembrace-development
+      # ── Agent paths ──
+      MONITORING_RULES_PATH: /app/services/monitoring_agent/rules.yaml
+      MONITORING_SNAPSHOT_PATH: /app/data/health_snapshot.json
+      MONITORING_INCIDENT_LOG_PATH: /app/data/monitoring_incidents.jsonl
+      # ── Slack (optional — agent log-only falls back when unset) ──
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      SLACK_CHANNEL: ${SLACK_CHANNEL:-#trading-ops}
+    # Root is required to read the Docker socket (owned root:root, mode 660).
+    # Read-only safety is enforced at code level — docker_collector only ever
+    # calls list()/reload()/inspect. In production replace with a socket proxy.
+    user: root
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    volumes:
+      # Docker container liveness + restart counts. ``:ro`` limits the bind mount,
+      # but the REAL read-only guarantee is code-level: docker_collector only ever
+      # calls list()/reload()/inspect — never run/start/stop/exec. In production
+      # prefer a docker-socket-proxy in front of this instead of the raw socket.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Agent-owned observability artifacts (snapshot + incident log) — survive restarts
+      # so the incident log can replay and avoid re-alerting still-broken components.
+      - monitoring-data:/app/data
+    ports:
+      - "8086:8086"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8086/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
 # ── Volumes ───────────────────────────────────────────────────────────────────
 
 volumes:
   redpanda-data:
   localstack-data:
+  monitoring-data:

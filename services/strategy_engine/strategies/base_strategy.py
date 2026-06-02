@@ -11,9 +11,23 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
-from strategy_engine.signals.signal import Signal
+from shared.models.signal import Signal
+
+
+class DataQuality(str, Enum):
+    """
+    Upstream data reliability flag propagated from IntradayCandleStream.
+
+    StrategyRunner suppresses signals for any value other than NORMAL to avoid
+    generating trades on candles that span a WebSocket gap or reconnect window.
+    """
+    NORMAL     = "NORMAL"      # clean feed; strategy may act
+    WARMING_UP = "WARMING_UP"  # post-reconnect warm-up; suppress signals
+    GAP        = "GAP"         # candle open_time crosses a disconnect gap
+    STALE      = "STALE"       # tick arrived but timestamp older than threshold
 
 
 @dataclass
@@ -22,6 +36,8 @@ class Bar:
     OHLCV bar representation.
 
     Used by strategies that operate on candlestick data rather than raw ticks.
+    The ``data_quality`` field is set by IntradayCandleStream; strategies must
+    not override it. StrategyRunner suppresses dispatch when quality != NORMAL.
     """
 
     symbol: str
@@ -33,6 +49,7 @@ class Bar:
     volume: int
     timestamp: datetime
     interval: str = "1min"  # e.g., "1min", "5min", "1h", "1d"
+    data_quality: DataQuality = DataQuality.NORMAL
 
 
 @dataclass

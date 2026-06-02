@@ -31,7 +31,12 @@ from shared.aws.clients import get_secretsmanager_client
 from shared.config.settings import AppSettings, get_settings
 from shared.logging.logger import get_logger
 
-from execution_engine.brokers.base_broker import BrokerAPIError, BrokerClient, QuoteCallback
+from execution_engine.brokers.base_broker import (
+    BrokerAPIError,
+    BrokerClient,
+    NonRetryableBrokerError,
+    QuoteCallback,
+)
 from execution_engine.orders.order import (
     OrderRequest,
     OrderResponse,
@@ -176,6 +181,17 @@ class AlpacaBroker(BrokerClient):
             "Connecting to Alpaca (%s mode)", "paper" if paper else "LIVE"
         )
 
+        # Paper simulation mode with placeholder creds — skip real API calls.
+        # All paper signals are routed to _handle_paper_order() in execution_engine
+        # and never reach this broker's place_order().
+        if paper and "placeholder" in api_key.lower():
+            logger.warning(
+                "Alpaca placeholder credentials detected in paper mode — "
+                "live Alpaca API calls will fail but paper simulation is fully active."
+            )
+            self._connected = True
+            return
+
         try:
             self._client = TradingClient(
                 api_key=api_key,
@@ -286,7 +302,40 @@ class AlpacaBroker(BrokerClient):
             raise
         except Exception as exc:
             logger.exception("Alpaca order placement failed for %s", order.order_id)
-            raise BrokerAPIError("Alpaca", str(exc)) from exc
+            _raise_classified_alpaca_error(exc)
+
+    async def find_order_by_client_order_id(
+        self,
+        client_order_id: str,
+        order: OrderRequest | None = None,
+    ) -> OrderResponse | None:
+        """Find an existing Alpaca order by client_order_id before retrying."""
+        self._require_connected()
+        if not client_order_id:
+            return None
+        getter = getattr(self._client, "get_order_by_client_id", None)
+        if getter is None:
+            return None
+        await self._rate_limiter.acquire()
+        try:
+            broker_order = await asyncio.to_thread(getter, client_order_id)
+        except Exception as exc:
+            message = str(exc).lower()
+            if "not found" in message or "404" in message:
+                return None
+            _raise_classified_alpaca_error(exc)
+
+        status = _translate_alpaca_status(str(getattr(broker_order, "status", "")))
+        return OrderResponse(
+            order_id=order.order_id if order is not None else client_order_id,
+            broker_order_id=str(getattr(broker_order, "id", "")),
+            status=status,
+            symbol=order.symbol if order is not None else str(getattr(broker_order, "symbol", "")),
+            market=order.market if order is not None else "US",
+            filled_quantity=float(getattr(broker_order, "filled_qty", 0) or 0),
+            avg_fill_price=float(getattr(broker_order, "filled_avg_price", 0) or 0),
+            broker_message=str(getattr(broker_order, "status", "")),
+        )
 
     async def cancel_order(self, broker_order_id: str) -> OrderStatusUpdate:
         """
@@ -315,7 +364,7 @@ class AlpacaBroker(BrokerClient):
             )
         except Exception as exc:
             logger.exception("Alpaca cancel failed: broker_id=%s", broker_order_id)
-            raise BrokerAPIError("Alpaca", str(exc)) from exc
+            _raise_classified_alpaca_error(exc)
 
     async def get_order_status(self, broker_order_id: str) -> OrderStatusUpdate:
         """
@@ -349,7 +398,21 @@ class AlpacaBroker(BrokerClient):
             )
         except Exception as exc:
             logger.exception("Alpaca status query failed: broker_id=%s", broker_order_id)
-            raise BrokerAPIError("Alpaca", str(exc)) from exc
+            _raise_classified_alpaca_error(exc)
+
+    async def get_margins(self) -> dict[str, Any]:
+        """Return buying power and margin usage from Alpaca account. Returns zeroes when not connected."""
+        if not self._connected or self._client is None:
+            return {"available_cash": 0.0, "used_margin": 0.0, "collateral": 0.0}
+        try:
+            account = await asyncio.to_thread(self._client.get_account)
+            return {
+                "available_cash": float(account.buying_power or 0),
+                "used_margin": float(account.initial_margin or 0),
+                "collateral": 0.0,
+            }
+        except Exception:
+            return {"available_cash": 0.0, "used_margin": 0.0, "collateral": 0.0}
 
     async def get_positions(self) -> list[Position]:
         """
@@ -368,7 +431,7 @@ class AlpacaBroker(BrokerClient):
             return [self._normalize_position(p) for p in raw_positions]
         except Exception as exc:
             logger.exception("Failed to fetch Alpaca positions")
-            raise BrokerAPIError("Alpaca", str(exc)) from exc
+            _raise_classified_alpaca_error(exc)
 
     async def subscribe_quotes(
         self, symbols: list[str], callback: QuoteCallback
@@ -551,7 +614,9 @@ class AlpacaBroker(BrokerClient):
             "qty": order.quantity,
             "side": side,
             "time_in_force": tif,
-            "client_order_id": order.order_id,  # idempotency key
+            "client_order_id": str(
+                order.metadata.get("broker_idempotency_key", order.order_id)
+            ),
         }
         if order.extended_hours:
             common["extended_hours"] = True
@@ -617,6 +682,78 @@ class AlpacaBroker(BrokerClient):
                 "Alpaca",
                 "Not connected — call connect() first",
             )
+
+
+# ── Error classification ──────────────────────────────────────────────────────
+
+# HTTP status codes that indicate a permanent failure in the order parameters.
+# These must NOT be retried — the error cannot resolve itself between attempts.
+_NON_RETRYABLE_HTTP_CODES: frozenset[int] = frozenset({
+    400,  # Bad Request: invalid symbol, bad quantity, malformed order
+    403,  # Forbidden: account suspended, permission denied
+    422,  # Unprocessable Entity: insufficient buying power, margin breach
+})
+
+# Lowercase substrings that identify permanent broker rejections when the
+# underlying exception does not expose a clean HTTP status code.
+_NON_RETRYABLE_KEYWORDS: tuple[str, ...] = (
+    "symbol not found",
+    "asset not found",
+    "invalid symbol",
+    "no asset found",
+    "insufficient buying power",
+    "insufficient funds",
+    "insufficient margin",
+    "account restricted",
+    "account suspended",
+    "account is not authorized",
+    "forbidden",
+    "permission denied",
+    "fractional orders not supported",
+    "pattern day trader",
+    "wash sale",
+    "trading halted",
+    "position does not exist",
+    "order not found",
+)
+
+
+def _raise_classified_alpaca_error(exc: Exception) -> None:
+    """
+    Inspect an Alpaca exception and raise the correct error subclass.
+
+    Permanent failures (bad symbol, insufficient funds, account restricted)
+    raise ``NonRetryableBrokerError`` so the RetryHandler aborts immediately
+    without burning retries or tripping the circuit breaker.
+
+    Transient failures (rate limits, 5xx server errors, network timeouts)
+    raise plain ``BrokerAPIError`` so the RetryHandler can back off and retry.
+
+    This function always raises — it never returns.
+
+    Args:
+        exc: The raw exception from alpaca-py or asyncio.to_thread.
+
+    Raises:
+        NonRetryableBrokerError: Permanent failure; do not retry.
+        BrokerAPIError: Transient failure; safe to retry.
+    """
+    # alpaca-py >= 0.8 exposes status_code on APIError
+    status_code: int | None = getattr(exc, "status_code", None)
+    if status_code is None:
+        status_code = getattr(exc, "code", None)  # older alpaca-py attribute
+
+    if isinstance(status_code, int) and status_code in _NON_RETRYABLE_HTTP_CODES:
+        raise NonRetryableBrokerError("Alpaca", str(exc), status_code=status_code) from exc
+
+    # Keyword fallback: some alpaca-py versions embed the HTTP reason in the
+    # message string without exposing a numeric status code.
+    exc_lower = str(exc).lower()
+    if any(kw in exc_lower for kw in _NON_RETRYABLE_KEYWORDS):
+        raise NonRetryableBrokerError("Alpaca", str(exc), status_code=status_code) from exc
+
+    # Everything else: network error, 429 rate-limit, 5xx server error — retryable.
+    raise BrokerAPIError("Alpaca", str(exc), status_code=status_code) from exc
 
 
 # ── Module-level translation helpers ─────────────────────────────────────────

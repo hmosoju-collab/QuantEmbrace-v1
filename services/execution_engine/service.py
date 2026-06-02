@@ -51,6 +51,7 @@ from execution_engine.monitors.orphan_detector import OrphanDetector
 from execution_engine.retry.retry_handler import RetryHandler
 from shared.config.settings import AppSettings, get_settings
 from shared.health.health_server import HealthServer
+from shared.health.loop_health import LoopHealthTracker
 from shared.kafka.retry_replayer import KafkaRetryReplayer
 from shared.logging.logger import get_logger
 from shared.metrics.cloudwatch_metrics import get_metrics_client
@@ -164,6 +165,13 @@ class ExecutionService:
         # Phase 8 (ADR-015 F8): orphan position detector (alert-only, no auto-flatten).
         self._orphan_detector: Optional[OrphanDetector] = None
 
+        # Universe order validator — enforces hard rule: no order outside approved snapshot.
+        # Built from configs/universe_modes.yaml at startup using UNIVERSE_MODE env var.
+        # None = permissive for paper mode; for live mode validate() will block all orders.
+        self._universe_validator: Optional[object] = None
+        # Stored for the daily snapshot refresh loop — same mode used at startup.
+        self._universe_mode_str: str = "PAPER_SAFE_START"
+
         # Phase 2: Trade Exit Engine — stop-loss / take-profit monitor (bypass signal pipeline).
         self._trade_exit_engine: Optional[object] = None
 
@@ -259,18 +267,20 @@ class ExecutionService:
                 "ALPACA_API_SECRET are present in the environment."
             )
 
+        # Wire DynamoDB first so ZerodhaBrokerClient can read the token from
+        # LocalStack/DynamoDB during connect() instead of falling back to the
+        # (potentially stale) ZERODHA_ACCESS_TOKEN env var.
+        dynamo = get_dynamodb_client()
+        self._dynamo = dynamo
+
         # Both constructors accept `settings` — not individual credential kwargs.
         # The brokers load credentials internally (Secrets Manager → env var fallback).
-        self._zerodha = ZerodhaBrokerClient(settings=self._settings)
+        self._zerodha = ZerodhaBrokerClient(settings=self._settings, dynamo_client=dynamo)
         self._alpaca = AlpacaBroker(settings=self._settings)
 
         # Establish broker connections and authenticate before reconciliation.
         await self._zerodha.connect()
         await self._alpaca.connect()
-
-        # Wire the real DynamoDB low-level client so persistence is not a no-op.
-        dynamo = get_dynamodb_client()
-        self._dynamo = dynamo
         self._order_manager = OrderManager(
             dynamo_client=dynamo,
             orders_table=self._settings.aws.dynamodb_table_orders,
@@ -319,6 +329,7 @@ class ExecutionService:
             positions_table=self._settings.aws.dynamodb_table_positions,
             kill_switch_table=self._settings.aws.dynamodb_table_risk_state,
             live_counters=self._live_counters,
+            paper_trading=getattr(self._settings.execution, "paper_trading", True),
         )
         self._mis_manager = mis_manager
 
@@ -358,12 +369,64 @@ class ExecutionService:
             settings=self._settings,
         )
 
+        # ── Universe order validator ───────────────────────────────────────────
+        # Build before LiveQuotePoller so the approved-symbol snapshot is ready
+        # for the watchlist derivation below.
+        try:
+            from shared.universe.modes import UniverseMode as _UniverseMode  # noqa: PLC0415
+            from shared.universe.order_validator import (  # noqa: PLC0415
+                build_validator_for_today as _build_universe_validator,
+            )
+            _universe_mode_str = os.environ.get("UNIVERSE_MODE", "PAPER_SAFE_START")
+            self._universe_mode_str = _universe_mode_str
+            _universe_mode = _UniverseMode.from_string(_universe_mode_str)
+            _use_live_api = os.environ.get("UNIVERSE_USE_LIVE_API", "false").strip().lower() in ("true", "1", "yes")
+            self._universe_use_live_api: bool = _use_live_api
+            self._universe_validator = _build_universe_validator(
+                mode=_universe_mode,
+                fail_if_no_snapshot=_universe_mode.is_live,
+                use_live_api=_use_live_api,
+            )
+            _snap = getattr(self._universe_validator, "snapshot", None)
+            _snap_size = getattr(_snap, "size", 0) if _snap is not None else 0
+            logger.info(
+                "execution_service.universe_validator_ready mode=%s approved=%d",
+                _universe_mode.value, _snap_size,
+            )
+        except Exception as _uv_exc:
+            if _universe_mode.is_live:
+                raise RuntimeError(
+                    f"FATAL: Universe validator init failed in LIVE mode "
+                    f"(UNIVERSE_MODE={_universe_mode.value}) — halting service startup. "
+                    f"Fix the config/YAML error and restart. error={_uv_exc}"
+                ) from _uv_exc
+            logger.error(
+                "execution_service.universe_validator_init_failed error=%s — "
+                "validator disabled; paper orders will proceed, live orders blocked at validate()",
+                _uv_exc,
+            )
+            self._universe_validator = None
+
         # ── PHASE4-FU-001: Live quote poller — writes spread data to DynamoDB ──
-        # Instrument list derived from the strategy watchlist setting.  Poller
-        # maintains an in-memory cache AND writes QUOTE#{market}#{symbol}/LATEST
-        # to the prices table so RiskContextBuilder._fetch_live_spread_bps()
-        # returns real bid-ask data and SpreadGateValidator becomes operational.
-        nse_instruments = [f"NSE:{sym}" for sym in (self._settings.strategy.watchlist_nse or [])]
+        # Instrument list derived from the universe snapshot (same source the
+        # UniverseOrderValidator uses) so all three — strategy_engine signals,
+        # universe hard gate, and spread polling — track the same symbol set.
+        # Falls back to STRATEGY_WATCHLIST_NSE env var if no snapshot is available.
+        _lqp_snap = getattr(self._universe_validator, "snapshot", None) if self._universe_validator else None
+        _lqp_symbols = getattr(_lqp_snap, "approved_symbols", None) if _lqp_snap else None
+        if _lqp_symbols:
+            nse_instruments = [f"NSE:{sym}" for sym in sorted(_lqp_symbols)]
+            logger.info(
+                "live_quote_poller.watchlist_from_universe symbols=%d", len(nse_instruments)
+            )
+        elif self._settings.strategy.watchlist_nse:
+            nse_instruments = [f"NSE:{sym}" for sym in self._settings.strategy.watchlist_nse]
+            logger.info(
+                "live_quote_poller.watchlist_from_settings symbols=%d", len(nse_instruments)
+            )
+        else:
+            nse_instruments = []
+            logger.warning("live_quote_poller.watchlist_empty — no universe snapshot or STRATEGY_WATCHLIST_NSE")
         # Zerodha's kite.quote() only supports exchange:symbol keys for Indian
         # venues. US spread quotes need a separate Alpaca-backed writer.
         watchlist = nse_instruments
@@ -379,7 +442,8 @@ class ExecutionService:
             settings=self._settings,
         )
 
-        if getattr(rl_cfg, "position_monitor_enabled", True):
+        _is_paper = getattr(self._settings.execution, "paper_trading", True)
+        if not _is_paper and getattr(rl_cfg, "position_monitor_enabled", True):
             from risk_engine.killswitch.killswitch import KillSwitch  # noqa: PLC0415
 
             self._position_drift_kill_switch = KillSwitch(
@@ -413,6 +477,7 @@ class ExecutionService:
             positions_table=self._settings.aws.dynamodb_table_positions,
             order_manager=self._order_manager,
             zerodha_broker=self._zerodha,
+            kafka_publisher=self._kafka_order_publisher,
             live_trading_enabled=getattr(self._settings.execution, "live_trading_enabled", False),
             live_counters=self._live_counters,
         )
@@ -477,7 +542,7 @@ class ExecutionService:
             "live_quote_poller_running",
             lambda: self._live_quote_poller is not None and self._live_quote_poller._running,
         )
-        if getattr(rl_cfg, "position_monitor_enabled", True):
+        if not _is_paper and getattr(rl_cfg, "position_monitor_enabled", True):
             self._health_server.add_check(
                 "position_monitor_running",
                 lambda: self._position_monitor is not None and self._position_monitor._running,
@@ -505,6 +570,8 @@ class ExecutionService:
         #   8. _retry_replayer.run()   — drain signals.approved.retry back to primary
         #   9. _trade_exit_engine.run() — stop-loss/TP exits (bypass signal pipeline)
         #  10. _monitoring_flush_loop  — serialize LiveCounters to JSON every 60s
+        #  11. _zerodha.start_token_refresh_loop() — hot-swap daily token at 02:00 UTC
+        #  12. _universe_snapshot_refresh_loop — rebuild approved-symbol set at midnight IST
         self._running = True
         runtime_tasks = [
             asyncio.create_task(self._kafka_processing_loop(), name="execution-kafka"),
@@ -523,12 +590,22 @@ class ExecutionService:
             asyncio.create_task(self._live_quote_poller.start(), name="execution-live-quotes"),
             asyncio.create_task(self._trade_exit_engine.run(), name="execution-tee"),
             asyncio.create_task(self._monitoring_flush_loop(), name="execution-monitoring-flush"),
+            asyncio.create_task(
+                self._universe_snapshot_refresh_loop(), name="execution-universe-refresh"
+            ),
         ]
         if self._position_monitor is not None:
             runtime_tasks.append(
                 asyncio.create_task(
                     self._position_monitor.start(),
                     name="execution-position-monitor",
+                )
+            )
+        if self._zerodha is not None:
+            runtime_tasks.append(
+                asyncio.create_task(
+                    self._zerodha.start_token_refresh_loop(),
+                    name="execution-zerodha-token-refresh",
                 )
             )
         if self._orphan_detector is not None:
@@ -538,6 +615,24 @@ class ExecutionService:
                     name="execution-orphan-detector",
                 )
             )
+
+        # B-002: add done-callbacks so any task crash is logged CRITICAL immediately
+        # rather than silently disappearing until the gather propagates the exception.
+        def _on_task_done(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                lh = LoopHealthTracker(task.get_name() or "unknown", _metrics, service_name="execution_engine")
+                lh.record_crash(exc)
+                logger.critical(
+                    "execution_engine.task_crashed task=%s error_type=%s error=%s — "
+                    "service restart required",
+                    task.get_name(), type(exc).__name__, repr(exc),
+                )
+
+        for _t in runtime_tasks:
+            _t.add_done_callback(_on_task_done)
 
         try:
             await self._wait_until_runtime_ready(runtime_tasks)
@@ -702,6 +797,19 @@ class ExecutionService:
                 f"signal_id={signal_id}. reason={self._kill_switch_reason}"
             )
 
+        # Hard universe validation rule: symbol must be in the approved snapshot.
+        # Paper mode: permissive if no snapshot (warns). Live mode: BLOCKS if not approved.
+        if self._universe_validator is not None:
+            _uv = self._universe_validator.validate(
+                symbol=symbol, market=market.value if hasattr(market, "value") else str(market)
+            )
+            if not _uv.approved:
+                raise ValueError(
+                    f"Universe validation rejected {market}:{symbol} — {_uv.reason}. "
+                    f"signal_id={signal_id} risk_decision_id={risk_decision_id}. "
+                    "Add symbol to universe_modes.yaml or request manual override."
+                )
+
         signal_lock = self._signal_locks.setdefault(signal_id, asyncio.Lock())
         async with signal_lock:
             # ── Step 1: Check for an existing order for this signal ──────────────
@@ -780,6 +888,7 @@ class ExecutionService:
                         signal_id=signal_id,
                         market=market.value,
                     )
+                    self._signal_locks.pop(signal_id, None)
                     return response
                 elif existing.status == OrderStatus.ACK_UNKNOWN:
                     order_request = self._rebuild_order_request_from_existing(
@@ -807,6 +916,7 @@ class ExecutionService:
                             response.filled_quantity,
                         ),
                     )
+                    self._signal_locks.pop(signal_id, None)
                     return response
                 else:
                     # Case B: Kafka duplicate (consumer rebalance / at-least-once).
@@ -816,6 +926,7 @@ class ExecutionService:
                         existing_order_id=existing.order_id,
                         existing_status=existing.status.value,
                     )
+                    self._signal_locks.pop(signal_id, None)
                     return existing
 
             # ── Step 2: First-time submission ─────────────────────────────────
@@ -855,6 +966,7 @@ class ExecutionService:
                         signal_id=signal_id,
                         winning_order_id=existing.order_id,
                     )
+                    self._signal_locks.pop(signal_id, None)
                     return existing
                 # Transaction cancelled AND no record found — should never happen,
                 # but raise so the Kafka processing loop can log and continue.
@@ -891,6 +1003,7 @@ class ExecutionService:
                 risk_decision_id=risk_decision_id,
             )
 
+            self._signal_locks.pop(signal_id, None)
             return response
 
     async def _place_order_with_broker_idempotency(
@@ -1099,6 +1212,27 @@ class ExecutionService:
             or metadata.get("protective_type")
             or str(getattr(order, "order_id", "")).startswith("SL-")
         )
+
+    @staticmethod
+    def _is_paper_order(order: OrderRequest | StoredOrder) -> bool:
+        """True if ``order`` is a simulated paper order that must never reach a real broker.
+
+        Paper orders are written by ``_handle_paper_order`` with a synthetic
+        ``broker_order_id``/``order_id`` of the form ``PAPER-...`` and
+        ``metadata["paper_trade"]=True``.  Any one of those signals is
+        sufficient; all three are checked so a record missing one field
+        (e.g. a legacy paper record) is still recognised as paper.
+
+        This guard preserves paper/live isolation during startup
+        reconciliation: querying a real broker for a ``PAPER-...`` id would
+        either error or leak a paper identifier into a live broker API call.
+        """
+        if str(getattr(order, "broker_order_id", "") or "").startswith("PAPER-"):
+            return True
+        metadata = getattr(order, "metadata", {}) or {}
+        if bool(metadata.get("paper_trade", False)):
+            return True
+        return str(getattr(order, "order_id", "") or "").startswith("PAPER-")
 
     async def _maybe_place_protective_stop(
         self,
@@ -1395,6 +1529,7 @@ class ExecutionService:
         open_orders = await self._order_manager.get_open_orders()
         pending_count = 0
         placed_count = 0
+        paper_skipped = 0
 
         for order in open_orders:
             if order.status == OrderStatus.ACK_UNKNOWN:
@@ -1487,6 +1622,23 @@ class ExecutionService:
 
             elif order.broker_order_id:
                 # Pass 2: check broker status for already-placed orders.
+                #
+                # Paper-isolation guard (Phase 2.1 / Q3): a paper order is
+                # simulated and was never placed with a real broker.  Its
+                # broker_order_id is a synthetic "PAPER-..." token.  Calling
+                # _get_broker(...).get_order_status(...) for it would query a
+                # real broker with a paper identifier — breaking the strict
+                # paper/live isolation invariant.  Skip it entirely.
+                if self._is_paper_order(order):
+                    paper_skipped += 1
+                    logger.debug(
+                        "execution_service.reconcile_skip_paper_order",
+                        order_id=order.order_id,
+                        broker_order_id=order.broker_order_id,
+                        status=order.status.value,
+                    )
+                    continue
+
                 placed_count += 1
                 try:
                     broker = self._get_broker(order.market)
@@ -1564,6 +1716,7 @@ class ExecutionService:
             total_open=len(open_orders),
             pending_retried=pending_count,
             placed_checked=placed_count,
+            paper_skipped=paper_skipped,
         )
 
     # ── Phase 3.1: Startup position reconciliation ────────────────────────────
@@ -2181,7 +2334,18 @@ class ExecutionService:
                     market=market,
                     broker_message=reject_reason or status.value,
                 )
-                await self._order_manager.submit_order(paper_req)
+                submitted = await self._order_manager.submit_order(paper_req)
+                if not submitted:
+                    # Conditional write failed — another concurrent consumer won the
+                    # signal_id reservation race.  Do NOT call record_order or apply_fill
+                    # — doing so would overwrite the winning thread's order record and
+                    # double-count the position.
+                    logger.warning(
+                        "execution_service.paper_duplicate_suppressed "
+                        "signal_id=%s — submit_order conditional write lost race",
+                        approved.signal_id,
+                    )
+                    return
                 await self._order_manager.record_order(paper_resp)
             except Exception:
                 logger.exception(
@@ -2563,6 +2727,58 @@ class ExecutionService:
             await asyncio.sleep(flush_interval)
 
     # ── Margin refresh loop ───────────────────────────────────────────────────
+
+    async def _universe_snapshot_refresh_loop(self) -> None:
+        """
+        Background loop: rebuild the universe order validator once per calendar day (IST).
+
+        The snapshot is built at service startup for today's date. After midnight IST the
+        date changes and the snapshot becomes stale. In paper mode stale snapshots only
+        produce warnings; in live mode they block all orders. This loop rebuilds at
+        00:01 IST each day so the validator always references today's approved symbols.
+
+        The loop also re-reads UNIVERSE_MODE in case it was updated via env/config reload
+        (though a full restart is the recommended upgrade path for mode changes).
+        """
+        import zoneinfo  # noqa: PLC0415
+
+        _IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+        _CHECK_INTERVAL = 60.0  # seconds between date checks (low cost, just a date compare)
+
+        logger.info("execution_service.universe_refresh_loop.started")
+
+        _last_rebuild_date: Optional[str] = None
+
+        while self._running:
+            await asyncio.sleep(_CHECK_INTERVAL)
+            try:
+                today_ist = datetime.now(_IST).strftime("%Y-%m-%d")
+                if _last_rebuild_date == today_ist:
+                    continue
+
+                from shared.universe.modes import UniverseMode as _UniverseMode  # noqa: PLC0415
+                from shared.universe.order_validator import (  # noqa: PLC0415
+                    build_validator_for_today as _build_universe_validator,
+                )
+                _mode_str = self._universe_mode_str
+                _mode = _UniverseMode.from_string(_mode_str)
+                new_validator = _build_universe_validator(
+                    mode=_mode,
+                    fail_if_no_snapshot=_mode.is_live,
+                    use_live_api=getattr(self, "_universe_use_live_api", False),
+                )
+                self._universe_validator = new_validator
+                _snap = getattr(new_validator, "snapshot", None)
+                _snap_size = getattr(_snap, "size", 0) if _snap is not None else 0
+                _last_rebuild_date = today_ist
+                logger.info(
+                    "execution_service.universe_snapshot_refreshed date=%s mode=%s approved=%d",
+                    today_ist, _mode_str, _snap_size,
+                )
+            except Exception as _exc:
+                logger.error(
+                    "execution_service.universe_snapshot_refresh_failed error=%s", _exc
+                )
 
     async def _margin_refresh_loop(self) -> None:
         """

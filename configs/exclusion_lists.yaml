@@ -1,0 +1,135 @@
+# QuantEmbrace — Exclusion Lists Configuration
+#
+# Symbols listed here are ALWAYS excluded from the universe regardless of mode.
+# Priority: exclusion_lists > index_membership > liquidity_filters > risk_filters
+#
+# CATEGORIES:
+#   emergency        — temporary exclusions added by operator; include reason + expiry date
+#   delisted         — confirmed delisted / revoked / merged symbols
+#   suspended        — trading suspended by exchange or SEBI
+#   sme              — NSE Emerge or BSE SME listed stocks (small/micro cap)
+#   etf              — Exchange-traded funds (excluded by default; mode config can override)
+#   reit_invit       — Real estate investment trusts and infrastructure investment trusts
+#   bse_only         — Stocks with NSE listing absent; BSE-only symbols
+#   known_asm        — Known ASM (Additional Surveillance Measure) listed stocks
+#   known_gsm        — Known GSM (Graded Surveillance Measure) listed stocks
+#   manual_override  — Operator-approved exceptions (require audit_reason)
+#
+# FORMAT for emergency exclusions:
+#   - symbol: XYZ
+#     reason: "Major fraud investigation — SEBI order 2026-05-15"
+#     added_at: "2026-05-15"
+#     expires_at: "2026-07-15"   # null = permanent until manually removed
+#
+# MAINTENANCE:
+#   - Review and clean expired emergency entries weekly.
+#   - After delisting is confirmed, move from emergency → delisted.
+#   - Run: python scripts/universe/review_exclusions.py to get current status.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EMERGENCY EXCLUSIONS — operator-managed, time-bounded
+# ─────────────────────────────────────────────────────────────────────────────
+emergency: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DELISTED / MERGED / SYMBOL-CHANGED STOCKS
+# ─────────────────────────────────────────────────────────────────────────────
+delisted:
+  - symbol: ZOMATO
+    reason: "Symbol renamed to ETERNAL effective 2024"
+  - symbol: HDFC
+    reason: "Merged into HDFCBANK — delisted July 2023"
+  - symbol: HDFCAMC
+    reason: "Symbol check — still listed; remove this entry if active"
+    # NOTE: review above entry; HDFCAMC is still active, placeholder for process demo
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUSPENDED STOCKS
+# Stocks currently under trading halt or regulatory suspension.
+# ─────────────────────────────────────────────────────────────────────────────
+suspended: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SME STOCKS — NSE Emerge / BSE SME
+# Always excluded (per policy in risk_filters.yaml: exclude_sme_stocks: true).
+# Add known SME symbols here as a belt-and-suspenders check.
+# ─────────────────────────────────────────────────────────────────────────────
+sme:
+  # Example format — add actual SME symbols discovered during symbol master validation
+  # - symbol: XYZSMECO
+  #   exchange: NSE
+  #   board: NSE_EMERGE
+  []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ETF SYMBOLS — excluded by default
+# Override per mode via risk_filters.yaml → instrument_type_policy → allow_etf_override_by_mode
+# ─────────────────────────────────────────────────────────────────────────────
+etf:
+  - NIFTYBEES
+  - BANKBEES
+  - GOLDBEES
+  - ICICINIFTY
+  - HDFCNIFTY
+  - KOTAKNIFTY
+  - SETFNIF50
+  - SBIETFNIFTY
+  - MIDCAPETF
+  - JUNIORBEES
+  - MOM50
+  - MAFANG
+  - CPSEETF
+  - CONSUMBEES
+  - INFRABEES
+  - DIVOPPBEES
+  - ITBEES
+  - PHARMABEES
+  - PSUBNKBEES
+  - LIQUIDBEES
+  - LIQUIDCASE
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REIT & InvIT SYMBOLS — excluded by default
+# ─────────────────────────────────────────────────────────────────────────────
+reit_invit:
+  - BROOKFIELD
+  - EMBASSY
+  - MINDSPACE
+  - NEXUS
+  - NXST
+  - INDIGRID
+  - IRB
+  - POWERGRIDINVIT
+  - STOVEKRAFT
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BSE-ONLY STOCKS (no NSE listing)
+# ─────────────────────────────────────────────────────────────────────────────
+bse_only: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KNOWN ASM STOCKS
+# Updated from NSE ASM circulars. Production: fetch live from NSE ASM feed.
+# Treat this as emergency backup when live feed is unavailable.
+# ─────────────────────────────────────────────────────────────────────────────
+known_asm: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KNOWN GSM STOCKS
+# ─────────────────────────────────────────────────────────────────────────────
+known_gsm: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANUAL OVERRIDES
+# Symbols explicitly approved despite failing one or more filters.
+# Every override MUST have an audit_reason and reviewer.
+# ─────────────────────────────────────────────────────────────────────────────
+manual_override:
+  # Example:
+  # - symbol: SOMESTOCK
+  #   bypass_filter: liquidity          # Which filter to bypass
+  #   audit_reason: "Temporary illiquidity due to Q4 results blackout; expect recovery by 2026-06-01"
+  #   approved_by: "hari.mosoju@gmail.com"
+  #   approved_at: "2026-05-26"
+  #   expires_at: "2026-06-01"
+  []

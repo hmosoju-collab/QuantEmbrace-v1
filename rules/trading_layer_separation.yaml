@@ -10,7 +10,7 @@ description: |
   The three core trading layers — strategy, risk, and execution — must
   remain strictly isolated. No layer may import from another layer's
   internal modules. Cross-layer communication happens ONLY through
-  defined interfaces (SQS queues, shared pydantic models in common/).
+  defined Kafka topics (ticks.nse, ticks.us, signals.pending, signals.approved, orders.events) or shared pydantic models in shared/. SQS is not used.
 
   Flow: strategy_engine -> risk_engine -> execution_engine
   This is the ONLY allowed direction. No shortcuts. No bypasses.
@@ -26,7 +26,7 @@ rules:
     forbidden_imports:
       - services.execution_engine
       - services.risk_engine
-      - services.data_ingestion.storage  # Strategy reads from SQS, not direct storage
+      - services.data_ingestion.storage  # Strategy reads from Kafka topics, not direct storage
 
   - name: risk_isolation
     description: "Risk engine validates signals, never modifies them or places orders"
@@ -53,9 +53,9 @@ rules:
   - name: mandatory_risk_gateway
     description: "All signals must pass through risk engine before execution"
     pattern: |
-      The execution_engine must ONLY consume from the risk-approved
-      signals queue. Direct strategy->execution communication is a
-      critical defect that must be caught in code review and CI.
+      The execution_engine must ONLY consume from Kafka topic `signals.approved`
+      (consumer group: execution-v1). Direct strategy->execution communication is a
+      critical defect caught by CI (ruff TID251 banned-api + import scanner).
 
 enforcement_mechanism:
   tool: "ruff custom rule or CI script"

@@ -16,7 +16,7 @@ Usage::
 Environment variables required:
     AWS_REGION          — AWS region (e.g. us-east-1)
     ENVIRONMENT         — Runtime environment (dev / staging / prod)
-    DYNAMODB_TABLE_PREFIX — DynamoDB table prefix (default: quantembrace)
+    DYNAMODB_TABLE_PREFIX — DynamoDB table prefix (e.g. quantembrace-development)
     SNS_KILL_SWITCH_TOPIC_ARN — (optional) SNS topic for notifications
 
 Or set AWS credentials via the standard AWS CLI profile / instance role.
@@ -35,6 +35,24 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 _SERVICES_DIR = os.path.join(_PROJECT_ROOT, "services")
 if _SERVICES_DIR not in sys.path:
     sys.path.insert(0, _SERVICES_DIR)
+
+# Load .env from the project root so DYNAMODB_TABLE_PREFIX is in os.environ
+# before get_settings() runs its _apply_table_prefix validator. Without this,
+# the validator falls back to "quantembrace" (not "quantembrace-development"),
+# causing all DynamoDB operations to target the wrong (non-existent) tables.
+_env_file = os.path.join(_PROJECT_ROOT, ".env")
+if os.path.exists(_env_file):
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_env_file, override=False)
+    except ImportError:
+        # python-dotenv not installed — fall back to manual parse
+        with open(_env_file) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _, _v = _line.partition("=")
+                    os.environ.setdefault(_k.strip(), _v.strip())
 
 from shared.config.settings import get_settings
 from shared.logging.logger import get_logger
@@ -56,7 +74,7 @@ _BANNER_OFF = (
 )
 
 
-def _build_kill_switch() -> "KillSwitch":
+def _build_kill_switch() -> object:
     """Instantiate a KillSwitch with live AWS clients."""
     import boto3
     from risk_engine.killswitch.killswitch import KillSwitch

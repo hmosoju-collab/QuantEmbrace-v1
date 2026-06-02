@@ -1,0 +1,571 @@
+# QuantEmbrace Instrument Registry
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-instrument risk parameters consumed by Phase 4 validators.
+# Every symbol traded must have an entry here before being enabled in
+# strategy config (scripts/strategy/config.py go-live).
+#
+# Fields:
+#   sector           (required) GICS-style sector name.  Used by
+#                               SectorConcentrationValidator.
+#   market           (required) "NSE" or "US"
+#   max_spread_bps   (optional) Override global spread threshold.
+#                               Default: 50 bps (SpreadGateValidator).
+#   max_order_adv_pct (optional) Override global ADV % threshold.
+#                               Default: 1.0% (LiquidityValidator).
+#   max_position_size (optional) Max shares for a single position.
+#                               Default: from RiskLimits.max_position_per_symbol
+#
+# Sector taxonomy (keep consistent — SectorConcentrationValidator groups by exact string):
+#   FINANCIAL_SERVICES  — banks, NBFCs, insurance, brokerages
+#   IT_SERVICES         — TCS, Infosys, Wipro, HCL, Tech Mahindra (paused)
+#   PRODUCT_IT          — Tata Elxsi, Persistent Systems
+#   ENERGY              — ONGC, Reliance, BPCL, IOC, HINDPETRO, OIL, ATGL
+#   GREEN_ENERGY        — Adani Green, Adani Power, Tata Power, NHPC, SJVN, Torrent Power
+#   CONSUMER_STAPLES    — HUL, ITC, Nestle, Britannia
+#   CONSUMER_DISCRETIONARY — Titan, Maruti, M&M, Bajaj Auto
+#   PHARMA              — Sun Pharma, Dr Reddy, Cipla, Divis, Apollo Hospitals
+#   METALS_MINING       — Tata Steel, Hindalco, Vedanta, Coal India
+#   TELECOM             — Airtel, Jio (Reliance), Vodafone-Idea
+#   INFRASTRUCTURE      — L&T, Power Grid, NTPC, Adani Ports
+#   DEFENCE             — HAL, BEL, BEML, BHEL, Cochin Shipyard, Mazagon Dock
+#   CHEMICALS           — Deepak Fertilisers, Grasim Industries
+#   AVIATION            — IndiGo (INDIGO)
+#   CONGLOMERATE        — Adani Enterprises
+#   REALESTATE          — DLF, Godrej Properties, Prestige
+#   US_TECH             — AAPL, GOOGL, MSFT, NVDA, META
+#   US_FINANCE          — JPM, BAC, GS, MS
+#   US_CONSUMER         — AMZN, TSLA, NKE
+#   US_HEALTHCARE       — JNJ, PFE, UNH, ABBV
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── NSE Large-Cap (Nifty 50 core) ───────────────────────────────────────────��
+
+RELIANCE:
+  sector: ENERGY
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+TCS:
+  sector: IT_SERVICES
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+INFY:
+  sector: IT_SERVICES
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+WIPRO:
+  sector: IT_SERVICES
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+HCLTECH:
+  sector: IT_SERVICES
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+TECHM:
+  sector: IT_SERVICES
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+HDFC:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+HDFCBANK:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 20
+  max_order_adv_pct: 0.5
+
+ICICIBANK:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 20
+  max_order_adv_pct: 0.5
+
+SBIN:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+AXISBANK:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+KOTAKBANK:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+BAJFINANCE:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+ITC:
+  sector: CONSUMER_STAPLES
+  market: NSE
+  max_spread_bps: 20
+  max_order_adv_pct: 0.5
+
+HINDUNILVR:
+  sector: CONSUMER_STAPLES
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+NESTLEIND:
+  sector: CONSUMER_STAPLES
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.0
+
+MARUTI:
+  sector: CONSUMER_DISCRETIONARY
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 0.5
+
+TATAMOTORS:
+  sector: CONSUMER_DISCRETIONARY
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+TITAN:
+  sector: CONSUMER_DISCRETIONARY
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 0.5
+
+SUNPHARMA:
+  sector: PHARMA
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+DRREDDY:
+  sector: PHARMA
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 1.0
+
+CIPLA:
+  sector: PHARMA
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 1.0
+
+ONGC:
+  sector: ENERGY
+  market: NSE
+  max_spread_bps: 20
+  max_order_adv_pct: 0.5
+
+BPCL:
+  sector: ENERGY
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+TATASTEEL:
+  sector: METALS_MINING
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+HINDALCO:
+  sector: METALS_MINING
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+JSWSTEEL:
+  sector: METALS_MINING
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+LT:
+  sector: INFRASTRUCTURE
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+POWERGRID:
+  sector: INFRASTRUCTURE
+  market: NSE
+  max_spread_bps: 20
+  max_order_adv_pct: 0.5
+
+NTPC:
+  sector: INFRASTRUCTURE
+  market: NSE
+  max_spread_bps: 20
+  max_order_adv_pct: 0.5
+
+BHARTIARTL:
+  sector: TELECOM
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+ADANIPORTS:
+  sector: INFRASTRUCTURE
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+# ── Adani Group ───────────────────────────────────────────────────────────────
+
+ADANIENT:
+  sector: CONGLOMERATE
+  market: NSE
+  max_spread_bps: 45
+  max_order_adv_pct: 1.0
+
+ADANIGREEN:
+  sector: GREEN_ENERGY
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.0
+
+ATGL:
+  sector: ENERGY
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.0
+
+ADANIPOWER:
+  sector: GREEN_ENERGY
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.0
+
+# ── Green Energy ──────────────────────────────────────────────────────────────
+
+TATAPOWER:
+  sector: GREEN_ENERGY
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 1.0
+
+NHPC:
+  sector: GREEN_ENERGY
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 1.0
+
+SJVN:
+  sector: GREEN_ENERGY
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.5
+
+TORNTPOWER:
+  sector: GREEN_ENERGY
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+# ── Crude Oil & Refiners ──────────────────────────────────────────────────────
+
+IOC:
+  sector: ENERGY
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+HINDPETRO:
+  sector: ENERGY
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+OIL:
+  sector: ENERGY
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 1.0
+
+# ── Defence & Aerospace ───────────────────────────────────────────────────────
+
+HAL:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+BEL:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 30
+  max_order_adv_pct: 0.5
+
+BEML:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.5
+
+BHEL:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+COCHINSHIP:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.5
+
+MAZDOCK:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.5
+
+# ── Pharma (expanded) ─────────────────────────────────────────────────────────
+
+DIVISLAB:
+  sector: PHARMA
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 1.0
+
+APOLLOHOSP:
+  sector: PHARMA
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+# ── Chemicals & Fertilizers ───────────────────────────────────────────────────
+
+DEEPAKFERT:
+  sector: CHEMICALS
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.5
+
+GRASIM:
+  sector: CHEMICALS
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 0.5
+
+# ── Aviation ──────────────────────────────────────────────────────────────────
+
+INDIGO:
+  sector: AVIATION
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+# ── Product-Based IT ──────────────────────────────────────────────────────────
+
+TATAELXSI:
+  sector: PRODUCT_IT
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+PERSISTENT:
+  sector: PRODUCT_IT
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 1.0
+
+# ── Defence Electronics (mid-cap) ─────────────────────────────────────────────
+
+DATAPATTNS:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 60
+  max_order_adv_pct: 2.0
+
+ZENTEC:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 60
+  max_order_adv_pct: 2.0
+
+TEXRAIL:
+  sector: DEFENCE
+  market: NSE
+  max_spread_bps: 60
+  max_order_adv_pct: 2.0
+
+# ── Solar / Renewable (Waaree) ────────────────────────────────────────────────
+
+WAAREEENER:
+  sector: GREEN_ENERGY
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+WAAREERTL:
+  sector: GREEN_ENERGY
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.5
+
+# ── Financial Services (mid-cap) ──────────────────────────────────────────────
+
+IIFL:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 40
+  max_order_adv_pct: 1.0
+
+JIOFIN:
+  sector: FINANCIAL_SERVICES
+  market: NSE
+  max_spread_bps: 25
+  max_order_adv_pct: 0.5
+
+# ── Infrastructure & Engineering ──────────────────────────────────────────────
+
+PATELENG:
+  sector: INFRASTRUCTURE
+  market: NSE
+  max_spread_bps: 60
+  max_order_adv_pct: 2.0
+
+# ── Metals & Industrials ──────────────────────────────────────────────────────
+
+JINDALSAW:
+  sector: METALS_MINING
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.5
+
+PRAKASH:
+  sector: METALS_MINING
+  market: NSE
+  max_spread_bps: 60
+  max_order_adv_pct: 2.0
+
+# ── Chemicals & Bioenergy ─────────────────────────────────────────────────────
+
+HSCL:
+  sector: CHEMICALS
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.5
+
+PRAJIND:
+  sector: CHEMICALS
+  market: NSE
+  max_spread_bps: 50
+  max_order_adv_pct: 1.5
+
+# ── Consumer Discretionary ────────────────────────────────────────────────────
+
+ETERNAL:
+  sector: CONSUMER_DISCRETIONARY
+  market: NSE
+  max_spread_bps: 20
+  max_order_adv_pct: 0.5
+
+SAMHI:
+  sector: CONSUMER_DISCRETIONARY
+  market: NSE
+  max_spread_bps: 60
+  max_order_adv_pct: 2.0
+
+TI:
+  sector: CONSUMER_DISCRETIONARY
+  market: NSE
+  max_spread_bps: 35
+  max_order_adv_pct: 1.0
+
+TILAKNAGAR:
+  sector: CONSUMER_DISCRETIONARY
+  market: NSE
+  max_spread_bps: 70
+  max_order_adv_pct: 2.5
+
+# ── US Equities ───────────────────────────────────────────────────────────────
+
+AAPL:
+  sector: US_TECH
+  market: US
+  max_spread_bps: 5
+  max_order_adv_pct: 0.1
+
+GOOGL:
+  sector: US_TECH
+  market: US
+  max_spread_bps: 5
+  max_order_adv_pct: 0.1
+
+MSFT:
+  sector: US_TECH
+  market: US
+  max_spread_bps: 5
+  max_order_adv_pct: 0.1
+
+NVDA:
+  sector: US_TECH
+  market: US
+  max_spread_bps: 5
+  max_order_adv_pct: 0.1
+
+META:
+  sector: US_TECH
+  market: US
+  max_spread_bps: 5
+  max_order_adv_pct: 0.1
+
+AMZN:
+  sector: US_CONSUMER
+  market: US
+  max_spread_bps: 5
+  max_order_adv_pct: 0.1
+
+TSLA:
+  sector: US_CONSUMER
+  market: US
+  max_spread_bps: 10
+  max_order_adv_pct: 0.1
+
+JPM:
+  sector: US_FINANCE
+  market: US
+  max_spread_bps: 8
+  max_order_adv_pct: 0.2
+
+BAC:
+  sector: US_FINANCE
+  market: US
+  max_spread_bps: 8
+  max_order_adv_pct: 0.2
+
+JNJ:
+  sector: US_HEALTHCARE
+  market: US
+  max_spread_bps: 8
+  max_order_adv_pct: 0.2
+
+PFE:
+  sector: US_HEALTHCARE
+  market: US
+  max_spread_bps: 8
+  max_order_adv_pct: 0.2

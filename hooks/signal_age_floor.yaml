@@ -1,0 +1,113 @@
+name: signal_age_floor
+type: pre_merge
+priority: 2
+mandatory: true
+
+description: |
+  RISK_MAX_SIGNAL_AGE_SECONDS must never fall below 20.
+
+  Root cause context (Days 1-4 zero-fill bug):
+    The default was incorrectly set to 5 seconds. Candle-based strategies stamp
+    Signal.generated_at = candle_close_time (the time the candle closed), NOT
+    the time the strategy engine polled the candle. By the time a signal travels:
+      strategy_engine → Kafka → ai_engine → Kafka → risk_engine
+    it is already 7-12 seconds old. With a 5-second age limit, ALL candle signals
+    were rejected by risk_engine with "signal_too_old" — zero fills on Days 1-4.
+
+  Fixed value: RISK_MAX_SIGNAL_AGE_SECONDS=30 (default in all environments)
+  Hard floor:  RISK_MAX_SIGNAL_AGE_SECONDS >= 20 (absolute minimum)
+
+  This applies to:
+    - All docker-compose*.yml environment sections
+    - All .env and .env.* files
+    - All configs/** files referencing this variable
+    - risk_engine service code (must not lower the default below 20)
+
+  Related: Signal.generated_at is set at candle_close_time by design.
+  Changing it to poll_time would require an ADR and full test validation.
+  The current architecture assumes generated_at = candle_close_time.
+
+trigger:
+  event: pre_merge
+  paths:
+    - "configs/**"
+    - "docker-compose*.yml"
+    - "docker-compose*.yaml"
+    - ".env"
+    - ".env.*"
+    - "*.env"
+    - "services/risk_engine/**"
+
+checks:
+  - id: age_seconds_not_below_floor
+    description: |
+      RISK_MAX_SIGNAL_AGE_SECONDS must be an integer >= 20.
+      If the variable is absent, the default (30) applies — absence is safe.
+      Setting it below 20 will cause zero fills for all candle strategies.
+    detect_violation: |
+      # VIOLATION: any value below 20
+      RISK_MAX_SIGNAL_AGE_SECONDS=5      # Days 1-4 bug — BLOCKED
+      RISK_MAX_SIGNAL_AGE_SECONDS=10     # Still too low — BLOCKED
+      RISK_MAX_SIGNAL_AGE_SECONDS=15     # Borderline — BLOCKED (< 20)
+      RISK_MAX_SIGNAL_AGE_SECONDS=19     # 1 below floor — BLOCKED
+    correct_pattern: |
+      # CORRECT: at or above floor
+      RISK_MAX_SIGNAL_AGE_SECONDS=30     # Default — recommended
+      RISK_MAX_SIGNAL_AGE_SECONDS=20     # Absolute minimum allowed
+      RISK_MAX_SIGNAL_AGE_SECONDS=45     # Allowed (conservative)
+      # Or omit entirely — code defaults to 30
+
+  - id: risk_engine_default_not_below_floor
+    description: |
+      In risk_engine service code, the default value for RISK_MAX_SIGNAL_AGE_SECONDS
+      must be 30 (not lower). The int() conversion must preserve the floor.
+    detect_violation: |
+      # VIOLATION: default below floor in code
+      max_age = int(os.environ.get("RISK_MAX_SIGNAL_AGE_SECONDS", "5"))
+      max_age = int(os.environ.get("RISK_MAX_SIGNAL_AGE_SECONDS", "10"))
+    correct_pattern: |
+      # CORRECT: default 30, with floor enforcement
+      _DEFAULT_MAX_SIGNAL_AGE = 30
+      _MIN_SIGNAL_AGE_FLOOR = 20
+
+      raw = int(os.environ.get("RISK_MAX_SIGNAL_AGE_SECONDS", str(_DEFAULT_MAX_SIGNAL_AGE)))
+      max_signal_age_seconds = max(raw, _MIN_SIGNAL_AGE_FLOOR)
+
+      if raw < _MIN_SIGNAL_AGE_FLOOR:
+          logger.warning(
+              "signal_age.floor_applied",
+              configured=raw,
+              floor=_MIN_SIGNAL_AGE_FLOOR,
+              applied=max_signal_age_seconds,
+          )
+
+  - id: signal_timestamp_is_candle_close
+    description: |
+      Signal.generated_at must be set to candle_close_time, not poll_time.
+      This is by design — signals are tied to the candle that generated them.
+      Do NOT change this to poll_time without an ADR review.
+    rationale: |
+      Using candle_close_time makes signals deterministic and replayable.
+      Using poll_time would hide the 7-12s latency and make age validation
+      misleading. The age floor of 20s explicitly accounts for the transit delay.
+
+signal_flow_timing:
+  candle_close_time: "T+0s  — candle closes"
+  strategy_detection: "T+1-3s — strategy_engine polls DynamoDB candle-cache"
+  signal_stamped_at: "T+1-3s — Signal.generated_at = candle_close_time (NOT poll time)"
+  kafka_transit_1: "T+2-4s — signals.pending in flight to ai_engine"
+  ai_engine_enrich: "T+3-6s — ai_engine enrichment (market_regime + quality_score)"
+  kafka_transit_2: "T+5-8s — signals.enriched in flight to risk_engine"
+  risk_engine_arrival: "T+7-12s — signal arrives at risk_engine age validator"
+  age_at_risk_engine: "7-12 seconds old when checked"
+  minimum_safe_limit: "20s (floor) — allows all candle signals through with headroom"
+  recommended_limit: "30s (default) — comfortable margin for slow enrichment"
+
+on_violation:
+  - action: block_merge
+  - message: |
+      BLOCKED: RISK_MAX_SIGNAL_AGE_SECONDS is set below the floor of 20.
+      This will cause ALL candle-based strategy signals to be rejected by
+      risk_engine with "signal_too_old", resulting in zero fills.
+      Minimum allowed value: 20. Recommended value: 30.
+      See: memory/paper_trading_signal_age_fix.md for root cause analysis.

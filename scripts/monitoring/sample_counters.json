@@ -1,0 +1,85 @@
+{
+  "_comment": "Realistic LiveCounters stub for a mid-session paper trading day (no services running). Pass this with --counters to paper_trading_monitor.py.",
+
+  "strategy_engine_up":   true,
+  "risk_engine_up":       true,
+  "execution_engine_up":  true,
+
+  "tee_running":                   true,
+  "tee_poll_interval":             60,
+  "tee_stop_loss_hits":            3,
+  "tee_take_profit_hits":          1,
+  "tee_trailing_activated":        2,
+  "tee_trailing_hits":             1,
+  "tee_duplicate_exits_prevented": 0,
+  "tee_unmanaged_detections":      0,
+  "tee_latest_events": [
+    "2026-05-25 10:42:15 IST | WIPRO     | STOP_LOSS HIT     | exit=485.20  | qty=-80  | pnl=+1256.00",
+    "2026-05-25 11:17:03 IST | AXISBANK  | STOP_LOSS HIT     | exit=1052.00 | qty=-40  | pnl=-880.00",
+    "2026-05-25 12:05:44 IST | LT        | TAKE_PROFIT HIT   | exit=3620.00 | qty=+15  | pnl=+2850.00",
+    "2026-05-25 13:22:11 IST | BAJFINANCE| TRAILING_STOP HIT | exit=7140.00 | qty=+10  | pnl=+3200.00",
+    "2026-05-25 14:10:33 IST | ICICIBANK | STOP_LOSS HIT     | exit=1218.00 | qty=+60  | pnl=-2220.00"
+  ],
+
+  "router_mode":                  "PAPER",
+  "router_paper_exits":            5,
+  "router_backtest_exits":         0,
+  "router_live_attempts":          0,
+  "router_live_blocked":           0,
+  "router_idempotency_successes":  5,
+  "router_idempotency_skips":      0,
+  "router_failed_routes":          0,
+
+  "mis_armed":                true,
+  "mis_positions_discovered": null,
+  "mis_long_discovered":      null,
+  "mis_short_discovered":     null,
+  "mis_orders_placed":        null,
+  "mis_orders_rejected":      null,
+  "mis_positions_flat":       null,
+  "mis_at_deadline":          null,
+  "mis_kill_switch_activated": false,
+
+  "recon_ran":             true,
+  "recon_mode":            "paper",
+  "recon_mismatches":      0,
+  "recon_repairs":         0,
+  "recon_criticals":       0,
+  "recon_zero_qty_open":   0,
+  "recon_stale_exit_lock": 0,
+  "recon_qty_direction":   0,
+  "recon_unmanaged":       0,
+
+  "daily_cap_reached":             false,
+  "daily_loss_limit_reached":      false,
+  "daily_profit_lock_reached":     false,
+  "new_entries_allowed":           true,
+  "max_open_positions_reached":    false,
+  "max_fills_per_strategy_reached": false,
+
+  "realized_pnl":         4206.00,
+  "max_intraday_drawdown": -880.00,
+
+  "strategy_statuses": [
+    {
+      "name":           "momentum_v1",
+      "status":         "ACTIVE",
+      "signals":        18,
+      "fills":           9,
+      "open_positions":  3,
+      "exits":           5,
+      "cap_status":     "OK",
+      "notes":          ""
+    },
+    {
+      "name":           "mean_reversion_v1",
+      "status":         "ACTIVE",
+      "signals":        11,
+      "fills":           4,
+      "open_positions":  1,
+      "exits":           0,
+      "cap_status":     "OK",
+      "notes":          ""
+    }
+  ]
+}

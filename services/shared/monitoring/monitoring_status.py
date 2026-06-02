@@ -207,6 +207,43 @@ class PnLStatus:
     average_loser: Optional[float] = None
 
 
+# ── Phase 6: Entry-block and safe-actions status ──────────────────────────────
+
+
+@dataclass
+class EntryBlockStatus:
+    """Snapshot of the ENTRY_BLOCK/GLOBAL DynamoDB flag for the monitoring report."""
+
+    active: bool = False
+    source: str = ""
+    reason: str = ""
+    action_id: str = ""
+    idempotency_key: str = ""
+    created_at: str = ""
+    cache_age_seconds: Optional[float] = None
+    read_status: str = "UNKNOWN"   # OK / WARNING_FAIL_OPEN / ERROR_FAIL_CLOSED / UNKNOWN
+
+    @property
+    def read_ok(self) -> bool:
+        """True when the last DynamoDB read succeeded."""
+        return self.read_status == "OK"
+
+
+@dataclass
+class SafeActionsStatus:
+    """Snapshot of the safe_actions executor state for the monitoring report."""
+
+    action_mode: str = "notify_only"   # "notify_only" | "safe_actions"
+    executor_active: bool = False
+    actions_proposed: int = 0
+    actions_executed: int = 0
+    actions_blocked: int = 0
+    idempotency_skips: int = 0
+    last_action_type: str = ""
+    last_action_time: str = ""
+    last_blocked_reason: str = ""
+
+
 # ── Live counters (in-process only) ──────────────────────────────────────────
 
 
@@ -285,6 +322,17 @@ class LiveCounters:
     realized_pnl: float = 0.0
     max_intraday_drawdown: Optional[float] = None
 
+    # Phase 6 — Safe-actions counters (set by monitoring_agent)
+    safe_action_mode: str = "notify_only"
+    safe_action_executor_active: bool = False
+    safe_actions_proposed: int = 0
+    safe_actions_executed: int = 0
+    safe_actions_blocked: int = 0
+    safe_actions_disabled: int = 0
+    safe_actions_idempotency_skips: int = 0
+    safe_actions_last_action: str = ""
+    safe_actions_last_blocked_reason: str = ""
+
 
 # ── Top-level snapshot ────────────────────────────────────────────────────────
 
@@ -332,6 +380,12 @@ class MonitoringStatusSnapshot:
     risk_cap_status: RiskCapStatus = field(default_factory=RiskCapStatus)
     strategy_statuses: list[StrategyStatusRow] = field(default_factory=list)
     pnl_status: PnLStatus = field(default_factory=PnLStatus)
+
+    # §10a — Entry block (Phase 6)
+    entry_block_status: EntryBlockStatus = field(default_factory=EntryBlockStatus)
+
+    # §10b — Safe actions (Phase 6)
+    safe_actions_status: SafeActionsStatus = field(default_factory=SafeActionsStatus)
 
     # §13 — Alerts
     critical_alerts: list[str] = field(default_factory=list)
@@ -383,9 +437,10 @@ class MonitoringStatusService:
     async def build_snapshot(self) -> MonitoringStatusSnapshot:
         timestamp_ist = datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S IST")
 
-        raw_positions, kill_switch_active = await asyncio.gather(
+        raw_positions, kill_switch_active, eb_status = await asyncio.gather(
             self._fetch_positions(),
             self._fetch_kill_switch(),
+            self._fetch_entry_block(),
         )
 
         # Partition into open/flat, then enrich LTP for open positions only
@@ -498,6 +553,37 @@ class MonitoringStatusService:
             data_quality.append(
                 f"LTP unavailable for {len(unavail_ltp)} position(s): {symbols}. "
                 "Unrealized P&L cannot be calculated."
+            )
+
+        # ── Phase 6: Entry-block and safe-actions alerts ───────────────────────
+        # Entry block active: AMBER if intentional + exits healthy; RED if unexpected.
+        if eb_status.active:
+            if eb_status.read_ok:
+                warnings.append(
+                    f"ENTRY_BLOCK active — no new entries accepted. "
+                    f"reason={eb_status.reason!r} source={eb_status.source!r} "
+                    f"action_id={eb_status.action_id!r}. "
+                    "Exits and closeouts are unaffected. "
+                    "Clear via DynamoDB (ENTRY_BLOCK/GLOBAL) when safe."
+                )
+            else:
+                critical_alerts.append(
+                    "ENTRY_BLOCK read from DynamoDB FAILED and fail-closed is active — "
+                    "entries are blocked due to safety read failure."
+                )
+        if not eb_status.read_ok and not eb_status.active:
+            # Fail-open paper read failure
+            warnings.append(
+                "ENTRY_BLOCK DynamoDB read failed (paper fail-open) — "
+                "entry block state is unknown. Check DynamoDB connectivity."
+            )
+
+        # Safe-actions: flag if ACTION_MODE=safe_actions but metrics/audit unavailable.
+        sa_status = self._build_safe_actions_status()
+        if sa_status.action_mode == "safe_actions" and not sa_status.executor_active:
+            warnings.append(
+                "ACTION_MODE=safe_actions but executor is not active — "
+                "safe actions are not being executed. Check monitoring_agent setup."
             )
 
         # ── Overall status ─────────────────────────────────────────────────────
@@ -704,6 +790,8 @@ class MonitoringStatusService:
             risk_cap_status=risk_cap,
             strategy_statuses=list(self._c.strategy_statuses),
             pnl_status=pnl,
+            entry_block_status=eb_status,
+            safe_actions_status=sa_status,
             critical_alerts=critical_alerts,
             warnings=warnings,
             data_quality_issues=data_quality,
@@ -835,6 +923,48 @@ class MonitoringStatusService:
         except Exception:
             return False
 
+    async def _fetch_entry_block(self) -> "EntryBlockStatus":
+        """Read ENTRY_BLOCK/GLOBAL from DynamoDB. Returns EntryBlockStatus."""
+        try:
+            from shared.risk_state import ENTRY_BLOCK_PK, ENTRY_BLOCK_SK, attr_bool, attr_string  # noqa: PLC0415
+
+            resp = await asyncio.to_thread(
+                self._dynamo.get_item,
+                TableName=self._risk_state_table,
+                Key={"PK": {"S": ENTRY_BLOCK_PK}, "SK": {"S": ENTRY_BLOCK_SK}},
+                ProjectionExpression=(
+                    "blocked, #st, reason, source, action_id, idempotency_key, created_at"
+                ),
+                ExpressionAttributeNames={"#st": "status"},
+            )
+            item = resp.get("Item")
+            if not item:
+                return EntryBlockStatus(active=False, read_status="OK")
+            return EntryBlockStatus(
+                active=attr_bool(item, "blocked", False),
+                source=attr_string(item, "source"),
+                reason=attr_string(item, "reason"),
+                action_id=attr_string(item, "action_id"),
+                idempotency_key=attr_string(item, "idempotency_key"),
+                created_at=attr_string(item, "created_at"),
+                read_status="OK",
+            )
+        except Exception:
+            return EntryBlockStatus(active=False, read_status="ERROR")
+
+    def _build_safe_actions_status(self) -> "SafeActionsStatus":
+        """Build SafeActionsStatus from LiveCounters safe_actions fields."""
+        return SafeActionsStatus(
+            action_mode=self._c.safe_action_mode,
+            executor_active=self._c.safe_action_executor_active,
+            actions_proposed=self._c.safe_actions_proposed,
+            actions_executed=self._c.safe_actions_executed,
+            actions_blocked=self._c.safe_actions_blocked,
+            idempotency_skips=self._c.safe_actions_idempotency_skips,
+            last_action_type=self._c.safe_actions_last_action,
+            last_blocked_reason=self._c.safe_actions_last_blocked_reason,
+        )
+
 
 # ── Renderer ──────────────────────────────────────────────────────────────────
 
@@ -861,6 +991,8 @@ class MonitoringStatusRenderer:
             self._s8(snap),
             self._s9(snap),
             self._s10(snap),
+            self._s10a(snap),
+            self._s10b(snap),
             self._s11(snap),
             self._s12(snap),
             self._s13(snap),
@@ -1112,6 +1244,53 @@ class MonitoringStatusRenderer:
         rows.append("Important:  ")
         rows.append("Daily cap must block new entries only.  ")
         rows.append("Daily cap must not block exits.")
+        rows.append("\n---")
+        return "\n".join(rows)
+
+    # ── §10a Entry Block Status ───────────────────────────────────────────────
+
+    def _s10a(self, s: MonitoringStatusSnapshot) -> str:
+        eb = s.entry_block_status
+        active_str = "YES ⚠" if eb.active else "no"
+        read_str = eb.read_status or "UNKNOWN"
+        rows = ["## 10a. Entry Block Status (Phase 6)\n"]
+        rows.append("| Field | Value |")
+        rows.append("|---|---|")
+        rows.append(f"| Entry block active | {active_str} |")
+        rows.append(f"| DynamoDB read status | {read_str} |")
+        rows.append(f"| Source | {eb.source or '—'} |")
+        rows.append(f"| Reason | {eb.reason or '—'} |")
+        rows.append(f"| Action ID | {eb.action_id or '—'} |")
+        rows.append(f"| Idempotency key | {eb.idempotency_key or '—'} |")
+        rows.append(f"| Created at | {eb.created_at or '—'} |")
+        rows.append("")
+        if eb.active:
+            rows.append(
+                "Note: Entry block is ACTIVE. No new entry signals will be accepted. "
+                "Exits and closeouts are unaffected. "
+                "Clear via: `aws dynamodb delete-item --table-name <risk-state-table> "
+                "--key '\\{\"PK\":{\"S\":\"ENTRY_BLOCK\"},\"SK\":{\"S\":\"GLOBAL\"}\\}'`"
+            )
+        else:
+            rows.append("Entry block is not active. New entries proceed normally.")
+        rows.append("\n---")
+        return "\n".join(rows)
+
+    # ── §10b Safe Actions Status ──────────────────────────────────────────────
+
+    def _s10b(self, s: MonitoringStatusSnapshot) -> str:
+        sa = s.safe_actions_status
+        rows = ["## 10b. Safe Actions Status (Phase 6)\n"]
+        rows.append("| Field | Value |")
+        rows.append("|---|---|")
+        rows.append(f"| ACTION_MODE | {sa.action_mode} |")
+        rows.append(f"| Executor active | {str(sa.executor_active).lower()} |")
+        rows.append(f"| Actions proposed | {sa.actions_proposed} |")
+        rows.append(f"| Actions executed | {sa.actions_executed} |")
+        rows.append(f"| Actions blocked | {sa.actions_blocked} |")
+        rows.append(f"| Idempotency skips | {sa.idempotency_skips} |")
+        rows.append(f"| Last action type | {sa.last_action_type or '—'} |")
+        rows.append(f"| Last blocked reason | {sa.last_blocked_reason or '—'} |")
         rows.append("\n---")
         return "\n".join(rows)
 

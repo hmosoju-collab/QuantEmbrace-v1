@@ -1,0 +1,5 @@
+# QuantEmbrace root dependency entrypoint.
+#
+# The service runtime dependencies live in services/requirements.txt. Keep this
+# thin wrapper so local setup and CI can install from the repository root.
+-r services/requirements.txt

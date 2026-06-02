@@ -1,398 +1,242 @@
-# QuantEmbrace - Hedge-Level Algorithmic Trading System
+# QuantEmbrace — Claude Rules & Protocols
 
-## Session Start Protocol
-
-Every session must begin with this initialization sequence before any work is done:
-
-```
-1. Load CLAUDE.md             → Understand project rules, architecture, conventions
-2. Load architecture/*        → Review system_design.md, data_flow.md, infra_diagram.md,
-                                 api_contracts.md, trading_flow.md for current system state
-3. Load memory/open_tasks.md  → Check pending work, blockers, and priorities
-4. Summarize current state    → Output a brief status covering:
-                                 • Which services are implemented vs. stubbed
-                                 • Any open blockers or risks
-                                 • Next priority task from open_tasks.md
-5. Proceed                    → Begin work only after steps 1–4 are complete
-6. If user asks question     → Explain, Suggest and Implement only after input/Approval from User
-```
-
-This protocol ensures continuity across sessions and prevents duplicate work,
-missed context, or architectural drift. Never skip this sequence.
+_Last updated: 2026-05-30 | Detail in `architecture/system_design.md`, `docs/`, `memory/`_
 
 ---
 
-## Project Overview
+## Session Start Protocol
 
-QuantEmbrace is a production-grade algorithmic trading platform designed for multi-market execution across Indian (NSE) and US equity markets. The system operates as a set of loosely coupled microservices, each responsible for a single domain concern, deployed on AWS ECS Fargate.
+**Run this before every session — no exceptions:**
 
-The platform integrates with Zerodha Kite Connect for NSE/BSE Indian markets and Alpaca for US equities, providing unified order management, risk controls, and strategy orchestration across both brokers.
+```
+1. Read CLAUDE.md                → these rules
+2. Read architecture/system_design.md → current architecture and signal flow
+3. Read memory/open_tasks.md    → blockers, pending work
+4. Summarize state              → implemented vs. stubbed, blockers, next task
+5. Ask before implementing      → explain + suggest, wait for approval
+```
+
+---
+
+## Paper Trading Start Protocol
+
+**Trigger:** user says "start paper trading" / "run paper session" / `/start_paper_trading`
+→ Execute `.claude/commands/start_paper_trading.md` in full. Never summarise. Run it.
+
+**Load before touching any service:**
+`architecture/system_design.md` · `memory/decisions.md` · `memory/paper_trading_fixes.md` · `memory/open_tasks.md` · `docs/operations/paper-trading-acceptance-checklist.md`
+
+**Pre-session sequence (all steps mandatory):**
+```bash
+docker-compose down -v
+docker-compose up -d localstack redpanda
+docker-compose run --rm setup
+python scripts/deploy/paper_preflight_check.py   # must exit 0 — STOP if fails
+python scripts/zerodha_login.py
+docker-compose up -d
+```
+
+**Paper session safety gates (all must hold):**
+
+| Gate | Value |
+|------|-------|
+| `paper_trade` on all strategies | `True` |
+| `RISK_MAX_SIGNAL_AGE_SECONDS` | `30` (never lower than 20) |
+| `QE_EXECUTION_LIVE_TRADING_ENABLED` | absent or `false` |
+| `RISK_PROFILE` | `paper` |
+| `UNIVERSE_MODE` | `PAPER_SAFE_START` |
+| Real Zerodha credentials | **HARD BLOCK** — stop session if detected |
+| `PAPER_SEED_NAV` | `1000000` |
+
+**During session:** `python scripts/monitoring/paper_trading_monitor.py --counters /tmp/qe_live_counters.json`
+**Session close:** `python scripts/monitoring/paper_session_report.py --date YYYY-MM-DD`
+
+---
+
+## Platform Identity
+
+Personal Indian equities algo trading platform. **Paper trading is the current primary mode.** Live trading requires explicit operator gate sign-off — it is never automatic.
+
+**Capital protection > trade count > profit.** Every design decision that conflicts with this ordering is wrong.
+
+Signal path: `strategy_engine → ai_engine → risk_engine → execution_engine`
+Detail: `architecture/system_design.md`
+
+---
+
+## Non-Negotiable Safety Rules
+
+### Trading Safety
+- Never weaken risk controls to increase fill rate or P&L.
+- Never bypass: universe validation · risk validation · kill switch · idempotency · order validation.
+- Never auto-promote from paper to live. Promotion is always a manual operator decision.
+- Live mode must **fail closed** on missing, stale, or partial critical data (universe snapshot, surveillance list, LTP, margin).
+- Paper mode may degrade gracefully only when explicitly configured, logged, and audited.
+- `UniverseOrderValidator` in execution_engine is the **final hard gate** — risk approval does not bypass it.
+- Paper and live broker paths must remain **fully isolated**. `paper_trade=True` must never call a real broker API.
+
+### Code and Config Safety
+- Never auto-deploy, auto-merge, or auto-apply any generated fix or recommendation.
+- The Self-Improvement Assistant may observe, collect, store, analyze, report, and recommend. It must never change live trading behavior directly.
+- Strategy changes must be evidence-based (from logs, session reports, tests), tested, and reversible.
+- Do not silently ignore missing or stale data — log, alert, degrade or fail.
+- Never include secrets (API keys, tokens, credentials) in reports, logs, Claude prompts, or generated artifacts.
+
+### Claude-Specific Rules
+- Read code before making claims. Documentation and code may disagree — code is truth.
+- Make minimal targeted changes. No opportunistic refactors while fixing a session bug.
+- Human approval required before any change affects paper or live trading behavior.
+- Do not overfit a single bad trading day.
+
+---
+
+## Current Trading Modes
+
+| Mode | Universe | Behavior on Missing Data | Promotion |
+|------|----------|-------------------------|-----------|
+| `PAPER_SAFE_START` | NIFTY 50 (≈50 symbols) | YAML fallback (paper only) | Manual after 5 sessions + gate pass |
+| `PAPER_EXPAND` | NIFTY 100 + F&O (≈100-150 symbols) | WARN + degrade (paper only) | Manual after 10 sessions + gate pass |
+| `LIVE_ADVANCED` | NIFTY 200/500 screened (≈200 symbols) | **FAIL CLOSED** — no live fallback | Manual after PAPER_EXPAND gate + full checklist |
+
+**No order may reach `broker.place_order()` unless the symbol is in the universe snapshot for the current trading date and mode.**
+
+Paper and live universe snapshots use separate namespace keys. They must never be mixed.
+
+Gate evaluation (manual, report-only — never changes mode):
+```bash
+python scripts/evaluate_promotion_gate.py --gate PAPER_SAFE_START_TO_EXPAND --metrics /tmp/metrics.json
+python scripts/evaluate_promotion_gate.py --gate PAPER_EXPAND_TO_LIVE       --metrics /tmp/metrics.json
+```
+
+---
+
+## Execution and Risk Flow
+
+```
+signals.pending (Kafka)
+  → ai_engine (aiengine-v1)          enriches: market_regime + quality_score
+      [EnrichmentWatchdog fallback: signals.pending → risk-v1 if ai_engine lags]
+  → signals.enriched (Kafka)
+  → risk_engine (risk-v1)            11 validators — see docs/04_services.md
+  → signals.approved (Kafka)
+  → execution_engine (execution-v1)
+      → UniverseOrderValidator       FINAL HARD GATE
+      → idempotency (DynamoDB cw)
+      → PaperSimulator (paper_trade=True) OR Zerodha/Alpaca (paper_trade=False)
+  → orders.events (Kafka)
+```
+
+Key invariants:
+- Risk-approved but execution-rejected = correct behavior (log reason code, audit trail).
+- `submit_order` returns `False` on DynamoDB race → return immediately, no fill recorded.
+- Kill switch checked in risk validator #2 AND by `KafkaKillSwitchListener` in every service.
+
+---
+
+## Self-Improvement Assistant
+
+**Status: PARTIALLY IMPLEMENTED.** Only post-session reporting and live monitoring exist.
+
+| Action | Status |
+|--------|--------|
+| Live monitoring (`paper_trading_monitor.py`) | Implemented |
+| Post-session report (`paper_session_report.py`) | Implemented |
+| Intraday snapshots, EOD analysis, Claude prompt generator | **PLANNED — not yet implemented** |
+
+Loop (current): Observe → Collect → `paper_session_report.py` → Human reviews → Human asks Claude → Claude recommends → Human approves → Apply
+
+Loop (planned): Adds automated intraday snapshots and `self_improvement_assistant.py` script (does not exist yet).
+
+**Before modifying strategy, execution, universe, or risk logic based on a trading session, run or review `paper_session_report.py` for that date.**
+
+**Prohibited:** auto-deploy, auto-merge, auto-promote, auto-change live behavior, send secrets to Claude.
+
+---
+
+## Claude Working Rules
+
+**Read first:** `memory/open_tasks.md`, `architecture/system_design.md`, relevant service code.
+**Change minimum:** one fix per PR, no opportunistic refactors.
+**After change:** add tests, update `architecture/system_design.md` if behavior changed, update runbooks if operator steps changed, write ADR in `memory/decisions.md` for major design decisions.
+
+**Always test:** universe selection · snapshot isolation · execution validation · risk validators · kill switch · idempotency · paper/live broker isolation · stale-data handling · order rejection audit · signal age · promotion gates.
+
+**Do not:**
+- Claim a feature works without verifying the file exists at the claimed path.
+- Remove fail-closed live behavior or degrade it to warn-only.
+- Claim a planned feature is implemented. Mark it: `[PLANNED — not yet implemented]`.
+- Include secrets in any generated output.
 
 ---
 
 ## Tech Stack
 
-| Layer          | Technology                                           |
-|----------------|------------------------------------------------------|
-| Language       | Python 3.11+                                         |
-| Broker (India) | Zerodha Kite Connect API                             |
-| Broker (US)    | Alpaca Trading API                                   |
-| Compute        | AWS ECS Fargate                                      |
-| Storage        | AWS S3 (logs, historical data, backtest artifacts)   |
-| State          | AWS DynamoDB (order state, positions, session tokens) |
-| IaC            | Terraform                                            |
-| Messaging      | AWS SQS / SNS                                        |
-| Monitoring     | CloudWatch, Prometheus (sidecar), Grafana            |
-| CI/CD          | GitHub Actions                                       |
-| Testing        | pytest, hypothesis (property-based), locust (load)   |
-| Containerization | Docker                                             |
+| Layer | Technology |
+|---|---|
+| Language | Python 3.11+ |
+| Broker (India) | Zerodha Kite Connect (NSE/BSE) |
+| Broker (US) | Alpaca |
+| Compute | AWS EC2 ARM64 ASGs (c6g/t4g) — ECS Fargate removed |
+| State | DynamoDB (orders, positions, risk-state, strategy-config, candle-cache, + 5 more) |
+| Messaging | Kafka MSK Serverless (SASL/OAUTHBEARER IAM, port 9098) |
+| Storage | S3 (ticks, models, audit logs) |
+| Infra | Terraform · Docker · GitHub Actions |
+| Testing | pytest · hypothesis · locust |
 
 ---
 
-## Architecture Overview
+## Service Boundaries
 
-The system is organized into six architectural layers. Each layer maps to one or more microservices. Cross-layer communication happens exclusively through well-defined interfaces (SQS queues, HTTP APIs, or shared DynamoDB tables with strict ownership).
-
-### Layer 1: Data Ingestion
-
-Responsible for all market data acquisition, normalization, and storage.
-
-- **Service:** `data_ingestion`
-- Connects to Zerodha WebSocket (Kite Ticker) for real-time NSE tick data.
-- Connects to Alpaca WebSocket for US equity streaming data.
-- Normalizes tick data into a unified internal format.
-- Persists raw ticks to S3 (partitioned by date/symbol) for replay and backtesting.
-- Publishes normalized ticks to downstream consumers via SQS.
-
-### Layer 2: Strategy Engine
-
-Houses all trading strategies and signal generation logic.
-
-- **Service:** `strategy_engine`
-- Consumes normalized market data from the data layer.
-- Runs registered strategy modules (momentum, mean-reversion, stat-arb, etc.).
-- Emits signal objects (direction, conviction, target price, stop-loss).
-- Strategies are stateless functions operating on windowed data. All persistent state lives in DynamoDB.
-- **Never** contains execution or risk logic.
-
-### Layer 3: Execution Engine
-
-Translates validated signals into broker orders and manages order lifecycle.
-
-- **Service:** `execution_engine`
-- Receives risk-approved signals only (never directly from strategy).
-- Manages order placement, modification, and cancellation via broker APIs.
-- Implements smart order routing: Zerodha for NSE instruments, Alpaca for US equities.
-- Tracks order state transitions in DynamoDB (PENDING -> PLACED -> FILLED / REJECTED / CANCELLED).
-- Handles partial fills, slippage tracking, and retry logic.
-- Implements circuit breakers for broker API failures.
-
-### Layer 4: Risk Engine
-
-The gatekeeper between strategy signals and order execution.
-
-- **Service:** `risk_engine`
-- Sits between strategy_engine and execution_engine. Every signal must pass through risk validation before reaching execution.
-- Enforces position sizing limits, daily loss limits, and exposure caps.
-- Validates margin requirements against available capital.
-- Maintains real-time P&L calculations.
-- Can halt trading system-wide via a kill switch.
-- Logs every risk decision (approve/reject) with full reasoning to S3 for audit.
-
-### Layer 5: AI/ML Engine
-
-Provides model inference and adaptive parameter tuning.
-
-- **Service:** `ai_engine`
-- Hosts trained ML models for signal enhancement, regime detection, and volatility forecasting.
-- Serves predictions via internal HTTP API.
-- Model training happens offline (SageMaker or local). Only inference runs in production.
-- Provides feature store integration for consistent feature computation.
-
-### Layer 6: Infrastructure
-
-All Terraform-managed AWS resources, networking, IAM, and deployment configuration.
-
-- ECS Fargate cluster with service discovery.
-- VPC with private subnets for compute, public subnets only for ALB.
-- S3 buckets with lifecycle policies for cost optimization.
-- DynamoDB tables with on-demand capacity for unpredictable workloads, provisioned capacity for predictable ones.
-- CloudWatch alarms for latency, error rates, and cost anomalies.
+| Service | Primary Reads | Primary Writes |
+|---|---|---|
+| data_ingestion | Broker WebSocket (Zerodha, Alpaca) | Kafka `ticks.nse` / `ticks.us`; DynamoDB `latest-prices`, `candle-cache` |
+| strategy_engine | Kafka `ticks.*` (strategy-v1); DynamoDB `candle-cache` | Kafka `signals.pending` |
+| ai_engine | Kafka `signals.pending` (aiengine-v1); S3 models | Kafka `signals.enriched`; DynamoDB `strategy-recommendations` |
+| risk_engine | Kafka `signals.enriched` (risk-v1 primary); `signals.pending` (risk-v1-fallback); `orders.events` | Kafka `signals.approved`; `risk.kill-switch`; `ops.audit`; S3 audit |
+| execution_engine | Kafka `signals.approved` (execution-v1); DynamoDB `strategy-config`, `instrument-registry` | Broker APIs; Kafka `orders.events`; DynamoDB `orders`, `positions` |
 
 ---
 
-## Critical Trading Rules
+## Critical Env Vars
 
-These rules are non-negotiable. Every contributor must understand and follow them.
+| Variable | Rule | EC2 Injected? |
+|---|---|---|
+| `RISK_MAX_SIGNAL_AGE_SECONDS` | Always `30`. Never below `20`. Candle signals are 7-12s old at risk_engine. Code default is `5s` — would reject all candle signals if missing. | ✅ risk_engine.sh, strategy_engine.sh |
+| `RISK_PROFILE` | `paper` for all paper sessions · `tiny-live` for Stage-1 live · change only after explicit operator sign-off | ✅ risk_engine.sh |
+| `UNIVERSE_MODE` | `PAPER_SAFE_START` / `PAPER_EXPAND` / `LIVE_ADVANCED` on execution_engine | ✅ execution_engine.sh |
+| `QE_EXECUTION_LIVE_TRADING_ENABLED` | Must be absent or `false` for all paper sessions. **HARD BLOCK.** Commented out in execution_engine.sh — uncomment only after full promotion gate sign-off. | Commented in execution_engine.sh |
+| `PAPER_SEED_NAV` | `1000000` (₹10L) — seeded by `setup` service | Local only |
+| `STRATEGY_WATCHLIST_NSE` | Comma-separated symbols for LiveQuotePoller — required for candle strategies | Set per-deployment |
+| `ZERODHA_ACCESS_TOKEN` | Never source from env var at startup — always resolve from DynamoDB `sessions` table via `ZerodhaTokenManager` (anti-patterns #14, #15). Env var in EC2 userdata is the boot fallback only — expires at 07:30 IST. | Boot fallback only |
 
-### 1. Separation of Concerns
-
-- **Strategy logic** computes signals. It must never place orders or check risk limits.
-- **Risk logic** validates signals. It must never modify signals or place orders.
-- **Execution logic** places orders. It must never generate signals or override risk decisions.
-- If you find yourself importing from another layer's internals, you are violating this rule.
-
-### 2. Risk Engine is Mandatory
-
-- The risk engine sits between strategy and execution. There is no bypass path.
-- Every signal flows: `strategy_engine -> risk_engine -> execution_engine`.
-- Direct strategy-to-execution communication is a critical defect.
-
-### 3. All Trades Must Pass Risk Validation
-
-- No order reaches a broker without an explicit risk approval record.
-- Risk approvals are logged with a unique `risk_decision_id` linked to the order.
-- If the risk engine is down, trading halts. This is by design.
-
-### 4. Restart Safety and Idempotency
-
-- Every service must be safe to restart at any time without data loss or duplicate orders.
-- Use DynamoDB conditional writes for state transitions to prevent race conditions.
-- Order placement must be idempotent: the same signal processed twice must not produce duplicate orders.
-- On startup, each service must reconcile its state with the broker and DynamoDB before resuming.
-
-### 5. No Silent Failures
-
-- Every exception in the trading path must be logged, alerted on, and handled.
-- Swallowing exceptions in execution or risk code is a critical defect.
-- Use structured logging with correlation IDs across all services.
+Full env var reference: `docs/04_services.md § Environment Variables Reference`
 
 ---
 
-## AWS Cost Optimization Rules
+## Broker Notes
 
-### Compute
+**Zerodha (NSE):** Token expires daily ~07:30 IST. Refresh with `python scripts/zerodha_login.py`. `ZerodhaBrokerClient` **must** receive `dynamo_client=` at construction — never construct it before DynamoDB is ready, never use stale env var token. See `memory/anti_patterns.md` #14 and #15. Token is stored in the `{prefix}-sessions` DynamoDB table (Terraform-provisioned as of ADR-022 — must exist before any Zerodha session).
 
-- **Do not use Lambda for streaming workloads.** Lambda's cold start latency and 15-minute timeout make it unsuitable for persistent WebSocket connections and continuous data processing.
-- **Use ECS Fargate** for all long-running services. Right-size task definitions based on actual resource usage.
-- Use Fargate Spot for non-critical workloads (backtesting, batch analytics) to reduce costs by up to 70%.
-
-### Storage
-
-- **S3 for all logs and historical data.** Never store time-series history in DynamoDB.
-- Use S3 Intelligent-Tiering for backtest data that has unpredictable access patterns.
-- Set lifecycle policies: move data older than 90 days to S3 Glacier for compliance retention.
-- Use S3 Select or Athena for querying historical data instead of loading full datasets.
-
-### Database
-
-- **DynamoDB for low-latency state only:** order state, positions, session tokens, risk counters.
-- Use on-demand capacity mode during development and for unpredictable workloads.
-- Switch to provisioned capacity with auto-scaling for production workloads with known patterns.
-- Set TTL on ephemeral records (session tokens, temporary locks) to avoid unbounded table growth.
-
-### Networking
-
-- Use VPC endpoints for S3 and DynamoDB to avoid NAT Gateway data transfer charges.
-- Keep inter-service communication within the VPC using service discovery (Cloud Map).
-
-### Monitoring
-
-- Use CloudWatch Logs with retention policies (30 days hot, archive to S3).
-- Avoid high-cardinality custom metrics in CloudWatch; use Prometheus with a Fargate sidecar for detailed metrics.
+**Paper broker:** `paper_trade=True` in DynamoDB `strategy-config` → `PaperSimulator` only. Zero real broker calls.
 
 ---
 
-## Development Conventions
+## Monitoring Status Rule
 
-### Python Standards
+When asked for monitoring status: use the 15-section template in `docs/operations/monitoring-status-template.md`. Never free-form.
 
-- Python 3.11+ required. Use the latest stable release.
-- **Type hints are mandatory** on all function signatures and return types.
-- Use `pydantic` for all data models (signals, orders, positions, API payloads).
-- Use `async/await` for I/O-bound operations (broker API calls, WebSocket handlers, database queries).
-- Synchronous code is acceptable for CPU-bound strategy computations.
-
-### Code Style
-
-- Formatter: `black` (line length 100).
-- Linter: `ruff` with a strict rule set.
-- Import sorting: `isort` (compatible with black).
-- All public functions and classes require docstrings (Google style).
-
-### Testing
-
-- Framework: `pytest` with `pytest-asyncio` for async tests.
-- Minimum coverage target: 85% for core trading logic (risk, execution, order management).
-- Use `hypothesis` for property-based testing of risk calculations and order state machines.
-- Use `pytest-mock` and `responses` for mocking broker API calls. Never hit real broker APIs in tests.
-- Integration tests run against LocalStack (S3, DynamoDB, SQS).
-
-### Project Structure
-
-```
-quantembrace/
-  services/
-    data_ingestion/
-    strategy_engine/
-    execution_engine/
-    risk_engine/
-    ai_engine/
-  common/
-    models/          # Shared pydantic models
-    broker/          # Broker client abstractions
-    risk/            # Risk calculation utilities
-    storage/         # S3 and DynamoDB client wrappers
-    messaging/       # SQS/SNS publisher and consumer helpers
-  tests/
-    unit/
-    integration/
-    backtest/
-  infra/
-    terraform/
-      modules/
-      environments/
-        dev/
-        staging/
-        prod/
-  scripts/
-    backtest/
-    data_download/
-    deploy/
-  configs/
-```
-
-### Git Workflow
-
-- Branch naming: `feature/<ticket>-<short-desc>`, `fix/<ticket>-<short-desc>`, `infra/<short-desc>`.
-- Squash merge to `main`. Keep commit history clean.
-- All PRs require at least one review. Trading logic PRs require two reviews.
+**GREEN only if:** TradingMode=PAPER · `live_trading_enabled=false` · TradeExitEngine active · ExitOrderRouter active · MIS Square-Off armed · reconciliation ran or safely skipped · no unmanaged positions · no critical alerts · daily caps do not block exits.
 
 ---
 
-## Broker Integrations
+## Documentation Update Rules
 
-### Zerodha Kite Connect (NSE India)
+Update `CLAUDE.md` + `architecture/system_design.md` when: trading modes change · universe logic changes · execution/risk flow changes · broker behavior changes · operational commands change · live/paper safety assumptions change.
 
-- **Markets:** NSE (equities, F&O), BSE.
-- **API:** REST for orders/positions/holdings, WebSocket (Kite Ticker) for streaming quotes.
-- **Auth:** OAuth2-based login token. Tokens expire daily at ~07:30 IST. The system must handle automatic re-authentication.
-- **Rate limits:** 10 requests/second for order APIs, 3 requests/second for historical data. Implement client-side rate limiting.
-- **Order types supported:** MARKET, LIMIT, SL (stop-loss), SL-M (stop-loss market).
-- **Key considerations:**
-  - Kite API uses `variety` (regular, amo, iceberg, auction) for order routing.
-  - Position tracking uses `product` type (CNC for delivery, MIS for intraday, NRML for F&O).
-  - Auto square-off happens at ~15:15 IST for MIS positions. The system must handle this proactively.
+Update `docs/runbooks/` + `docs/operations/` when: operator steps change · troubleshooting changes · incident response changes.
 
-### Alpaca (US Equities)
+Update `memory/decisions.md` (ADR) when: major design decisions made or reversed · safety model changes · automation scope changes.
 
-- **Markets:** US equities (NYSE, NASDAQ), OTC.
-- **API:** REST for orders/account, WebSocket for streaming quotes and trade updates.
-- **Auth:** API key + secret. Keys do not expire but can be regenerated.
-- **Rate limits:** 200 requests/minute. Implement client-side rate limiting.
-- **Order types supported:** MARKET, LIMIT, STOP, STOP_LIMIT, TRAILING_STOP.
-- **Key considerations:**
-  - Supports paper trading with separate API endpoint (use for staging).
-  - Fractional shares supported. Useful for position sizing.
-  - Extended hours trading available via `extended_hours` flag on orders.
-  - PDT (Pattern Day Trader) rules apply to accounts under $25k.
+Update `docs/live-readiness/` when: a live-readiness audit phase completes · blockers change status · the pre-live runbook changes. The canonical pre-live checklist is `docs/live-readiness/pre-live-runbook.md`.
 
-### Unified Broker Abstraction
-
-All broker-specific logic is encapsulated behind a `BrokerClient` protocol:
-
-```python
-class BrokerClient(Protocol):
-    async def place_order(self, order: OrderRequest) -> OrderResponse: ...
-    async def cancel_order(self, order_id: str) -> CancelResponse: ...
-    async def get_positions(self) -> list[Position]: ...
-    async def get_order_status(self, order_id: str) -> OrderStatus: ...
-    async def subscribe_quotes(self, symbols: list[str], callback: QuoteCallback) -> None: ...
-```
-
-Strategy and risk code must always use this abstraction. Direct broker client usage outside the execution layer is prohibited.
-
----
-
-## Service Boundaries Summary
-
-| Service           | Owns                              | Reads From                  | Writes To                       |
-|-------------------|-----------------------------------|-----------------------------|----------------------------------|
-| data_ingestion    | Raw/normalized market data        | Broker WebSocket feeds      | S3 (raw ticks), SQS (normalized)|
-| strategy_engine   | Signals                           | SQS (market data), DynamoDB | SQS (signals to risk)           |
-| risk_engine       | Risk decisions, position limits   | SQS (signals), DynamoDB     | SQS (approved signals), S3 (audit log), DynamoDB (risk state) |
-| execution_engine  | Orders, order state               | SQS (approved signals)      | Broker APIs, DynamoDB (order state), S3 (execution log) |
-| ai_engine         | Model predictions                 | S3 (features, model artifacts) | HTTP responses, S3 (prediction logs) |
-
----
-
-## How to Run Locally
-
-### Prerequisites
-
-- Python 3.11+
-- Docker and Docker Compose
-- AWS CLI v2 (configured with a dev profile)
-- Terraform 1.5+
-- Zerodha Kite Connect API credentials (request via https://kite.trade)
-- Alpaca API credentials (sign up at https://alpaca.markets)
-
-### Setup
-
-```bash
-# Clone the repository
-git clone <repo-url> && cd quantembrace
-
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-
-# Copy environment template and fill in credentials
-cp .env.example .env
-# Edit .env with your broker API keys and AWS credentials
-
-# Start local infrastructure (DynamoDB Local, LocalStack for S3/SQS)
-docker-compose up -d localstack dynamodb-local
-
-# Run database migrations / table creation
-python scripts/setup_local_tables.py
-
-# Verify setup
-pytest tests/unit/ -v
-```
-
-### Running Services Locally
-
-```bash
-# Run individual services
-python -m services.data_ingestion.main
-python -m services.strategy_engine.main
-python -m services.risk_engine.main
-python -m services.execution_engine.main
-python -m services.ai_engine.main
-
-# Or run all services via docker-compose
-docker-compose up
-```
-
-### Running Backtests
-
-```bash
-# Download historical data
-python scripts/data_download/fetch_historical.py --symbol RELIANCE --from 2024-01-01 --to 2025-12-31
-
-# Run a backtest
-python scripts/backtest/run.py --strategy momentum --config configs/backtest_momentum.yaml
-```
-
-### Environment Variables
-
-| Variable                  | Description                        | Required |
-|---------------------------|------------------------------------|----------|
-| `KITE_API_KEY`            | Zerodha Kite Connect API key       | Yes      |
-| `KITE_API_SECRET`         | Zerodha Kite Connect API secret    | Yes      |
-| `KITE_ACCESS_TOKEN`       | Zerodha session access token       | Runtime  |
-| `ALPACA_API_KEY`          | Alpaca API key ID                  | Yes      |
-| `ALPACA_API_SECRET`       | Alpaca API secret key              | Yes      |
-| `ALPACA_BASE_URL`         | Alpaca API base URL                | Yes      |
-| `AWS_REGION`              | Primary AWS region                 | Yes      |
-| `AWS_PROFILE`             | AWS CLI profile name               | Dev only |
-| `DYNAMODB_TABLE_PREFIX`   | Prefix for DynamoDB table names    | Yes      |
-| `S3_BUCKET_DATA`          | S3 bucket for market data          | Yes      |
-| `S3_BUCKET_LOGS`          | S3 bucket for audit/execution logs | Yes      |
-| `LOG_LEVEL`               | Logging level (DEBUG/INFO/WARNING) | No       |
-| `ENVIRONMENT`             | Runtime environment (dev/staging/prod) | Yes  |
+**Mark unimplemented features:** `[PLANNED — not yet implemented]`. Never describe planned behavior as current.

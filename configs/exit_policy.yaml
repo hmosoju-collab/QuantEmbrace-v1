@@ -1,0 +1,165 @@
+# QuantEmbrace — Trade Exit Policy Configuration
+#
+# Drives the HYBRID exit architecture:
+#   1. TradeExitEngine (TEE)     → primary intraday profit-booking / risk-control.
+#   2. RiskCapManager            → blocks NEW ENTRIES on daily caps (never blocks exits).
+#   3. MISSquareOffManager       → final 15:05 IST EOD exposure cleanup (NOT profit booking).
+#   4. Zerodha 15:15 auto sq-off → last-resort broker fallback only.
+#
+# LAYER SEPARATION (non-negotiable):
+#   - This file configures EXIT behavior only. It never touches entry/strategy/risk-validation logic.
+#   - MIS square-off is exposure cleanup, never a profit-booking mechanism.
+#
+# SIGNED QUANTITY INVARIANT (side-aware everywhere):
+#   quantity > 0  → LONG  → stop below entry, targets above entry, close with SELL
+#   quantity < 0  → SHORT → stop above entry, targets below entry, close with BUY
+#   All *_pct values are unsigned magnitudes; the engine applies sign by direction.
+#
+# SAFETY:
+#   - mode: paper and live_trading_enabled: false are the paper-session defaults.
+#   - If mode == paper, live_trading_enabled MUST be false (loader enforces this — HARD BLOCK).
+#   - Timing keys mirror CLAUDE.md / mis_square_off.py env defaults; keep them in sync.
+#
+# NOTE ON LOCATION: the original spec referenced config/exit_policy.yaml. This project's
+# established convention is configs/ (all 7 sibling YAMLs live here and load via
+# Path("configs/...")). Placed here for naming consistency — see memory/decisions.md ADR-021.
+#
+# Last updated: 2026-05-29
+
+mode: paper                 # paper | live
+live_trading_enabled: false # HARD BLOCK: must be false whenever mode == paper
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Timing (IST, 24h HH:MM). Shared by TEE, RiskCapManager, and MISSquareOffManager.
+# ─────────────────────────────────────────────────────────────────────────────
+timing:
+  no_new_entry_after_ist: "14:45"      # RiskCapManager blocks NEW entries after this (exits continue)
+  time_exit_after_ist: "14:55"         # TEE begins time-based exit of still-open managed positions
+  mis_square_off_time_ist: "15:05"     # MISSquareOffManager begins EOD square-off
+  square_off_deadline_ist: "15:10"     # Hard deadline → kill switch + CRITICAL alert if not flat
+  broker_auto_square_off_ist: "15:15"  # Zerodha broker auto square-off (last-resort fallback)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default tier — used when a symbol is not mapped in symbol_tiers below.
+# Conservative middle-ground values (paper-safe).
+# ─────────────────────────────────────────────────────────────────────────────
+default_tier: default
+
+tiers:
+  default:
+    # --- Rule A: initial stop loss ---
+    initial_stop_loss_pct: 1.0          # SL distance from entry (magnitude)
+    atr_stop_multiplier: 1.5            # SL = mult × ATR when ATR available (else use pct)
+    atr_trail_multiplier: 2.0           # trailing distance = mult × ATR when ATR available
+
+    # --- Rule B: profit targets ---
+    target_1_pct: 1.0
+    target_2_pct: 1.75
+    final_target_pct: 2.5               # Rule H: final target → full exit
+
+    # --- Rule C: breakeven lock ---
+    breakeven_trigger_pct: 0.75         # at +0.75% favourable → move stop to entry
+
+    # --- Rule D: multi-tier profit lock (only ever tightens the stop) ---
+    # trigger_pct = favourable move; lock_pct = stop offset from entry (toward profit).
+    # lock_pct 0.0 == breakeven. Tiers must be ascending by trigger_pct.
+    profit_lock_tiers:
+      - { trigger_pct: 0.75, lock_pct: 0.00 }   # +0.75% → lock entry
+      - { trigger_pct: 1.25, lock_pct: 0.40 }   # +1.25% → lock entry ± 0.40%
+      - { trigger_pct: 2.00, lock_pct: 1.00 }   # +2.00% → lock entry ± 1.00%
+
+    # --- Rule E: partial profit booking ---
+    partial_profit_trigger_pct: 1.25    # book partial at this favourable move
+    partial_profit_qty_pct: 50          # % of abs(qty) to book (rest rides trailing)
+
+    # --- Rule F: trailing stop (only tightens, never loosens) ---
+    trailing_activation_pct: 1.25       # arm trailing once move ≥ this
+    trailing_stop_pct: 0.6              # trail distance behind best price
+
+  blue_chip:                            # large-cap, lower volatility → tighter
+    initial_stop_loss_pct: 0.8
+    atr_stop_multiplier: 1.2
+    atr_trail_multiplier: 1.8
+    target_1_pct: 0.8
+    target_2_pct: 1.5
+    final_target_pct: 2.0
+    breakeven_trigger_pct: 0.6
+    profit_lock_tiers:
+      - { trigger_pct: 0.60, lock_pct: 0.00 }
+      - { trigger_pct: 1.00, lock_pct: 0.30 }
+      - { trigger_pct: 1.60, lock_pct: 0.80 }
+    partial_profit_trigger_pct: 1.0
+    partial_profit_qty_pct: 50
+    trailing_activation_pct: 1.0
+    trailing_stop_pct: 0.5
+
+  mid_cap:                              # moderate volatility
+    initial_stop_loss_pct: 1.2
+    atr_stop_multiplier: 1.5
+    atr_trail_multiplier: 2.0
+    target_1_pct: 1.2
+    target_2_pct: 2.0
+    final_target_pct: 3.0
+    breakeven_trigger_pct: 0.8
+    profit_lock_tiers:
+      - { trigger_pct: 0.80, lock_pct: 0.00 }
+      - { trigger_pct: 1.25, lock_pct: 0.40 }
+      - { trigger_pct: 2.00, lock_pct: 1.00 }
+    partial_profit_trigger_pct: 1.25
+    partial_profit_qty_pct: 50
+    trailing_activation_pct: 1.25
+    trailing_stop_pct: 0.7
+
+  small_cap:                            # higher volatility → wider
+    initial_stop_loss_pct: 1.8
+    atr_stop_multiplier: 2.0
+    atr_trail_multiplier: 2.5
+    target_1_pct: 1.8
+    target_2_pct: 3.0
+    final_target_pct: 4.5
+    breakeven_trigger_pct: 1.2
+    profit_lock_tiers:
+      - { trigger_pct: 1.20, lock_pct: 0.00 }
+      - { trigger_pct: 1.75, lock_pct: 0.60 }
+      - { trigger_pct: 3.00, lock_pct: 1.50 }
+    partial_profit_trigger_pct: 1.75
+    partial_profit_qty_pct: 50
+    trailing_activation_pct: 1.75
+    trailing_stop_pct: 1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Symbol → tier mapping. Symbols not listed resolve to `default_tier`.
+# This is intentionally explicit: the project has no market-cap classification yet,
+# so tiers are assigned by hand (paper-safe — unmapped symbols get conservative default).
+# ─────────────────────────────────────────────────────────────────────────────
+symbol_tiers:
+  # Blue chips (NIFTY large-caps)
+  HDFCBANK: blue_chip
+  ICICIBANK: blue_chip
+  RELIANCE: blue_chip
+  TCS: blue_chip
+  INFY: blue_chip
+  KOTAKBANK: blue_chip
+  SBIN: blue_chip
+  ITC: blue_chip
+  LT: blue_chip
+  HINDUNILVR: blue_chip
+  # Example mid / small caps — extend as the universe grows
+  # ADANIENT: mid_cap
+  # IDEA: small_cap
+
+# ─────────────────────────────────────────────────────────────────────────────
+# scalp_1m strategy exit config (hardened 2026-06-02 — Session 8 post-mortem)
+# Stop/TP floors prevent entry when move is too small to cover costs + spread.
+# ─────────────────────────────────────────────────────────────────────────────
+scalp_1m:
+  stop_atr_multiplier: 0.5       # base ATR stop (may be overridden by floors below)
+  min_stop_price_pct: 0.15       # floor: SL must be ≥ 0.15% of entry price
+  min_target_price_pct: 0.25     # floor: TP must be ≥ 0.25% of entry price
+  min_spread_multiple_stop: 3    # floor: SL must be ≥ 3 × estimated_spread
+  min_tick_multiple_stop: 5      # floor: SL must be ≥ 5 × tick_size (NSE = ₹0.05)
+  target_rr: 1.5                 # TP = max(rr × stop_dist, min_target_price_pct × price)
+  max_spread_pct: 0.08           # reject if estimated spread > 0.08% (wide spread = bad fill)
+  min_net_edge_pct: 0.12         # reject if gross_edge - roundtrip_costs < 0.12%
+  reject_if_spread_unavailable: true   # reject if bar_range is zero (can't estimate spread)
+  reject_if_ltp_stale: true      # reject if candle timestamp > 2 minutes old

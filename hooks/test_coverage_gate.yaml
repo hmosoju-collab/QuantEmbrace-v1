@@ -1,0 +1,168 @@
+name: test_coverage_gate
+type: pre_merge
+priority: 3
+mandatory: false
+
+description: |
+  Critical trading paths must maintain minimum test coverage thresholds.
+  Tests must not depend on real broker APIs, network calls, or wall-clock time.
+
+  Coverage tiers:
+    Tier 1 (90% minimum) — kill switch, risk validators, order idempotency,
+    exit engine, monitoring. These are safety-critical paths where failures
+    cause direct financial harm or trading safety violations.
+
+    Tier 2 (80% minimum) — all other service code. Functional paths that
+    should be tested but are less safety-critical.
+
+    Tier 3 (70% minimum) — data ingestion. High I/O, lower coverage floor
+    due to external dependency complexity.
+
+  Test quality rules:
+    - No real broker API calls in tests (use mocks/fakes)
+    - No time.sleep() without mock_sleep or freezegun
+    - No datetime.now() without freeze_time or injectable clock
+    - Tests must be deterministic and order-independent
+    - hypothesis property tests required for: order quantity calc, signal age,
+      DynamoDB idempotency key generation
+
+trigger:
+  event: pre_merge
+  paths:
+    - "services/**"
+    - "tests/**"
+
+coverage_requirements:
+  - path: "services/risk_engine/validators/"
+    minimum_percent: 90
+    rationale: "Kill switch + 11 risk validators are the primary safety gate"
+    required_test_types:
+      - "unit tests for each validator (11 total)"
+      - "integration test: full validator chain with all 11 validators"
+      - "regression tests: kill switch bypass attempts all return False"
+      - "property test: signal age validator with hypothesis"
+
+  - path: "services/execution_engine/order_manager.py"
+    minimum_percent: 90
+    rationale: "Order idempotency prevents duplicate fills and double charges"
+    required_test_types:
+      - "idempotency: same signal_id submitted twice returns same result"
+      - "DynamoDB conditional write race: concurrent submissions"
+      - "paper vs live routing: paper_trade=True never reaches real broker mock"
+
+  - path: "services/execution_engine/exit/"
+    minimum_percent: 90
+    rationale: "Exit engine manages open positions — failures cause unmanaged risk"
+    required_test_types:
+      - "MIS square-off: triggers before 15:15 IST"
+      - "stop-loss exit: activates at configured threshold"
+      - "take-profit exit: activates at configured threshold"
+      - "exit order router: paper vs live routing isolation"
+
+  - path: "services/shared/monitoring/"
+    minimum_percent: 90
+    rationale: "LiveCounters feed the monitoring dashboard — stale data is invisible risk"
+    required_test_types:
+      - "counter increment atomicity"
+      - "flush to /tmp/qe_live_counters.json every 60s"
+      - "LTP source age tracking"
+
+  - path: "services/risk_engine/"
+    minimum_percent: 80
+    rationale: "Full risk engine including non-validator code"
+
+  - path: "services/execution_engine/"
+    minimum_percent: 80
+    rationale: "Full execution engine including broker adapters"
+
+  - path: "services/strategy_engine/"
+    minimum_percent: 80
+    rationale: "Strategy code including signal generation"
+
+  - path: "services/ai_engine/"
+    minimum_percent: 80
+    rationale: "AI enrichment pipeline"
+
+  - path: "services/data_ingestion/"
+    minimum_percent: 70
+    rationale: "High external I/O dependency — lower floor with async complexity"
+
+forbidden_in_tests:
+  - pattern: "requests.get|requests.post|httpx.get"
+    reason: "No real HTTP calls — use responses library or httpx mock transport"
+    fix: "from unittest.mock import patch; @patch('requests.get')"
+
+  - pattern: "kite\\.place_order|zerodha\\.place_order"
+    reason: "No real Zerodha API calls in tests — use a mock ZerodhaBrokerClient"
+    fix: "zerodha_mock = Mock(spec=ZerodhaBrokerClient)"
+
+  - pattern: "time\\.sleep\\("
+    reason: "time.sleep() makes tests slow and non-deterministic"
+    fix: "from unittest.mock import patch; @patch('time.sleep')"
+
+  - pattern: "datetime\\.now\\(\\)"
+    reason: "Wall-clock time makes tests non-deterministic"
+    fix: "from freezegun import freeze_time; @freeze_time('2026-01-01 09:15:00+05:30')"
+
+  - pattern: "alpaca\\.submit_order"
+    reason: "No real Alpaca API calls — use AlpacaAdapter mock"
+    fix: "alpaca_mock = Mock(spec=AlpacaAdapter)"
+
+required_test_patterns:
+  - name: "paper_vs_live_routing_test"
+    description: "Parametrized test that verifies paper_trade=True never calls real broker"
+    example: |
+      @pytest.mark.parametrize("paper_trade", [True, False])
+      async def test_order_routing(paper_trade, mock_zerodha, mock_paper_simulator):
+          config = StrategyConfig(paper_trade=paper_trade)
+          router = SmartRouter(zerodha=mock_zerodha, paper_sim=mock_paper_simulator)
+          await router.route(signal, config)
+          if paper_trade:
+              mock_paper_simulator.place_order.assert_called_once()
+              mock_zerodha.place_order.assert_not_called()
+          else:
+              mock_zerodha.place_order.assert_called_once()
+              mock_paper_simulator.place_order.assert_not_called()
+
+  - name: "kill_switch_rejects_all_signals"
+    description: "When kill switch is active, ALL signals must be rejected"
+    example: |
+      async def test_kill_switch_blocks_all_signals(dynamo_mock):
+          dynamo_mock.get_item.return_value = {
+              "Item": {"active": {"BOOL": True}, "status": {"S": "active"}}
+          }
+          validator = KillSwitchValidator(dynamo_client=dynamo_mock)
+          result = await validator.validate(any_signal)
+          assert result.valid is False
+          assert "kill_switch_active" in result.reason
+
+  - name: "idempotency_blocks_duplicate_orders"
+    description: "Same signal_id must not produce two orders"
+    example: |
+      async def test_idempotency_blocks_duplicate(order_manager, dynamo_mock):
+          signal = Signal(id="sig-001", symbol="RELIANCE", ...)
+          # First submission
+          result1 = await order_manager.submit(signal)
+          assert result1.success is True
+          # Second submission — DynamoDB conditional write fails
+          dynamo_mock.put_item.side_effect = ConditionalCheckFailedException
+          result2 = await order_manager.submit(signal)
+          assert result2.success is False
+          assert result2.reason == "duplicate_signal_id"
+
+ci_command: |
+  pytest tests/ \
+    --cov=services \
+    --cov-report=term-missing \
+    --cov-fail-under=80 \
+    -v
+
+on_violation:
+  - action: request_review
+  - message: |
+      WARNING: test_coverage_gate rule triggered.
+      Test coverage is below the required threshold for one or more paths.
+      Critical paths (validators, order_manager, exit engine) require 90%.
+      All other service paths require 80%. Data ingestion requires 70%.
+      Forbidden patterns in tests: real broker calls, time.sleep(), datetime.now().
+      Run: pytest --cov=services --cov-report=term-missing to see coverage gaps.

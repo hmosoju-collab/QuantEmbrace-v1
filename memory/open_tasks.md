@@ -764,21 +764,30 @@ No new service boundaries, no Kafka topic additions, no schema version bumps.
 
 ### Phase 8 Tasks
 
-| Task | File(s) | Priority | Status |
+> **Status reconciled against code 2026-05-30** (read-only). The original "all 🔲 unstarted"
+> tracking was stale — roughly half of Phase 8 is built. See the
+> **"Phase 8 + HIGH reconciliation (2026-05-30)"** section below for full file:line evidence.
+> Legend: ✅ DONE · ◐ PARTIAL · 🔲 OPEN.
+
+| Task | File(s) | Priority | Status (2026-05-30) |
 |------|---------|----------|--------|
-| PHASE8-001 | `shared/models/order.py` + broker resolution — `ACK_UNKNOWN` state + pre-retry tag scan | P0 | 🔲 |
-| PHASE8-002 | `shared/zerodha/endpoint_budgets.py` — per-endpoint rate budgets + cancel priority + placement pause | P0 | 🔲 |
-| PHASE8-003 | `shared/models/candle.py` + `data_ingestion/candle_stream.py` + `strategy_engine/runners/strategy_runner.py` — `data_quality` field + warm-up suppression | P1 | 🔲 |
-| PHASE8-004 | `shared/reconciliation/gate.py` — startup reconciliation gate wired into all 4 service start() methods | P0 | 🔲 |
-| PHASE8-005 | `shared/kafka/local_outbox.py` — SQLite durable outbox + `_halt_new_order_intake()` in base_publisher + CI kill-switch fanout test | P0 | 🔲 |
-| PHASE8-006 | `risk_engine/processing/signal_inbox.py` + `signal_outbox.py` + `outbox_publisher.py` + `watchdogs/kafka_lag_watchdog.py` — inbox/outbox + lag kill switch | P0 | 🔲 |
-| PHASE8-007 | `risk_engine/validators/reconciliation_validator.py` + `scripts/ops/reconcile.py` — hard reconciliation stop + three-way drift tool | P1 | 🔲 |
-| PHASE8-008 | `execution_engine/brokers/base_broker.py` 3-tier SL + `execution_engine/monitors/orphan_detector.py` — broker-native SL + flatten + orphan detection | P0 | 🔲 |
-| PHASE8-009 | `infra/terraform/modules/dynamodb/signal_processing.tf` — `signal-inbox` + `signal-outbox` tables + 3 CloudWatch alarms | P1 | 🔲 |
-| PHASE8-010 | `tests/unit/test_phase8_hardening.py` + `tests/integration/test_kill_switch_fanout.py` — 158+ tests covering all 8 failure scenarios | P1 | 🔲 |
+| PHASE8-001 | `shared/models/order.py` + broker resolution — `ACK_UNKNOWN` state + pre-retry tag scan | P0 | ✅ DONE — `OrderStatus.ACK_UNKNOWN` (order.py:37); tag-scan + "refusing blind second broker placement" (execution_engine/service.py:1007/1127/1142) |
+| PHASE8-002 | `shared/zerodha/endpoint_budgets.py` — per-endpoint rate budgets + cancel priority + placement pause | P0 | 🔲 OPEN — `endpoint_budgets.py` absent |
+| PHASE8-003 | `shared/models/candle.py` + `data_ingestion/candle_stream.py` + `strategy_engine/runners/strategy_runner.py` — `data_quality` field + warm-up suppression | P1 | ✅ DONE — `data_quality` on CandleData (candle_stream.py:138) + Bar (base_strategy.py:52); warm-up suppression (strategy_runner.py:216) |
+| PHASE8-004 | `shared/reconciliation/gate.py` — startup reconciliation gate wired into all 4 service start() methods | P0 | ◐ PARTIAL — named `shared/reconciliation/gate.py` absent; overlapping runtime enforcement exists via reconciliation_validator (PHASE8-007) |
+| PHASE8-005 | `shared/kafka/local_outbox.py` — SQLite durable outbox + `_halt_new_order_intake()` in base_publisher + CI kill-switch fanout test | P0 | ◐ MOSTLY DONE — `LocalOutbox` present + wired (local_outbox.py:36; risk/strategy publishers); `_halt_new_order_intake()` hook not found |
+| PHASE8-006 | `risk_engine/processing/signal_inbox.py` + `signal_outbox.py` + `outbox_publisher.py` + `watchdogs/kafka_lag_watchdog.py` — inbox/outbox + lag kill switch | P0 | ◐ PARTIAL — `kafka_lag_watchdog.py` present (lag→kill switch, :56); `signal_inbox.py`/`signal_outbox.py`/`outbox_publisher.py` absent. **RACE OBSERVED IN SESSION 7 (2026-06-01):** ETERNAL SELL 100 (signal cfbd2a95) at 04:27:42 UTC + BUY 201 (signal 895d02b1) at 04:27:43 UTC both approved against FLAT position → net unintended LONG +101. `_signal_locks` keyed by signal_id not symbol; no per-symbol serialisation. See `docs/operations/session-observations/session-7-2026-06-01.md`. |
+| PHASE8-007 | `risk_engine/validators/reconciliation_validator.py` + `scripts/ops/reconcile.py` — hard reconciliation stop + three-way drift tool | P1 | ✅ DONE — validator rejects on flag (reconciliation_validator.py:136-137); `scripts/ops/reconcile.py` present |
+| PHASE8-008 | `execution_engine/brokers/base_broker.py` 3-tier SL + `execution_engine/monitors/orphan_detector.py` — broker-native SL + flatten + orphan detection | P0 | ◐ PARTIAL — `orphan_detector.py` present & wired; 3-tier SL ladder not at `base_broker.py` (abstract interface only) |
+| PHASE8-009 | `infra/terraform/modules/dynamodb/signal_processing.tf` — `signal-inbox` + `signal-outbox` tables + 3 CloudWatch alarms | P1 | 🔲 OPEN — `signal_processing.tf` absent |
+| PHASE8-010 | `tests/unit/test_phase8_hardening.py` + `tests/integration/test_kill_switch_fanout.py` — 158+ tests covering all 8 failure scenarios | P1 | ◐ PARTIAL — `test_phase8_hardening.py` present (888 lines); `test_kill_switch_fanout.py` absent |
+| PHASE8-011 | `scripts/monitoring/paper_trading_monitor.py` + `services/execution_engine/monitors/live_counters.py` — surface scalp_1m v2 rejection counters in daily monitoring: `scalp_1m.rejected_total`, `scalp_1m.rejected_spread_too_wide`, `scalp_1m.rejected_tp_inside_spread`, `scalp_1m.rejected_net_edge_too_small`, `scalp_1m.stop_distance_source` counts, `scalp_1m.avg_net_expected_edge`, `scalp_1m.strategy_version` | P1 | 🔲 OPEN — counters exist in-memory in `Scalp1mStrategy` and in structured logs; absent from `/tmp/qe_live_counters.json` and `paper_trading_monitor.py`. Blocking `scalp_1m` Stage-1 re-evaluation. See `docs/live-readiness/stage1-strategy-eligibility.md`. |
 
 **P0 tasks** must complete before any live capital is deployed.
 **P1 tasks** must complete before the second live trading week.
+
+**Still-open Phase 8 work after reconciliation:** PHASE8-002 (open), PHASE8-009 (open), PHASE8-011 (open);
+PHASE8-004 / 005 / 006 / 008 / 010 (partial). PHASE8-001 / 003 / 007 are DONE.
 
 ---
 
@@ -797,11 +806,11 @@ Full platform review conducted. Three critical blockers identified and fixed bef
 - `tests/unit/test_blocker_002_pagination.py` — 16 tests proving multi-page scan/query
 
 **Remaining high-risk issues (not blockers but must be fixed before scaling):**
-- HIGH-001: `_signal_locks` dict in execution_engine never cleaned up → memory leak
-- HIGH-002: Strategy engine kill switch uses hand-rolled poll, not `KillSwitchCache`
-- HIGH-003: `InstrumentRegistry` load failure silently disables 3 risk validators in production
-- HIGH-004: MIS square-off background task has no watchdog / failure alerting
-- HIGH-005: `datetime.utcnow()` deprecated in `_OrderPlacementLimiter`
+- HIGH-001: `_signal_locks` dict in execution_engine never cleaned up → memory leak — **STILL OPEN** (confirmed 2026-05-30: `setdefault` at execution_engine/service.py:778, no cleanup anywhere)
+- HIGH-002: Strategy engine kill switch uses hand-rolled poll, not `KillSwitchCache` — **STILL OPEN** (confirmed 2026-05-30: strategy_engine/service.py:705 `_is_kill_switch_active()` does direct `get_item`, not KillSwitchCache)
+- ~~HIGH-003: `InstrumentRegistry` load failure silently disables 3 risk validators in production~~ — **✅ FIXED (verified 2026-05-30)**: sector/liquidity/spread_gate now **fail closed** via `risk_data_unavailable_result(...)` on missing data (sector_validator.py:79/84/95, liquidity:98, spread_gate:96). This bullet is stale — validators reject, they do not silently pass.
+- HIGH-004: MIS square-off background task has no watchdog / failure alerting — **STILL OPEN** (confirmed 2026-05-30: no MIS watchdog; MIS import only at execution_engine/service.py:322)
+- HIGH-005: `datetime.utcnow()` deprecated in `_OrderPlacementLimiter` — **STILL OPEN (LOW)** (confirmed 2026-05-30: zerodha_broker.py:102/129)
 
 Review document: `docs/reviews/platform_review_2026-05-11.md`
 
@@ -921,7 +930,60 @@ Wrong table names to fix:
 
 ---
 
-## Open Items Carried Forward to Day 6+
+## ✅ Day 6 Paper Trading Session — Comprehensive Readiness Review (2026-05-26)
+
+### Session Focus
+
+Full paper trading readiness review as Chief Quant Architect + Senior Execution Engineer. All 7 execution gaps identified and fixed. Platform rated GO for next paper session.
+
+### Root Cause: Days 1-4 Zero Trades (CONFIRMED)
+
+`strategy_engine` stamps `Signal.generated_at = candle.candle_close_time` (not poll time). Candle arriving at risk_engine is 7-12s old. `RISK_MAX_SIGNAL_AGE_SECONDS` was at code default 5.0s → 100% rejection. Fix: `RISK_MAX_SIGNAL_AGE_SECONDS: "30"` in docker-compose (hard ceiling 30s enforced in `SignalAgeValidator`).
+
+### Day 6 Fixes Applied (all merged to main, 2026-05-26/27)
+
+| ID | Severity | File | Description | Status |
+|----|----------|------|-------------|--------|
+| FIX-A | HIGH | `execution_engine/service.py` | `submit_order` return not checked in `_handle_paper_order` → potential duplicate position on concurrent race | ✅ DONE |
+| FIX-B | MEDIUM | `execution_engine/service.py` | Universe snapshot never refreshed after midnight IST — day 2+ filtering effectively disabled | ✅ DONE |
+| FIX-C | MEDIUM | `docker-compose.yml` (setup) | `PAPER_SEED_NAV` defaulted to ₹50L; `risk_limits_production.yaml` uses ₹10L — 5x NAV mismatch | ✅ DONE |
+| FIX-D | MEDIUM | `scripts/setup_local_tables.py` | Strategy configs not seeded — `_DEFAULT_CONFIG` silently caps each strategy at 10 signals/day (60 total) | ✅ DONE |
+| FIX-E | LOW | `risk_engine/service.py` | `RiskDecision.to_dict()` missing `enriched` field — session report always showed 0% enrichment rate | ✅ DONE |
+| FIX-F | LOW | `scripts/monitoring/paper_session_report.py` | Enrichment detection checked validator_name substring — no validator named "enriched" | ✅ DONE |
+| FIX-G | LOW | `tests/unit/` | New regression tests for FIX-A (duplicate suppression) and FIX-B (stale snapshot behavior) | ✅ DONE |
+
+### New Files Created
+
+| File | Purpose |
+|------|---------|
+| `scripts/deploy/paper_preflight_check.py` | Local paper trading readiness check: env vars, safety gates, DynamoDB, S3, Kafka |
+| `tests/unit/test_signal_age_candle.py` | 8 regression tests pinning the candle signal age fix (Days 1-4 root cause) |
+| `tests/unit/test_paper_readiness_gaps.py` | 8 tests for paper duplicate suppression and stale snapshot behavior |
+
+### Test Summary (Day 6)
+
+- `test_signal_age_candle.py`: 8/8 passing
+- `test_paper_readiness_gaps.py`: 8/8 passing
+- All existing unit tests: unaffected
+
+### Pre-Day-7 Required Actions (before next session)
+
+| Priority | Action | Command |
+|----------|--------|---------|
+| CRITICAL | Wipe LocalStack to pick up new NAV seed and strategy configs | `docker-compose down -v` |
+| CRITICAL | Re-run setup to seed ₹10L NAV and strategy configs | `docker-compose run --rm setup` |
+| CRITICAL | Run pre-flight check | `python scripts/deploy/paper_preflight_check.py` (must exit 0) |
+| HIGH | Refresh Zerodha access token | `python scripts/zerodha_login.py` |
+| HIGH | Watch for `candle_stream.diag_fetch` at market open | `docker logs -f data_ingestion \| grep diag_fetch` |
+
+---
+
+## Open Items Carried Forward to Day 7+
+
+> ⚠️ **Historical snapshot (Day 6 close).** Several statuses here are stale — superseded by the
+> **"Open Items Carried Forward (reconciled 2026-05-30)"** table at the end of this file. In
+> particular HIGH-003 is FIXED and Phase 8 is ~half built, not "all unstarted." Do not action
+> from this table.
 
 | ID | Severity | Description | When |
 |----|----------|-------------|------|
@@ -930,6 +992,254 @@ Wrong table names to fix:
 | HIGH-003 | HIGH | InstrumentRegistry load failure silently disables 3 risk validators | Pre-live |
 | HIGH-004 | MEDIUM | MIS square-off background task has no watchdog/failure alerting | Pre-live |
 | HIGH-005 | LOW | `datetime.utcnow()` deprecated in `_OrderPlacementLimiter` | Pre-live |
-| ~~FIX-5~~ | ~~MEDIUM~~ | ~~preflight_check.py wrong table names + no LocalStack endpoint~~ | ✅ DONE 2026-05-25 |
 | PHASE8 | P0 | All 10 Phase 8 production hardening tasks unstarted — required before live capital | Pre-live |
-| CANDLE | P1 | Candle stream 0-write mystery — diag logs active, Day 6 observation will tell | Day 6 |
+| CANDLE | P1 | Candle stream diag logs still active — verify at Day 7 market open | Day 7 |
+
+---
+
+## ✅ Day 7 Paper Trading Session (2026-05-27)
+
+### Fixes Applied This Session
+
+Three bugs discovered and fixed during live session:
+
+**FIX-8: Candle stream watchdog** (`services/data_ingestion/service.py`)
+- `_candle_stream_task` died silently at 04:48 UTC after Zerodha WebSocket drop (close code 1006). `CancelledError` (BaseException) bypassed `except Exception` in `_stream_loop`.
+- Fix: Added `_candle_stream_watchdog()` coroutine — polls `task.done()` every 30s and restarts if dead. Watchdog cancelled before candle stream in `stop()`.
+- Verified: 156 candles in DynamoDB within 3 minutes of rebuild.
+
+**FIX-9: Strategy config DynamoDB key prefix mismatch** (`services/strategy_engine/config/strategy_config_loader.py`)
+- `_PK_PREFIX = "STRATEGY#"` / `_SK_PREFIX = "CONFIG#"` did not match `"STRATEGY_CONFIG#"` / `"ENV#"` written by `setup_local_tables.py`. Every lookup returned None → fallback to `_DEFAULT_CONFIG(max_signals_per_day=10)`. After 10 early signals, all VWAP signals blocked.
+- Fix: Changed constants to `_PK_PREFIX = "STRATEGY_CONFIG#"` / `_SK_PREFIX = "ENV#"`.
+
+**FIX-10: Kill switch staleness during startup warmup** (`services/risk_engine/killswitch/auto_triggers.py` + `service.py`)
+- `record_data_tick` was called after age check — age-rejected signals didn't reset the clock.
+- No startup grace period — 300s staleness fired 6 min after strategy_engine restart during candle warmup.
+- Fix: Moved `record_data_tick` to first line of `validate_signal()`. Added `_startup_grace_secs=600.0` to `KillSwitchMonitor` with uptime check in `_monitor_data_staleness`.
+
+### Session Outcome
+
+- **First paper fill**: `nse_vwap_reversion BUY JINDALSAW qty=429 @ ₹233.0328`, notional ₹99,971 at 05:31 UTC
+- **Pipeline status**: All 5 services operational end-to-end after fixes
+- **Kill switch**: `active=False` through end of observed session
+- **Strategy config**: `refresh_complete updated=7 errors=0`
+
+### CANDLE Task — ✅ RESOLVED
+
+Root cause confirmed: `CancelledError` bypasses `except Exception`; task dies with no watchdog. Watchdog added. Diagnostic logs (`candle_stream.diag_fetch` WARNING, elevated `candles_fetched` WARNING) can be removed — restore `candles_fetched` to DEBUG level in `_fetch_candles`.
+
+### Carried Forward to Day 8+
+
+> ⚠️ **Historical snapshot (Day 7 close).** Several statuses here are stale — superseded by the
+> **"Open Items Carried Forward (reconciled 2026-05-30)"** table at the end of this file. In
+> particular HIGH-003 and DIAG-LOGS are resolved and Phase 8 is ~half built. Do not action from
+> this table.
+
+| ID | Severity | Description | When |
+|----|----------|-------------|------|
+| HIGH-001 | HIGH | `_signal_locks` dict in execution_engine never cleaned up → memory leak | Pre-live |
+| HIGH-002 | HIGH | Strategy engine kill switch uses hand-rolled poll, not KillSwitchCache | Pre-live |
+| HIGH-003 | HIGH | InstrumentRegistry load failure silently disables 3 risk validators | Pre-live |
+| HIGH-004 | MEDIUM | MIS square-off background task has no watchdog/failure alerting | Pre-live |
+| HIGH-005 | LOW | `datetime.utcnow()` deprecated in `_OrderPlacementLimiter` | Pre-live |
+| PHASE8 | P0 | All 10 Phase 8 production hardening tasks unstarted — required before live capital | Pre-live |
+| US-CONFIG | LOW | `us_momentum_v1` has no DynamoDB config row → uses default cap=10; non-blocking while US markets closed during IST | Day 8 |
+| ALPACA-FIX | LOW | Alpaca connector `'str' object has no attribute 'value'` error — investigate enum handling in alpaca_broker.py | Day 8 |
+| DIAG-LOGS | LOW | Remove `candle_stream.diag_fetch` WARNING and restore `candles_fetched` to DEBUG in `services/data_ingestion/candle_stream.py` | Day 8 |
+
+---
+
+## ✅ Day 7 Post-Session Fixes (EOD 2026-05-27)
+
+Three additional bugs discovered and fixed after market close during kill switch investigation and MIS analysis:
+
+### FIX-11: exit_order_id stale lock on re-entry (`services/execution_engine/orders/order_manager.py`)
+
+**Root cause**: `apply_fill_to_position` UpdateExpression did not REMOVE `exit_order_id`, `exit_trigger`, `exit_state` when opening or building a position (`direction != "FLAT"`). After an exit closed a position (`direction="FLAT"`), these fields persisted in DynamoDB. Any new entry fill on the same symbol kept the stale lock, causing TradeExitEngine to permanently skip the re-entered position at the "exit already in-flight" guard.
+
+**Fix**: Conditional `REMOVE exit_order_id, exit_trigger, exit_state` appended to UpdateExpression when `direction != "FLAT"`. FLAT writes (exits) leave the field in place (it describes the just-completed exit).
+
+**Files**: `services/execution_engine/orders/order_manager.py` — `apply_fill_to_position()`
+
+---
+
+### FIX-12: MIS square-off called Zerodha directly in paper mode (`services/execution_engine/mis_square_off.py`)
+
+**Root cause**: `_place_mis_close_order` called `self._zerodha.place_order()` with no paper mode branch. In paper mode Zerodha rejects all orders (IP not whitelisted). At 09:35 UTC MIS fired, found 13 open positions, placed 13 Zerodha orders — all failed with `PermissionException: IP not allowed`. Past deadline → kill switch activated. This was the second kill switch event of the session (first was PositionMonitor at 06:25 UTC, second was MIS at 09:35 UTC).
+
+**Fix**: Added `paper_trading: bool = True` to `MISSquareOffManager.__init__`. In `_place_mis_close_order`: when `self._paper_trading`, call `self._order_manager.apply_fill_to_position(...)` directly (simulated fill at `last_price` or `avg_entry_price`) instead of Zerodha. Paper-mode MIS closes now correctly zero-out positions via DynamoDB. Wired `paper_trading=getattr(self._settings.execution, "paper_trading", True)` in `service.py` MIS constructor call.
+
+**Files**: `services/execution_engine/mis_square_off.py`, `services/execution_engine/service.py`
+
+---
+
+### FIX-13: MIS past-deadline skip guard — false-positive kill switch on container restart (`services/execution_engine/mis_square_off.py`)
+
+**Root cause**: `_seconds_until_ist(target)` returns `max(0.0, delta)` — when current time is past the target, returns `0.0` and MIS fires immediately. On container restart after 15:10 IST (e.g., during post-market debugging), MIS fires instantly, finds positions open, past deadline → activates kill switch. This caused kill switch to re-activate on EVERY container restart after market close.
+
+**Fix**: Added past-deadline skip guard at the start of the `run()` loop. When both `_seconds_until_ist(CLOSE_TIME)` and `_seconds_until_ist(DEADLINE_TIME)` return `0.0`, logs `mis_square_off.skipped_past_deadline` and sleeps until the next trading day instead of executing. Verified: third container rebuild logged `skipped_past_deadline`, no kill switch activation, clean startup.
+
+**Files**: `services/execution_engine/mis_square_off.py`
+
+---
+
+### Bug 2 Fix Deployed: PositionMonitor paper gate (`services/execution_engine/service.py`)
+
+**Root cause (Bug 2)**: `PositionMonitor` was instantiated unconditionally. It monitors real Zerodha broker positions vs paper DynamoDB. Real Zerodha has 0 positions; paper DynamoDB has all positions → persistent mismatch → kill switch activated at 06:25 UTC.
+
+**Fix already existed on disk** (`_is_paper` gate at line ~390) but running container was built before the fix. Confirmed via `docker exec grep "_is_paper"` inside old container: gate absent. After rebuild: `_is_paper` gate present at line 390, `position_monitor.started` absent from new logs.
+
+**Files**: `services/execution_engine/service.py`
+
+---
+
+### Final Container State After All Fixes
+
+```
+mis_square_off.skipped_past_deadline     ← FIX-13
+market_phase_governor.started initial_phase=POST_CLOSE
+tee.started mode=paper                    ← TEE active in paper mode
+execution_service.started
+(no position_monitor.started)             ← Bug 2 fix confirmed
+(no kill_switch.activated)                ← Clean startup
+```
+
+---
+
+## Open Items Carried Forward (reconciled 2026-05-30)
+
+> Statuses below verified against actual code, read-only. Resolved items are struck through.
+> Full evidence in **"Phase 8 + HIGH reconciliation (2026-05-30)"** immediately after this table.
+
+| ID | Severity | Description | Status |
+|----|----------|-------------|--------|
+
+| HIGH-001 | HIGH | `_signal_locks` dict in execution_engine never cleaned up → memory leak | 🔲 OPEN (service.py:778, no cleanup) |
+| HIGH-002 | HIGH | Strategy engine kill switch uses hand-rolled poll, not KillSwitchCache | 🔲 OPEN (strategy_engine/service.py:705) |
+| ~~HIGH-003~~ | ~~HIGH~~ | ~~InstrumentRegistry load failure silently disables 3 risk validators~~ | ✅ FIXED — fail-closed via `risk_data_unavailable_result` (sector:79/84/95, liquidity:98, spread_gate:96) |
+| HIGH-004 | MEDIUM | MIS square-off background task has no watchdog/failure alerting | 🔲 OPEN (no MIS watchdog) |
+| HIGH-005 | LOW | `datetime.utcnow()` deprecated in `_OrderPlacementLimiter` | 🔲 OPEN (zerodha_broker.py:102/129) |
+| PHASE8 | P0 | ~~All 10 Phase 8 tasks unstarted~~ — **stale**. Reconciled: 001/003/007 ✅ DONE; 004/005/006/008/010 ◐ PARTIAL; 002/009 🔲 OPEN | See Phase 8 task table |
+| US-CONFIG | LOW | `us_momentum_v1` has no DynamoDB config row → uses default cap=10; non-blocking while US markets closed during IST | 🔲 OPEN |
+| ALPACA-FIX | LOW | Alpaca connector `'str' object has no attribute 'value'` — enum handling in alpaca_broker.py (.value calls at 204/287/289/543/609/639) | 🔲 OPEN |
+| ~~DIAG-LOGS~~ | ~~LOW~~ | ~~Remove `candle_stream.diag_fetch` WARNING and restore `candles_fetched` to DEBUG~~ | ✅ DONE — `candles_fetched` at logger.debug (candle_stream.py:517); `diag_fetch` removed |
+| NAV-INFLATE | LOW | portfolio_value showing ₹49L from ₹50L seed — NAV denominator inflates between fills, loosening 5% position checks. Non-blocking for paper. | 🔲 UNCONFIRMED (not re-verified 2026-05-30) |
+
+---
+
+## Phase 8 + HIGH reconciliation (2026-05-30)
+
+Read-only audit of `memory/open_tasks.md` against actual code. Trigger: the tracker claimed
+"all 10 Phase 8 tasks unstarted" while roughly half were already built. No code or trading state
+was changed by this audit — documentation correction only. Evidence is file:line at time of audit.
+
+### Phase 8 — verified status
+
+| Task | Verdict | Evidence (file:line) |
+|------|---------|----------------------|
+| PHASE8-001 | ✅ DONE | `OrderStatus.ACK_UNKNOWN` order.py:37; `_recover_ack_unknown_order` execution_engine/service.py:1103; tag-scan `find_order_by_client_order_id` :1007/:1127; "refusing blind second broker placement" :1142; order_manager non-terminal/non-retryable rules :44/:51/:511/:518 |
+| PHASE8-002 | 🔲 OPEN | `services/shared/zerodha/endpoint_budgets.py` absent |
+| PHASE8-003 | ✅ DONE | `data_quality` on CandleData (candle_stream.py:127/138/151, DynamoDB write :664) + Bar (base_strategy.py:52); consumer parse (dynamo_candle_consumer.py:129/135/148/402); warm-up suppression strategy_runner.py:216-219 |
+| PHASE8-004 | ◐ PARTIAL | Named `shared/reconciliation/gate.py` absent / not wired into 4 `start()` methods; overlapping runtime enforcement exists via reconciliation_validator (see PHASE8-007) |
+| PHASE8-005 | ◐ MOSTLY DONE | `LocalOutbox` present (local_outbox.py:36), wired into risk_engine/publishers/kafka_approved_publisher.py:49/101/112 + strategy_engine/publishers/kafka_signal_publisher.py:71/122/368/370; `_halt_new_order_intake()` hook NOT found |
+| PHASE8-006 | ◐ PARTIAL | `KafkaLagWatchdog` present (kafka_lag_watchdog.py:56) using `KafkaLagKillSwitchMonitor` → lag→kill-switch DONE; `signal_inbox.py`/`signal_outbox.py`/`outbox_publisher.py` absent |
+| PHASE8-007 | ✅ DONE | reconciliation_validator.py rejects on flag (`approved=False` :136-137); read-failure fail-open intentional+unchanged (:200 comment); `scripts/ops/reconcile.py` present |
+| PHASE8-008 | ◐ PARTIAL | `orphan_detector.py` present & wired; `base_broker.py` is abstract interface only — 3-tier SL ladder (CO/BO → SL-M retry → flatten) not at the named location |
+| PHASE8-009 | 🔲 OPEN | `infra/terraform/modules/dynamodb/signal_processing.tf` absent |
+| PHASE8-010 | ◐ PARTIAL | `tests/unit/test_phase8_hardening.py` present (888 lines); `tests/integration/test_kill_switch_fanout.py` absent |
+
+### HIGH items — verified status
+
+| ID | Verdict | Evidence |
+|----|---------|----------|
+| HIGH-001 | 🔲 OPEN | `_signal_locks: dict` init execution_engine/service.py:155; `setdefault(signal_id, asyncio.Lock())` :778; no cleanup anywhere → leak confirmed |
+| HIGH-002 | 🔲 OPEN | strategy_engine/service.py:705 `_is_kill_switch_active()` does direct `get_item` with `Key=kill_switch_resource_key()` :721 — not `KillSwitchCache` |
+| HIGH-003 | ✅ FIXED | sector_validator.py:79 `if sector == "UNKNOWN":` → :84/:95 `risk_data_unavailable_result(...)` (fail-closed); same in liquidity:98, spread_gate:96 (and position/margin/exposure/slippage/loss). Doc "silently disables" wording is stale. |
+| HIGH-004 | 🔲 OPEN | MIS import only at execution_engine/service.py:322; no MIS watchdog coroutine |
+| HIGH-005 | 🔲 OPEN (LOW) | `_OrderPlacementLimiter` uses `datetime.utcnow().date()` zerodha_broker.py:102 & :129 |
+
+### Other carried items
+
+- **DIAG-LOGS** ✅ DONE — `candle_stream.candles_fetched` at `logger.debug` (candle_stream.py:517); `diag_fetch` removed.
+- **US-CONFIG** 🔲 OPEN — `us_momentum_v1` not seeded in `scripts/setup_local_tables.py`.
+- **ALPACA-FIX** 🔲 OPEN — multiple `.value` calls in alpaca_broker.py (204/287/289/543/609/639); enum-handling investigation pending.
+- **NAV-INFLATE** 🔲 UNCONFIRMED — not re-verified in this audit.
+
+**Net:** the tracker materially lagged the code. Phase 8 is ~half built; the only HIGH item that
+was already fixed-but-still-listed-open is HIGH-003. None of this changes the live-readiness verdict.
+
+---
+
+## Live-Readiness Audit — Fixed Items (2026-05-30, ADR-022)
+
+> Code + infrastructure fixes applied in this session. Terraform changes require `terraform apply`
+> + ASG instance refresh before they take effect on running EC2 instances.
+
+| ID | Description | Fix Applied | Requires |
+|----|-------------|-------------|---------|
+| ~~C-001~~ | `symbol-status-index` GSI missing from orders table — every live position check failed | ✅ GSI added to `dynamodb/main.tf` | `terraform apply` + GSI backfill (5-20 min online) |
+| ~~C-002~~ | `RISK_MAX_SIGNAL_AGE_SECONDS`, `RISK_PROFILE`, `UNIVERSE_MODE` missing from EC2 env files | ✅ Added to `risk_engine.sh`, `execution_engine.sh`, `strategy_engine.sh` | ASG instance refresh |
+| ~~C-003~~ | Per-symbol fill race in `DailyLossValidator._apply_fill_to_daily_symbol_pnl()` | ✅ `asyncio.Lock()` per symbol in `record_fill()` | Deploy |
+| ~~INFRA-3~~ | `deploy.yml` referenced `check_asg_health.py` but only `check_ecs_health.py` existed | ✅ `check_asg_health.py` created with ASG API | None — file now exists |
+| ~~C-005/6/9~~ | MarginValidator, SlippageValidator, SectorConcentrationValidator docstrings wrong about live fail-open | ✅ Docstrings corrected | Deploy |
+| ~~HIGH-001~~ | `_signal_locks` dict in execution_engine never cleaned up — memory leak on long sessions | ✅ `self._signal_locks.pop(signal_id, None)` before every return in `async with signal_lock:` block | Deploy |
+| ~~B-001~~ | Candle signal Kafka publish failure silently dropped — no retry, no metric, no alert | ✅ Return value checked; CRITICAL log + `CandleSignalPublishFailed` CloudWatch metric on failure | Deploy |
+| ~~B-002~~ | `asyncio.gather(return_exceptions=True)` in strategy_engine swallowed crashed loops | ✅ Results inspected; crashed loop re-raised with CRITICAL log | Deploy |
+| ~~B-003~~ | `get_dynamodb_resource()` recreated on every 1s kill switch cache miss in strategy_engine | ✅ `_ks_dynamo_table` cached in `start()`, reused in `_is_kill_switch_active()` | Deploy |
+| ~~ADR-021-P1~~ | `RISK_DATA_FEED_STALE_SECONDS=3600` workaround — unified staleness monitor masked consumer rebalancing | ✅ Split into `_monitor_consumer_lag()` (300s) + `_monitor_producer_heartbeat()` (60s, DynamoDB); data_ingestion writes heartbeat every 10s | Deploy + remove 3600 workaround from `.env` |
+
+---
+
+## ✅ Terraform Blockers — Fixed (2026-05-30)
+
+| ID | Severity | Description | Status |
+|----|----------|-------------|--------|
+| ~~**INFRA-1**~~ | ~~CRITICAL~~ | `prod/main.tf:58`: `single_nat_gateway = false` → `ha_nat = true` | ✅ Fixed — `ha_nat = true` at `prod/main.tf:58` |
+| ~~**INFRA-2**~~ | ~~CRITICAL~~ | `sessions` DynamoDB table absent | ✅ Fixed — `aws_dynamodb_table.sessions` added to `dynamodb/main.tf`; outputs (`sessions_table_name`, `sessions_table_arn`) added to `outputs.tf`; added to `all_table_arns` |
+| ~~**INFRA-3**~~ | ~~HIGH~~ | `deploy.yml` referenced `check_asg_health.py` which didn't exist | ✅ Fixed — `scripts/deploy/check_asg_health.py` created with ASG API |
+
+**`terraform plan` / `terraform apply` is now unblocked.** Expected plan changes:
+- `aws_dynamodb_table.orders`: update — add `symbol-status-index` GSI (online, no downtime, 5-20 min backfill)
+- `aws_dynamodb_table.sessions`: create — new table
+- `module.vpc.aws_nat_gateway.*`: may recreate — verify VPC connectivity during apply
+
+---
+
+## ✅ Pre-Live Code Fixes — Completed (2026-05-30)
+
+| ID | Severity | Description | Status |
+|----|----------|-------------|--------|
+| ~~**HIGH-004**~~ | MEDIUM | MIS square-off task crash during 15:05-15:15 IST window | ✅ Fixed — `try/except` (re-raises `CancelledError`, catches all others) wraps `await self._execute_mis_square_off()` in `run()`. On unhandled exception: logs CRITICAL + fires SNS alert. Does NOT re-raise — service stays alive; Zerodha 15:15 auto-square is the backstop. [`mis_square_off.py`](services/execution_engine/mis_square_off.py) |
+| ~~**ACTION**~~ | — | Remove `RISK_DATA_FEED_STALE_SECONDS=3600` from `.env` | ✅ Done — removed from `.env`; replaced with explanatory comment. ADR-021 Phase 1 split (consumer lag 300s + producer heartbeat 60s) makes the workaround obsolete. |
+| **ADR-021-P2** | MEDIUM | `risk_limits_production.yaml` not wired — `for_profile()` hardcoded defaults used | 🔲 Acceptable for Stage-1 (per pre-live runbook §1.4). `tiny-live` hardcoded defaults ARE Stage-1 limits (₹5k max order, 1 concurrent position). Wire the YAML before Phase C scaling (₹25L+). |
+
+---
+
+## [RESUME 2026-06-02+] Host-side runtime verification — PARKED
+
+> Standing constraints still in force: no live trading · no capital-limit changes · no deploy ·
+> no broker orders · no DynamoDB mutation outside of Terraform apply. Stage-1 one-share validation
+> and **₹1,000,000 capital remain BLOCKED** until every runtime check PASSes on the real host.
+
+**Pre-conditions before running runtime check:**
+1. INFRA-1 and INFRA-2 Terraform edits applied + `terraform apply` completed
+2. ASG instance refresh completed for risk_engine, execution_engine, strategy_engine
+3. Morning Zerodha token refresh completed (`python scripts/zerodha_login.py`)
+
+**Runtime check command (from project root on trading host):**
+```bash
+PYTHONPATH=services python3 scripts/read_only_live_readiness_runtime_check.py --json
+```
+
+**Operator must confirm (record results in `docs/live-readiness/runtime-state-verification-report.md`):**
+- [ ] Zerodha token present **and fresh** (`expires_at` in future; refreshed same day via `scripts/zerodha_login.py`)
+- [ ] Kill switch **INACTIVE** (`PK=KILLSWITCH, SK=GLOBAL, active=false`)
+- [ ] `reconciliation_required` **False** (or a clean reconcile has been run)
+- [ ] Every **enabled** strategy has `paper_trade=true` (no accidental live strategy)
+- [ ] `QE_EXECUTION_LIVE_TRADING_ENABLED` absent/false; `RISK_PROFILE=paper`; `UNIVERSE_MODE=PAPER_SAFE_START`
+- [ ] **Paper vs live table names confirmed distinct** (script prints resolved names)
+- [ ] `sessions` table reachable and contains today's Zerodha token
+
+**Full pre-live gate checklist:** `docs/live-readiness/pre-live-runbook.md §4`
+
+Until every box is checked from a real host run: **NO GO.**

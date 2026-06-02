@@ -40,6 +40,17 @@ _SERVICES_DIR = os.path.join(_PROJECT_ROOT, "services")
 if _SERVICES_DIR not in sys.path:
     sys.path.insert(0, _SERVICES_DIR)
 
+# Load .env before get_settings() so ZERODHA_API_KEY, ZERODHA_API_SECRET,
+# ZERODHA_ACCESS_TOKEN, and DYNAMODB_TABLE_PREFIX are in os.environ when
+# settings validators run (same fix as kill_switch_cli.py FIX-4).
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(_PROJECT_ROOT, ".env")
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path, override=True)
+except ImportError:
+    pass  # dotenv not installed — fall through to raw env vars
+
 from shared.config.settings import get_settings
 from shared.logging.logger import get_logger
 
@@ -48,7 +59,7 @@ logger = get_logger(__name__, service_name="cli")
 _SEPARATOR = "=" * 60
 
 
-def _build_token_manager() -> "ZerodhaTokenManager":
+def _build_token_manager() -> object:
     """Instantiate a ZerodhaTokenManager with live AWS clients."""
     import boto3
     from execution_engine.auth.zerodha_auth import ZerodhaTokenManager
@@ -57,8 +68,14 @@ def _build_token_manager() -> "ZerodhaTokenManager":
     region = settings.aws.region
     table = settings.aws.dynamodb_table_sessions
 
-    dynamo = boto3.client("dynamodb", region_name=region)
-    secrets = boto3.client("secretsmanager", region_name=region)
+    # Respect AWS_ENDPOINT_URL so the CLI works against LocalStack in local dev.
+    endpoint_url = os.environ.get("AWS_ENDPOINT_URL") or os.environ.get("LOCALSTACK_ENDPOINT_URL")
+    client_kwargs: dict = {"region_name": region}
+    if endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+
+    dynamo = boto3.client("dynamodb", **client_kwargs)
+    secrets = boto3.client("secretsmanager", **client_kwargs)
 
     return ZerodhaTokenManager(
         dynamo_client=dynamo,

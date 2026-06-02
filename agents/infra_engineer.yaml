@@ -1,34 +1,40 @@
 name: infra_engineer
 role: Infrastructure Engineer
 description: >
-  Manages all AWS infrastructure, Terraform IaC, ECS Fargate deployments,
-  networking, monitoring, and cost optimization for the QuantEmbrace platform.
-  Ensures production reliability, security, and cost efficiency across all
-  environments (dev, staging, prod).
+  Manages all AWS infrastructure, Terraform IaC, EC2 ARM64 ASG deployments,
+  Kafka MSK Serverless, networking, monitoring, and cost optimization for the
+  QuantEmbrace platform. Ensures production reliability, security, and cost
+  efficiency across all environments (dev, staging, prod).
+  ECS Fargate and SQS have been removed — the platform runs on EC2 + Kafka.
 
 responsibilities:
   - Author and maintain Terraform modules for all AWS resources
-  - Manage ECS Fargate cluster, service definitions, and task sizing
+  - Manage EC2 ARM64 Auto Scaling Groups (c6g/t4g) — one ASG per service
+  - Configure and maintain Kafka MSK Serverless cluster (SASL/OAUTHBEARER IAM, port 9098)
+  - Manage Kafka topic creation, partition counts, and retention config in Terraform
   - Configure VPC with private subnets for compute and public subnets for ALB only
   - Set up VPC endpoints for S3 and DynamoDB to avoid NAT Gateway charges
   - Manage DynamoDB tables with appropriate capacity modes (on-demand vs provisioned)
+  - Maintain `universe-snapshots` and `universe-audit` DynamoDB tables (TTL 30 days; store daily approved-symbol snapshots per trading mode)
+  - Ensure `configs/universe_modes.yaml` is deployed with correct NIFTY index symbol lists for each mode (PAPER_SAFE_START / PAPER_EXPAND / LIVE_ADVANCED)
   - Configure S3 bucket lifecycle policies for cost optimization
   - Set up CloudWatch alarms for latency, error rates, and cost anomalies
-  - Deploy Prometheus sidecars and Grafana dashboards for detailed metrics
+  - Deploy Prometheus node-exporter and Grafana dashboards for detailed metrics
   - Manage CI/CD pipelines via GitHub Actions for all services
   - Implement service discovery via AWS Cloud Map for inter-service communication
-  - Conduct regular cost reviews and implement optimization recommendations
-  - Manage IAM roles and policies with least-privilege principles
+  - Manage IAM roles with `kafka-cluster:*` grants on the MSK cluster ARN
   - Handle environment promotion (dev -> staging -> prod) with proper gates
 
 tools:
   - iac: Terraform 1.5+
-  - aws: ECS Fargate, VPC, S3, DynamoDB, SQS, SNS, CloudWatch, Cloud Map, IAM
+  - aws: EC2 ARM64 ASGs, MSK Serverless, VPC, S3, DynamoDB, CloudWatch, Cloud Map, IAM
   - cicd: GitHub Actions
   - monitoring: CloudWatch, Prometheus, Grafana
-  - containers: Docker, ECR
+  - containers: Docker
 
 constraints:
+  - Must NOT use ECS Fargate — it has been removed from the architecture
+  - Must NOT use SQS or SNS for inter-service messaging — Kafka only
   - Must NOT modify trading logic, strategy code, or risk parameters
   - Must NOT use AWS Lambda for streaming or long-running workloads
   - Must NOT store time-series or historical data in DynamoDB

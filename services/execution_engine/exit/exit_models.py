@@ -36,32 +36,56 @@ class ExitTriggerType(str, Enum):
     TAKE_PROFIT = "TAKE_PROFIT"
     MIS_CLOSE = "MIS_CLOSE"
     KILL_SWITCH = "KILL_SWITCH"
-    TRAILING = "TRAILING"  # Phase 3 — reserved, not yet implemented
+    TRAILING = "TRAILING"
+    BREAKEVEN = "BREAKEVEN"          # stop pulled to entry after breakeven trigger
+    PARTIAL_PROFIT = "PARTIAL_PROFIT"  # partial booking at profit trigger (rule E)
+    FINAL_TARGET = "FINAL_TARGET"    # full exit at final target (rule H)
+    TIME_EXIT = "TIME_EXIT"          # time-based exit of still-open position (rule I)
 
 
 class PositionExitState(str, Enum):
     """
     Managed lifecycle state of an open position.
 
-    Transitions:
+    Intraday-managed path (TradeExitEngine):
         OPEN → EXIT_POLICY_ATTACHED → INITIAL_SL_ACTIVE
-             → BREAKEVEN_LOCKED (Phase 3)
-             → PARTIAL_PROFIT_BOOKED (Phase 3)
-             → TRAILING_ACTIVE (Phase 3)
+             → BREAKEVEN_LOCKED
+             → TARGET_1_HIT → TARGET_2_HIT
+             → PARTIAL_PROFIT_BOOKED
+             → TRAILING_ACTIVE
              → STOP_LOSS_HIT | FINAL_TARGET_HIT | TIME_EXIT_PENDING
-             → CLOSED
-             → RECONCILED
+             → CLOSED → RECONCILED
+
+    EOD square-off path (MISSquareOffManager), after TEE has had its chance:
+        ... → MIS_SQUAREOFF_PENDING
+            → MIS_SQUAREOFF_ORDER_PLACED → BROKER_CONFIRMED_FLAT → CLOSED
+            → MIS_SQUAREOFF_ORDER_REJECTED → (retry once) → PARTIALLY_SQUARED
+            → FAILED_STILL_OPEN → ZERODHA_AUTO_SQUAREOFF_PENDING (last-resort fallback)
+
+    States are stored as plain strings on the positions row; this enum is the
+    canonical vocabulary. New members are additive — never renumber/rename.
     """
 
     OPEN = "OPEN"
     EXIT_POLICY_ATTACHED = "EXIT_POLICY_ATTACHED"
     INITIAL_SL_ACTIVE = "INITIAL_SL_ACTIVE"
-    BREAKEVEN_LOCKED = "BREAKEVEN_LOCKED"          # Phase 3
-    PARTIAL_PROFIT_BOOKED = "PARTIAL_PROFIT_BOOKED"  # Phase 3
-    TRAILING_ACTIVE = "TRAILING_ACTIVE"             # Phase 3
+    BREAKEVEN_LOCKED = "BREAKEVEN_LOCKED"
+    TARGET_1_HIT = "TARGET_1_HIT"
+    TARGET_2_HIT = "TARGET_2_HIT"
+    PARTIAL_PROFIT_BOOKED = "PARTIAL_PROFIT_BOOKED"
+    TRAILING_ACTIVE = "TRAILING_ACTIVE"
     FINAL_TARGET_HIT = "FINAL_TARGET_HIT"
     STOP_LOSS_HIT = "STOP_LOSS_HIT"
     TIME_EXIT_PENDING = "TIME_EXIT_PENDING"
+    # ── EOD square-off lifecycle ──
+    MIS_SQUAREOFF_PENDING = "MIS_SQUAREOFF_PENDING"
+    MIS_SQUAREOFF_ORDER_PLACED = "MIS_SQUAREOFF_ORDER_PLACED"
+    MIS_SQUAREOFF_ORDER_REJECTED = "MIS_SQUAREOFF_ORDER_REJECTED"
+    PARTIALLY_SQUARED = "PARTIALLY_SQUARED"
+    BROKER_CONFIRMED_FLAT = "BROKER_CONFIRMED_FLAT"
+    FAILED_STILL_OPEN = "FAILED_STILL_OPEN"
+    ZERODHA_AUTO_SQUAREOFF_PENDING = "ZERODHA_AUTO_SQUAREOFF_PENDING"
+    # ── terminal ──
     CLOSED = "CLOSED"
     RECONCILED = "RECONCILED"
 
@@ -93,8 +117,12 @@ class TradeExitPolicy(BaseModel):
     target_1: Optional[float] = None
     target_2: Optional[float] = None
     final_target: Optional[float] = None
-    breakeven_trigger: Optional[float] = None   # Phase 3
-    profit_lock_trigger: Optional[float] = None  # Phase 3
+    breakeven_trigger: Optional[float] = None   # favourable price → move stop to entry
+    profit_lock_trigger: Optional[float] = None  # favourable price → first profit-lock rung
+
+    # Tier + volatility context (resolved from configs/exit_policy.yaml at attach time).
+    tier: Optional[str] = None              # default | blue_chip | mid_cap | small_cap
+    atr_at_entry: Optional[float] = None    # ATR snapshot; enables ATR-based stops when present
 
     attached_at: datetime = Field(default_factory=_utc_now)
     version: int = 1

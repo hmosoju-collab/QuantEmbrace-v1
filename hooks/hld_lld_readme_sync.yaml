@@ -1,0 +1,92 @@
+# Hook: HLD / LLD / README Sync
+# ================================
+# Whenever code or architecture changes, the three primary documentation
+# files must be kept in sync.
+
+name: hld_lld_readme_sync
+type: post_edit
+priority: 3
+
+description: |
+  Any change to services, configs, infra, or scripts that affects system
+  behaviour, APIs, schemas, or architecture must be reflected in:
+    • docs/hld.md    — component diagrams, signal flow, tech stack, cost model
+    • docs/lld.md    — class hierarchy, DynamoDB schemas, env vars, state machines
+    • docs/README.md — setup steps, service list, env var reference
+
+  Enforcement: scripts/hooks/doc_update_reminder.sh fires as a Claude Code
+  PostToolUse hook after every Edit/Write on trigger paths. It checks
+  `git diff --name-only HEAD` and outputs a reminder if any of the three
+  docs have not been updated in the current working tree.
+
+trigger:
+  event: file_edit_or_write
+  paths:
+    - services/**
+    - configs/**
+    - infra/terraform/**
+    - scripts/**
+
+required_doc_updates:
+  - trigger_path: "services/**"
+    required_docs:
+      - docs/hld.md      # component interaction, signal flow, layer diagram
+      - docs/lld.md      # class hierarchy, Kafka schemas, DynamoDB schemas, env vars
+      - docs/README.md   # setup steps, service list
+
+  - trigger_path: "configs/**"
+    required_docs:
+      - docs/hld.md      # trading modes, risk limits, promotion gates
+      - docs/lld.md      # env vars, risk limits YAML reference
+      - docs/README.md   # env var reference
+
+  - trigger_path: "infra/terraform/**"
+    required_docs:
+      - docs/hld.md      # AWS deployment architecture, ASG sizing, cost model
+      - docs/README.md   # AWS setup instructions
+
+  - trigger_path: "scripts/**"
+    required_docs:
+      - docs/README.md   # operational commands section
+
+what_to_update:
+  docs/hld.md:
+    - Section 3 (Six-Layer Architecture) — if a new layer or service is added
+    - Section 4 (Component Interaction) — if signal flow or routing changes
+    - Section 5 (Signal Flow) — if the tick-to-fill lifecycle changes
+    - Section 6 (Tech Stack) — if a technology is added/removed/replaced
+    - Section 7 (AWS Deployment) — if instance types, ASG config, or VPC changes
+    - Section 9 (Messaging) — if Kafka topics or consumer groups change
+    - Section 12 (Cost Model) — if instance mix or service count changes
+
+  docs/lld.md:
+    - Section 1.x (Service Class Hierarchy) — if a new class or component is added
+    - Section 2 (Kafka Message Schemas) — if schema version or fields change
+    - Section 3 (DynamoDB Schemas) — if a table is added, removed, or modified
+    - Section 7 (Configuration) — if an env var is added, renamed, or removed
+    - Section 9 (Internal API Contracts) — if a dataclass or Protocol changes
+
+  docs/README.md:
+    - Service list — if a service is added or removed
+    - Env var reference — if a new env var is required to run the system
+    - Setup steps — if the local or production setup sequence changes
+    - Operational commands — if a CLI script or command changes
+
+exempt_paths:
+  - docs/
+  - CLAUDE.md
+  - README.md
+  - memory/
+  - .claude/
+  - hooks/
+  - .github/
+  - tests/
+  - architecture/
+  - governance/
+
+enforcement:
+  mechanism: Claude Code PostToolUse hook (scripts/hooks/doc_update_reminder.sh)
+  blocking: false   # reminder only — Claude sees the output and decides what to update
+  blocking_rationale: |
+    Blocking would prevent hotfixes. The hook outputs a structured reminder that
+    Claude reads and acts on. Human review before merge is the final gate.

@@ -1,0 +1,121 @@
+name: live_trading_gate
+type: always
+priority: 1
+mandatory: true
+
+description: |
+  QE_EXECUTION_LIVE_TRADING_ENABLED must be absent or false for ALL paper sessions.
+  Setting this flag to true requires explicit operator sign-off via the live-mode
+  gate checklist. This is a HARD BLOCK — it is never auto-set by Claude, CI, or
+  any automated process.
+
+  The current primary mode is paper trading. Live trading requires:
+    1. Completion of docs/operations/live-mode-gate-checklist.md (all items)
+    2. Manual operator approval (a human, not Claude)
+    3. Passing all promotion gates via evaluate_promotion_gate.py
+    4. PAPER_SAFE_START → PAPER_EXPAND → LIVE_ADVANCED progression (no skipping)
+    5. Minimum 5 paper sessions at PAPER_SAFE_START before PAPER_EXPAND
+    6. Minimum 10 paper sessions at PAPER_EXPAND before LIVE_ADVANCED
+
+  Related safety gates (all must hold for paper sessions):
+    - paper_trade=True on all DynamoDB strategy-config entries
+    - RISK_PROFILE=paper
+    - UNIVERSE_MODE=PAPER_SAFE_START (or PAPER_EXPAND after gate pass)
+    - PAPER_SEED_NAV=1000000
+    - Real Zerodha credentials MUST NOT be active (HARD BLOCK)
+
+  Enforcement: scripts/hooks/live_trading_gate.sh (PreToolUse, blocks Write/Edit)
+
+trigger:
+  event: always
+  paths:
+    - "docker-compose*.yml"
+    - "docker-compose*.yaml"
+    - ".env"
+    - ".env.*"
+    - "*.env"
+    - "configs/**"
+
+checks:
+  - id: live_trading_enabled_false
+    description: |
+      QE_EXECUTION_LIVE_TRADING_ENABLED must never be set to true without
+      explicit operator sign-off. This flag is the primary live trading gate
+      in execution_engine.
+    detect_violation:
+      patterns:
+        - 'QE_EXECUTION_LIVE_TRADING_ENABLED=true'
+        - 'QE_EXECUTION_LIVE_TRADING_ENABLED="true"'
+        - 'QE_EXECUTION_LIVE_TRADING_ENABLED: true'
+        - 'QE_EXECUTION_LIVE_TRADING_ENABLED: "true"'
+        - "QE_EXECUTION_LIVE_TRADING_ENABLED: 'true'"
+      note: "Case-insensitive match on the value (true/True/TRUE all blocked)"
+    correct_pattern: |
+      # In docker-compose.yml:
+      environment:
+        QE_EXECUTION_LIVE_TRADING_ENABLED: "false"  # Default — paper mode
+        # Or simply omit it — absence defaults to false in execution_engine
+
+      # In .env:
+      # QE_EXECUTION_LIVE_TRADING_ENABLED=false
+      # Or omit entirely
+
+  - id: paper_safety_vars_present
+    description: |
+      For paper sessions, these variables must be present and correct in
+      execution_engine environment. Absence of safety vars is a misconfiguration.
+    required_for_paper:
+      RISK_PROFILE: "paper"
+      UNIVERSE_MODE: "PAPER_SAFE_START"  # or PAPER_EXPAND after gate
+      PAPER_SEED_NAV: "1000000"
+      QE_EXECUTION_LIVE_TRADING_ENABLED: "false"  # or absent
+
+  - id: promotion_gate_required_for_live
+    description: |
+      Before any live trading session, the operator must run and pass:
+        python scripts/evaluate_promotion_gate.py \
+          --gate PAPER_EXPAND_TO_LIVE \
+          --metrics /tmp/metrics.json
+      The gate output must show all criteria as PASSED. A failing or missing
+      gate report blocks live mode activation.
+
+  - id: no_auto_promotion
+    description: |
+      No automated process (CI, Claude, scripts) may set
+      QE_EXECUTION_LIVE_TRADING_ENABLED=true. Promotion is always a manual
+      operator decision. Scripts may EVALUATE gates but never ACT on them.
+    detect_violation: |
+      # VIOLATION: automated gate promotion
+      if gate_result.all_passed:
+          os.environ["QE_EXECUTION_LIVE_TRADING_ENABLED"] = "true"  # NEVER
+          update_docker_compose(live_trading_enabled=True)  # NEVER
+
+promotion_sequence:
+  - stage: PAPER_SAFE_START
+    universe: "NIFTY 50 (~50 symbols)"
+    min_sessions: 5
+    gate_script: "python scripts/evaluate_promotion_gate.py --gate PAPER_SAFE_START_TO_EXPAND"
+    next_stage: PAPER_EXPAND
+
+  - stage: PAPER_EXPAND
+    universe: "NIFTY 100 + F&O (~100-150 symbols)"
+    min_sessions: 10
+    gate_script: "python scripts/evaluate_promotion_gate.py --gate PAPER_EXPAND_TO_LIVE"
+    next_stage: LIVE_ADVANCED
+
+  - stage: LIVE_ADVANCED
+    universe: "NIFTY 200/500 screened (~200 symbols)"
+    requires: "Full checklist + explicit operator sign-off + capital allocation approval"
+    on_missing_data: "FAIL CLOSED — no fallback allowed in live mode"
+
+on_violation:
+  - action: block_write
+    enforced_by: "scripts/hooks/live_trading_gate.sh"
+  - action: block_merge
+  - action: critical_alert
+    message: |
+      HARD BLOCK: live_trading_gate rule triggered.
+      QE_EXECUTION_LIVE_TRADING_ENABLED=true requires explicit operator sign-off.
+      See: docs/operations/live-mode-gate-checklist.md
+      Current mode: PAPER (capital protection > trade count > profit).
+      DO NOT enable live trading without completing all gate checklist items.

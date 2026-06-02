@@ -280,6 +280,104 @@ class InstrumentLoader:
                 return instrument
         return None
 
+    def filter_to_snapshot(self, snapshot: object) -> list["Instrument"]:
+        """Return only instruments whose symbols are approved in the universe snapshot.
+
+        Use this after load() to restrict strategy registrations and tick subscriptions
+        to the symbols approved for the current trading mode and date.
+
+        Args:
+            snapshot: A UniverseSnapshot from shared.universe (checked via duck-typing to
+                      avoid a circular import between strategy_engine and shared.universe).
+
+        Returns:
+            List of Instrument objects from all markets that are in snapshot.approved_symbols.
+            Logs a warning for each active instrument excluded by the snapshot.
+
+        Raises:
+            RuntimeError: If load() has not been called yet.
+        """
+        if not self._loaded:
+            raise RuntimeError("Call load() first.")
+
+        # Duck-type check: accept any object with .contains(symbol) or .approved_symbols
+        approved_symbols: frozenset[str]
+        if hasattr(snapshot, "approved_symbols"):
+            approved_symbols = snapshot.approved_symbols
+        elif hasattr(snapshot, "contains"):
+            # Fallback for objects that implement contains() instead
+            all_symbols: set[str] = set()
+            for market_instrs in self._instruments.values():
+                for inst in market_instrs:
+                    all_symbols.add(inst.symbol)
+            approved_symbols = frozenset(s for s in all_symbols if snapshot.contains(s))
+        else:
+            logger.warning(
+                "instrument_loader.filter_to_snapshot: snapshot has no approved_symbols "
+                "or contains() — returning all loaded instruments unchanged"
+            )
+            return [i for instrs in self._instruments.values() for i in instrs]
+
+        result: list[Instrument] = []
+        for market_instrs in self._instruments.values():
+            for inst in market_instrs:
+                if inst.symbol in approved_symbols:
+                    result.append(inst)
+                else:
+                    logger.info(
+                        "instrument_loader.excluded_by_snapshot %s:%s — "
+                        "not in universe snapshot (mode=%s date=%s)",
+                        inst.market, inst.symbol,
+                        getattr(snapshot, "mode", "?"),
+                        getattr(snapshot, "trading_date", "?"),
+                    )
+
+        logger.info(
+            "instrument_loader.snapshot_filter_applied "
+            "before=%d after=%d excluded=%d",
+            sum(len(v) for v in self._instruments.values()),
+            len(result),
+            sum(len(v) for v in self._instruments.values()) - len(result),
+        )
+        return sorted(result, key=lambda i: (i.market, i.symbol))
+
+    def sync_nse_from_universe(self, symbols: "frozenset[str]") -> None:
+        """Replace the NSE instrument list with symbols from the live universe.
+
+        Preserves sector/name/lot_size metadata for symbols already in
+        instruments.yaml. New symbols get sector=Unknown, lot_size=1.
+        Must be called after load().
+        """
+        if not self._loaded:
+            raise RuntimeError("Call load() first.")
+
+        yaml_by_symbol: dict[str, Instrument] = {
+            inst.symbol: inst for inst in self._instruments.get("NSE", [])
+        }
+        default_params = StrategyParams()
+        new_nse: list[Instrument] = []
+
+        for symbol in sorted(symbols):
+            if symbol in yaml_by_symbol:
+                new_nse.append(yaml_by_symbol[symbol])
+            else:
+                new_nse.append(Instrument(
+                    symbol=symbol,
+                    name=symbol,
+                    market="NSE",
+                    sector="Unknown",
+                    lot_size=1,
+                    active=True,
+                    strategy_params=default_params,
+                ))
+
+        matched = sum(1 for s in symbols if s in yaml_by_symbol)
+        self._instruments["NSE"] = new_nse
+        logger.info(
+            "instrument_loader.synced_from_universe nse=%d yaml_matched=%d new=%d",
+            len(new_nse), matched, len(new_nse) - matched,
+        )
+
     def summary(self) -> str:
         """Return a human-readable summary of the loaded universe."""
         if not self._loaded:

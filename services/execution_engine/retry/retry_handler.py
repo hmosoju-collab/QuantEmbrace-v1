@@ -14,6 +14,7 @@ import time
 from enum import Enum
 from typing import Any, Callable, Coroutine, Optional, TypeVar
 
+from execution_engine.brokers.base_broker import NonRetryableBrokerError
 from shared.logging.logger import get_logger
 
 logger = get_logger(__name__, service_name="execution_engine")
@@ -128,6 +129,20 @@ class RetryHandler:
                 await self._record_success()
                 return result
 
+            except NonRetryableBrokerError as exc:
+                # Permanent failure — bad symbol, insufficient funds, account
+                # restricted, etc. Do NOT retry, do NOT trip the circuit breaker.
+                # The error is in the order parameters, not the infrastructure.
+                logger.error(
+                    "Non-retryable broker error for %s [%s] (attempt %d): %s — "
+                    "aborting immediately without retry",
+                    func.__name__,
+                    self._broker_name,
+                    attempt,
+                    str(exc),
+                )
+                raise
+
             except self._retryable_exceptions as exc:
                 last_exception = exc
                 await self._record_failure()
@@ -165,6 +180,16 @@ class RetryHandler:
         # Should not reach here, but satisfy type checker
         raise last_exception  # type: ignore[misc]
 
+    async def execute_with_retry(
+        self,
+        func: Callable[..., Coroutine[Any, Any, T]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> T:
+        """Compatibility alias used by the execution service hot path."""
+        kwargs.pop("operation_name", None)
+        return await self.execute(func, *args, **kwargs)
+
     async def reset(self) -> None:
         """Manually reset the circuit breaker to closed state."""
         async with self._lock:
@@ -192,8 +217,7 @@ class RetryHandler:
             if elapsed >= self._cooldown_seconds:
                 self._state = CircuitState.HALF_OPEN
                 logger.info(
-                    "Circuit breaker for %s transitioning to HALF_OPEN — "
-                    "allowing probe request",
+                    "Circuit breaker for %s transitioning to HALF_OPEN — " "allowing probe request",
                     self._broker_name,
                 )
                 return

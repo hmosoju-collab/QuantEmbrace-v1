@@ -57,12 +57,14 @@ def _install_shared_stubs() -> None:
     shared_config_settings = _make_pkg("shared.config.settings")
     shared_logging = _make_pkg("shared.logging")
     shared_logging_logger = _make_pkg("shared.logging.logger")
+    shared_risk_state = _make_pkg("shared.risk_state")
     shared_utils = _make_pkg("shared.utils")
     shared_utils_helpers = _make_pkg("shared.utils.helpers")
 
     # AppSettings stub
     class _AWSConfig:
         dynamodb_table_orders = "quantembrace-dev-orders"
+        dynamodb_table_risk_state = "quantembrace-dev-risk-state"
         sns_kill_switch_topic_arn = "arn:aws:sns:us-east-1:123456789:qs-kill-switch"
         region = "us-east-1"
 
@@ -82,6 +84,31 @@ def _install_shared_stubs() -> None:
         return logging.getLogger(name)
 
     shared_logging_logger.get_logger = get_logger
+    shared_logging_logger.set_correlation_id = lambda *_, **__: None
+
+    def _s(value):
+        return {"S": str(value)}
+
+    def _b(value):
+        return {"BOOL": bool(value)}
+
+    shared_risk_state.kill_switch_key = lambda: {
+        "PK": _s("KILLSWITCH"),
+        "SK": _s("GLOBAL"),
+    }
+    shared_risk_state.kill_switch_item = lambda **kw: {
+        "PK": _s("KILLSWITCH"),
+        "SK": _s("GLOBAL"),
+        "active": _b(kw["active"]),
+        "status": _s("ACTIVE" if kw["active"] else "INACTIVE"),
+        "scope": _s("GLOBAL"),
+        "reason": _s(kw["reason"]),
+        "activated_by": _s(kw["activated_by"]),
+        "updated_at": _s(kw["updated_at"]),
+        **({"activated_at": _s(kw.get("activated_at") or kw["updated_at"])} if kw["active"] else {}),
+    }
+    shared_risk_state.attr_bool = lambda item, name, default=False: item.get(name, {}).get("BOOL", default)
+    shared_risk_state.attr_string = lambda item, name, default="": item.get(name, {}).get("S", default)
 
     # helpers stubs
     _utc_now_value = datetime(2025, 10, 1, 9, 0, 0, tzinfo=timezone.utc)
@@ -98,17 +125,47 @@ def _install_shared_stubs() -> None:
     # Link packages
     shared.config = shared_config
     shared.logging = shared_logging
+    shared.risk_state = shared_risk_state
     shared.utils = shared_utils
     shared_config.settings = shared_config_settings
     shared_logging.logger = shared_logging_logger
     shared_utils.helpers = shared_utils_helpers
 
 
-_install_shared_stubs()
+# ---------------------------------------------------------------------------
+# Module-level placeholders — NO side-effects at import/collection time
+# ---------------------------------------------------------------------------
+_MODULES_SNAPSHOT: dict[str, object] = {}
+KillSwitch = None
+KillSwitchMonitor = None
 
-# Now we can import the real modules
-from risk_engine.killswitch.killswitch import KillSwitch  # noqa: E402
-from risk_engine.killswitch.auto_triggers import KillSwitchMonitor  # noqa: E402
+
+def setUpModule() -> None:  # noqa: N802
+    """Called by pytest/unittest AFTER collection, BEFORE running tests."""
+    global _MODULES_SNAPSHOT, KillSwitch, KillSwitchMonitor
+
+    _MODULES_SNAPSHOT = dict(sys.modules)
+    for key in (
+        "risk_engine.killswitch.killswitch",
+        "risk_engine.killswitch.auto_triggers",
+    ):
+        sys.modules.pop(key, None)
+
+    _install_shared_stubs()
+
+    from risk_engine.killswitch.killswitch import KillSwitch as _KS  # noqa: E402
+    from risk_engine.killswitch.auto_triggers import KillSwitchMonitor as _KSM  # noqa: E402
+    KillSwitch = _KS
+    KillSwitchMonitor = _KSM
+
+
+def tearDownModule() -> None:  # noqa: N802
+    """Remove every sys.modules key added during setUpModule."""
+    added = frozenset(sys.modules.keys()) - frozenset(_MODULES_SNAPSHOT.keys())
+    for key in added:
+        sys.modules.pop(key, None)
+    for key, module in _MODULES_SNAPSHOT.items():
+        sys.modules[key] = module
 
 
 # ---------------------------------------------------------------------------

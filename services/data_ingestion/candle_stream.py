@@ -406,7 +406,7 @@ class IntradayCandleStream:
                     logger.critical(
                         "candle_stream.extended_failure",
                         consecutive_errors=self._consecutive_errors,
-                        message=(
+                        detail=(
                             "Candle stream has been failing — strategies "
                             "may be operating on stale candle data."
                         ),

@@ -36,19 +36,58 @@ def _make_shared_stubs() -> None:
     shared = types.ModuleType("shared")
     logging_mod = types.ModuleType("shared.logging")
     logger_mod = types.ModuleType("shared.logging.logger")
+    models_mod = types.ModuleType("shared.models")
+    signal_mod = types.ModuleType("shared.models.signal")
     utils_mod = types.ModuleType("shared.utils")
     helpers_mod = types.ModuleType("shared.utils.helpers")
 
     import uuid
+    from dataclasses import dataclass, field
+    from enum import Enum
     from datetime import timezone as _tz
+    from typing import Any
+
+    class Direction(str, Enum):
+        BUY = "BUY"
+        SELL = "SELL"
+
+    class SignalStatus(str, Enum):
+        PENDING = "PENDING"
+        APPROVED = "APPROVED"
+        REJECTED = "REJECTED"
+        EXPIRED = "EXPIRED"
+
+    @dataclass
+    class Signal:
+        symbol: str
+        market: str
+        direction: Direction
+        quantity: int
+        confidence: float
+        strategy_name: str
+        signal_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+        generated_at: datetime = field(default_factory=lambda: datetime.now(_tz.utc))
+        status: SignalStatus = SignalStatus.PENDING
+        price_at_signal: float = 0.0
+        stop_loss: float | None = None
+        take_profit: float | None = None
+        paper_trade: bool = False
+        metadata: dict[str, Any] = field(default_factory=dict)
 
     logger_mod.get_logger = lambda name, **kw: _FakeLogger()
+    logger_mod.set_correlation_id = lambda *args, **kwargs: None
     helpers_mod.generate_correlation_id = lambda: str(uuid.uuid4())
     helpers_mod.utc_now = lambda: datetime.now(_tz.utc)
+    signal_mod.Direction = Direction
+    signal_mod.Signal = Signal
+    signal_mod.SignalStatus = SignalStatus
+    models_mod.signal = signal_mod
 
     sys.modules.setdefault("shared", shared)
     sys.modules.setdefault("shared.logging", logging_mod)
     sys.modules.setdefault("shared.logging.logger", logger_mod)
+    sys.modules.setdefault("shared.models", models_mod)
+    sys.modules.setdefault("shared.models.signal", signal_mod)
     sys.modules.setdefault("shared.utils", utils_mod)
     sys.modules.setdefault("shared.utils.helpers", helpers_mod)
 
@@ -199,7 +238,7 @@ async def test_std_empty():
 
 async def test_no_signal_before_warmup():
     """No signal should be emitted before long_window bars are available."""
-    strat = MomentumStrategy(short_window=5, long_window=10, capital=100_000)
+    strat = MomentumStrategy(short_window=5, long_window=10, nav=100_000)
     await strat.initialize()
     bars = _rising_bars(9)  # One short of long_window
     for bar in bars:
@@ -214,7 +253,7 @@ async def test_golden_cross_generates_buy():
         short_window=5,
         long_window=20,
         min_confidence=0.0,   # Accept any confidence
-        capital=1_000_000,
+        nav=1_000_000,
         atr_period=5,
     )
     await strat.initialize()
@@ -244,7 +283,7 @@ async def test_death_cross_generates_sell():
         short_window=5,
         long_window=20,
         min_confidence=0.0,
-        capital=1_000_000,
+        nav=1_000_000,
         atr_period=5,
     )
     await strat.initialize()
@@ -273,7 +312,7 @@ async def test_signal_has_stop_and_tp():
         short_window=5,
         long_window=20,
         min_confidence=0.0,
-        capital=1_000_000,
+        nav=1_000_000,
         atr_period=5,
     )
     await strat.initialize()
@@ -305,7 +344,7 @@ async def test_confidence_gate_suppresses_low_conviction():
         short_window=5,
         long_window=20,
         min_confidence=0.99,  # Very high — nearly impossible to meet
-        capital=1_000_000,
+        nav=1_000_000,
         atr_period=5,
     )
     await strat.initialize()
@@ -336,7 +375,7 @@ async def test_quantity_scales_with_atr():
             short_window=5,
             long_window=20,
             min_confidence=0.0,
-            capital=1_000_000,
+            nav=1_000_000,
             atr_period=5,
             atr_stop_multiplier=atr_mult,
         )
@@ -411,7 +450,7 @@ async def test_return_computed_correctly():
     # Use a strategy stub that emits BUY then SELL
     class _FixedStrategy(MomentumStrategy):
         def __init__(self):
-            super().__init__(short_window=5, long_window=20, min_confidence=0.0, capital=1_000_000)
+            super().__init__(short_window=5, long_window=20, min_confidence=0.0, nav=1_000_000)
             self._call = 0
 
         async def on_bar(self, bar):
@@ -451,11 +490,9 @@ async def test_return_computed_correctly():
 
 async def test_max_drawdown_detected():
     """Portfolio that rises then falls should have a non-zero drawdown."""
-    from datetime import timedelta
-
     class _LongOnlyStrat(MomentumStrategy):
         def __init__(self):
-            super().__init__(short_window=5, long_window=20, min_confidence=0.0, capital=500_000)
+            super().__init__(short_window=5, long_window=20, min_confidence=0.0, nav=500_000)
             self._bought = False
             self._bar_count = 0
 
@@ -487,13 +524,10 @@ async def test_max_drawdown_detected():
 
 async def test_profit_factor_above_one_for_winning_strategy():
     """Profit factor > 1 means gross profit > gross loss."""
-    from datetime import timedelta
-    import uuid
-
     class _AlternatingStrat(MomentumStrategy):
         """Buy/sell alternating: odd bars buy, even bars sell."""
         def __init__(self):
-            super().__init__(short_window=5, long_window=10, min_confidence=0.0, capital=1_000_000)
+            super().__init__(short_window=5, long_window=10, min_confidence=0.0, nav=1_000_000)
             self._n = 0
             self._has_pos = False
 
@@ -542,7 +576,7 @@ async def test_stop_loss_triggered():
 
     class _BuyWithStopStrat(MomentumStrategy):
         def __init__(self):
-            super().__init__(short_window=5, long_window=10, min_confidence=0.0, capital=100_000)
+            super().__init__(short_window=5, long_window=10, min_confidence=0.0, nav=100_000)
             self._emitted = False
 
         async def on_bar(self, bar): pass
@@ -566,7 +600,7 @@ async def test_stop_loss_triggered():
     bars = [
         _bar(100.0, symbol="SL", ts=base, high=102, low=98),
         _bar(100.0, symbol="SL", ts=base + timedelta(days=1), high=102, low=98),
-        _bar(92.0,  symbol="SL", ts=base + timedelta(days=2), high=98, low=90),
+        _bar(92.0,  symbol="SL", ts=base + timedelta(days=2), high=98, low=90, open_=96),
     ]
 
     strat = _BuyWithStopStrat()
@@ -586,7 +620,7 @@ async def test_take_profit_triggered():
 
     class _BuyWithTPStrat(MomentumStrategy):
         def __init__(self):
-            super().__init__(short_window=5, long_window=10, min_confidence=0.0, capital=100_000)
+            super().__init__(short_window=5, long_window=10, min_confidence=0.0, nav=100_000)
             self._emitted = False
 
         async def on_bar(self, bar): pass
@@ -627,7 +661,7 @@ async def test_eod_close_remaining_positions():
 
     class _BuyAndHoldStrat(MomentumStrategy):
         def __init__(self):
-            super().__init__(short_window=5, long_window=10, min_confidence=0.0, capital=100_000)
+            super().__init__(short_window=5, long_window=10, min_confidence=0.0, nav=100_000)
             self._emitted = False
 
         async def on_bar(self, bar): pass
@@ -670,7 +704,7 @@ async def test_commission_reduces_profit():
 
     class _SimpleBuySell(MomentumStrategy):
         def __init__(self):
-            super().__init__(short_window=5, long_window=10, min_confidence=0.0, capital=100_000)
+            super().__init__(short_window=5, long_window=10, min_confidence=0.0, nav=100_000)
             self._count = 0
 
         async def on_bar(self, bar):
@@ -717,12 +751,11 @@ async def test_commission_reduces_profit():
 
 async def test_short_rejected_when_not_allowed():
     """SELL signals on flat positions should be ignored when allow_short=False."""
-    from datetime import timedelta
     from strategy_engine.signals.signal import Signal
 
     class _SellOnlyStrat(MomentumStrategy):
         def __init__(self):
-            super().__init__(short_window=5, long_window=10, min_confidence=0.0, capital=100_000)
+            super().__init__(short_window=5, long_window=10, min_confidence=0.0, nav=100_000)
             self._emitted = False
 
         async def on_bar(self, bar): pass
@@ -755,7 +788,7 @@ async def test_short_allowed_opens_position():
 
     class _ShortStrat(MomentumStrategy):
         def __init__(self):
-            super().__init__(short_window=5, long_window=10, min_confidence=0.0, capital=100_000)
+            super().__init__(short_window=5, long_window=10, min_confidence=0.0, nav=100_000)
             self._count = 0
 
         async def on_bar(self, bar):

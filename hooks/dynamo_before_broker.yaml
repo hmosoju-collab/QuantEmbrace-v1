@@ -1,0 +1,159 @@
+name: dynamo_before_broker
+type: pre_merge
+priority: 2
+mandatory: true
+
+description: |
+  ZerodhaBrokerClient must ALWAYS receive dynamo_client= at construction.
+  DynamoDB client must be initialized BEFORE broker clients in every service.
+
+  Root cause context (anti-patterns #14 and #15):
+    ZerodhaTokenManager._load_token_from_dynamo() returns None silently if
+    dynamo_client is None or not yet initialized. When this happens, the token
+    manager falls back to reading ZERODHA_ACCESS_TOKEN from the environment
+    variable — which is stale, missing after token rotation, or hardcoded.
+    This causes API authentication failures mid-session without clear error messages.
+
+  Anti-pattern #14: ZerodhaBrokerClient constructed before DynamoDB client is ready
+    Result: TokenManager has no DynamoDB access, silently uses stale env var token.
+
+  Anti-pattern #15: ZerodhaBrokerClient constructed without dynamo_client= parameter
+    Result: Same as #14 — silent fallback to env var, no warning logged.
+
+  The Zerodha access token:
+    - Expires daily at approximately 07:30 IST
+    - Is refreshed by `python scripts/zerodha_login.py`
+    - Is stored in DynamoDB (table: instrument-registry, key: zerodha_access_token)
+    - Must NEVER be sourced from environment variable at service startup
+    - Is managed exclusively by ZerodhaTokenManager
+
+trigger:
+  event: pre_merge
+  paths:
+    - "services/execution_engine/**"
+    - "services/data_ingestion/**"
+
+checks:
+  - id: dynamo_client_before_broker_client
+    description: |
+      In service __init__ or startup methods, the DynamoDB client must be
+      instantiated before any broker client. Check that the DynamoDB client
+      variable assignment appears earlier in the method body.
+    detect_violation: |
+      # VIOLATION: broker client before DynamoDB client
+      class ExecutionService:
+          def __init__(self):
+              self._zerodha = ZerodhaBrokerClient(...)  # DynamoDB not ready yet
+              self._dynamo = boto3.client("dynamodb")   # Too late
+
+    correct_pattern: |
+      class ExecutionService:
+          def __init__(self):
+              # Step 1: infrastructure clients first
+              self._dynamo = boto3.client("dynamodb", region_name=self._region)
+
+              # Step 2: token manager depends on DynamoDB
+              self._token_manager = ZerodhaTokenManager(dynamo_client=self._dynamo)
+
+              # Step 3: broker client depends on token manager
+              self._zerodha = ZerodhaBrokerClient(
+                  api_key=self._api_key,
+                  token_manager=self._token_manager,
+                  dynamo_client=self._dynamo,  # REQUIRED
+              )
+
+  - id: dynamo_client_parameter_required
+    description: |
+      ZerodhaBrokerClient(...) call sites must always pass dynamo_client=.
+      A call without this parameter means the token manager has no DynamoDB access.
+    detect_violation: |
+      # VIOLATION: missing dynamo_client parameter
+      self._zerodha = ZerodhaBrokerClient(
+          api_key=config["api_key"],
+          api_secret=config["api_secret"],
+          # dynamo_client= MISSING — anti-pattern #15
+      )
+
+      # VIOLATION: dynamo_client=None explicitly passed
+      self._zerodha = ZerodhaBrokerClient(
+          api_key=config["api_key"],
+          dynamo_client=None,  # Same as missing — anti-pattern #15
+      )
+
+    correct_pattern: |
+      self._zerodha = ZerodhaBrokerClient(
+          api_key=config["api_key"],
+          api_secret=config["api_secret"],
+          dynamo_client=self._dynamo,  # REQUIRED — must be a live boto3 client
+      )
+
+  - id: no_env_var_token_at_startup
+    description: |
+      ZerodhaBrokerClient must NOT read ZERODHA_ACCESS_TOKEN from environment
+      variable at service startup. The token must always come from DynamoDB via
+      ZerodhaTokenManager. env var sourcing bypasses daily token rotation.
+    detect_violation: |
+      # VIOLATION: reading token from env var at startup
+      access_token = os.environ.get("ZERODHA_ACCESS_TOKEN")
+      self._zerodha = ZerodhaBrokerClient(access_token=access_token, ...)
+
+      # VIOLATION: hardcoded in config load
+      token = config.get("zerodha_access_token") or os.getenv("ZERODHA_ACCESS_TOKEN")
+
+    correct_pattern: |
+      # CORRECT: always use token manager which reads from DynamoDB
+      class ZerodhaTokenManager:
+          def __init__(self, dynamo_client):
+              assert dynamo_client is not None, \
+                  "dynamo_client required — anti-pattern #14/#15 prevention"
+              self._dynamo = dynamo_client
+
+          async def get_access_token(self) -> str:
+              """Returns current access token from DynamoDB. Raises on failure."""
+              response = self._dynamo.get_item(
+                  TableName="instrument-registry",
+                  Key={"pk": {"S": "zerodha_access_token"}},
+                  ConsistentRead=True,
+              )
+              token = response.get("Item", {}).get("access_token", {}).get("S")
+              if not token:
+                  raise RuntimeError(
+                      "Zerodha access token not found in DynamoDB. "
+                      "Run: python scripts/zerodha_login.py"
+                  )
+              return token
+
+  - id: zerodha_token_manager_constructor_check
+    description: |
+      ZerodhaTokenManager.__init__ must assert that dynamo_client is not None.
+      This creates a fast-fail at construction time rather than silent failures
+      at token fetch time.
+    correct_pattern: |
+      def __init__(self, dynamo_client):
+          if dynamo_client is None:
+              raise ValueError(
+                  "ZerodhaTokenManager requires dynamo_client. "
+                  "See anti-patterns #14 and #15 in memory/anti_patterns.md"
+              )
+          self._dynamo = dynamo_client
+
+initialization_order:
+  required_sequence:
+    1: "boto3 DynamoDB client"
+    2: "ZerodhaTokenManager(dynamo_client=dynamo)"
+    3: "ZerodhaBrokerClient(token_manager=tm, dynamo_client=dynamo)"
+    4: "Other service clients that depend on broker"
+  rationale: |
+    Token rotation happens daily. If DynamoDB is unavailable at startup,
+    the service should fail-fast with a clear error, not silently use a
+    potentially expired env var token.
+
+on_violation:
+  - action: block_merge
+  - message: |
+      BLOCKED: dynamo_before_broker rule triggered.
+      ZerodhaBrokerClient must receive dynamo_client= at construction.
+      DynamoDB client must be initialized before broker clients.
+      Anti-patterns #14 and #15 in memory/anti_patterns.md describe the
+      silent failure mode: stale env var token fallback with no warning.
+      Fix the initialization order and add the dynamo_client= parameter.

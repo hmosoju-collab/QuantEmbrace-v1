@@ -107,7 +107,11 @@ def _snap(
     pnl_status: Optional[PnLStatus] = None,
     service_health: Optional[list] = None,
     safety_gates: Optional[list] = None,
+    # Phase 6
+    entry_block_status=None,
+    safe_actions_status=None,
 ) -> MonitoringStatusSnapshot:
+    from services.shared.monitoring.monitoring_status import EntryBlockStatus, SafeActionsStatus
     return MonitoringStatusSnapshot(
         overall_status=overall_status,
         timestamp_ist="2026-05-25 10:00:00 IST",
@@ -146,6 +150,8 @@ def _snap(
         risk_cap_status=risk_cap_status or RiskCapStatus(),
         strategy_statuses=strategy_statuses or [],
         pnl_status=pnl_status or PnLStatus(),
+        entry_block_status=entry_block_status or EntryBlockStatus(),
+        safe_actions_status=safe_actions_status or SafeActionsStatus(),
         critical_alerts=critical_alerts or [],
         warnings=warnings or [],
         data_quality_issues=data_quality_issues or [],
@@ -1054,3 +1060,260 @@ class TestPositionSnapshotProperties:
     def test_pnl_none_when_no_ltp(self):
         pos = _pos(quantity=10.0, direction="LONG", ltp=None)
         assert pos.pnl is None
+
+
+# ── Phase 5: ACTION_MODE + entry-block status tests ──────────────────────────
+
+
+class TestActionModeGate:
+    """Tests for ACTION_MODE gate in monitoring_agent and entry-block status."""
+
+    def test_monitoring_status_template_has_entry_block_section(self):
+        """The template must contain the Phase 5 entry-block section."""
+        from pathlib import Path
+        import monitoring_agent
+        root = Path(monitoring_agent.__file__).resolve().parent.parent.parent.parent
+        template = root / "docs" / "operations" / "monitoring-status-template.md"
+        if template.exists():
+            content = template.read_text()
+            assert "Entry block active" in content
+            assert "Entry Block Status" in content
+            assert "Exit management" in content
+
+    def test_monitoring_status_template_states_exits_always_allowed(self):
+        from pathlib import Path
+        import monitoring_agent
+        root = Path(monitoring_agent.__file__).resolve().parent.parent.parent.parent
+        template = root / "docs" / "operations" / "monitoring-status-template.md"
+        if template.exists():
+            content = template.read_text()
+            # Must state exits are never blocked by entry block
+            assert "NEVER blocked" in content or "never blocked" in content.lower()
+
+    def test_action_mode_notify_only_counter_increments(self, tmp_path):
+        import asyncio
+        import dataclasses
+        from monitoring_agent.app import MonitoringAgent
+        from monitoring_agent.config import AgentConfig
+        from monitoring_agent.rules import MonitoringRules
+        from monitoring_agent.snapshot import CollectorResult, Status, HealthSnapshot
+
+        cfg = dataclasses.replace(
+            AgentConfig(),
+            snapshot_path=str(tmp_path / "snap.json"),
+            incident_log_path=str(tmp_path / "inc.jsonl"),
+            action_mode="notify_only",
+        )
+        agent = MonitoringAgent(config=cfg, rules=MonitoringRules())
+        agent.collectors = []
+
+        # Patch collect_once to return a known snapshot
+        async def _fake_collect():
+            return HealthSnapshot(results=[], dry_run=True, action_mode="notify_only", phase=1)
+        agent.collect_once = _fake_collect
+
+        asyncio.run(agent.run_once())
+        assert agent._safe_counters["safe_actions_disabled_total"] >= 1
+        assert agent._safe_counters["safe_actions_executed_total"] == 0
+
+    def test_action_mode_safe_actions_executor_wired_if_available(self, tmp_path):
+        import dataclasses
+        from monitoring_agent.app import MonitoringAgent, _SAFE_ACTIONS_AVAILABLE
+        from monitoring_agent.config import AgentConfig
+        from monitoring_agent.rules import MonitoringRules
+
+        cfg = dataclasses.replace(
+            AgentConfig(),
+            snapshot_path=str(tmp_path / "snap.json"),
+            incident_log_path=str(tmp_path / "inc.jsonl"),
+            action_mode="safe_actions",
+        )
+        agent = MonitoringAgent(config=cfg, rules=MonitoringRules())
+        if _SAFE_ACTIONS_AVAILABLE:
+            assert agent._safe_executor is not None
+        else:
+            assert agent._safe_executor is None  # graceful fallback
+
+
+# ── Phase 6: Entry block and safe actions in monitoring status ─────────────────
+
+
+class TestPhase6MonitoringStatusFields:
+    """Verifies that §10a and §10b fields are populated and rendered correctly."""
+
+    def _make_svc_with_entry_block(
+        self,
+        entry_block_item=None,
+        kill_switch_active: bool = False,
+        live_counters=None,
+    ):
+        """Build service whose get_item returns entry_block and kill_switch items."""
+        dynamo = MagicMock()
+        dynamo.scan.return_value = {"Items": []}
+
+        def _get_item(**kwargs):
+            key = kwargs.get("Key", {})
+            pk = key.get("PK", {}).get("S", "")
+            if pk == "ENTRY_BLOCK":
+                return {"Item": entry_block_item} if entry_block_item else {}
+            if pk == "KILLSWITCH":
+                if kill_switch_active:
+                    return {"Item": {"PK": {"S": "KILLSWITCH"}, "SK": {"S": "GLOBAL"}, "active": {"BOOL": True}}}
+                return {}
+            return {}
+
+        dynamo.get_item.side_effect = _get_item
+        return MonitoringStatusService(
+            dynamo_client=dynamo,
+            positions_table="test-positions",
+            risk_state_table="test-risk",
+            trading_mode="paper",
+            live_trading_enabled=False,
+            live_counters=live_counters,
+        )
+
+    @staticmethod
+    def _eb_item(blocked: bool = True) -> dict:
+        return {
+            "PK": {"S": "ENTRY_BLOCK"},
+            "SK": {"S": "GLOBAL"},
+            "blocked": {"BOOL": blocked},
+            "status": {"S": "BLOCKED" if blocked else "CLEAR"},
+            "reason": {"S": "stale_ltp_test"},
+            "source": {"S": "safe_actions"},
+            "action_id": {"S": "act-test-001"},
+            "idempotency_key": {"S": "bne-20260531"},
+            "created_at": {"S": "2026-05-31T10:00:00+00:00"},
+        }
+
+    # ── build_snapshot populates entry_block_status ────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_entry_block_status_active_when_dynamo_flag_set(self):
+        svc = self._make_svc_with_entry_block(entry_block_item=self._eb_item(blocked=True))
+        snap = await svc.build_snapshot()
+        assert snap.entry_block_status.active is True
+        assert snap.entry_block_status.reason == "stale_ltp_test"
+        assert snap.entry_block_status.source == "safe_actions"
+        assert snap.entry_block_status.action_id == "act-test-001"
+        assert snap.entry_block_status.read_status == "OK"
+
+    @pytest.mark.asyncio
+    async def test_entry_block_status_not_active_when_absent(self):
+        svc = self._make_svc_with_entry_block(entry_block_item=None)
+        snap = await svc.build_snapshot()
+        assert snap.entry_block_status.active is False
+        assert snap.entry_block_status.read_status == "OK"
+
+    @pytest.mark.asyncio
+    async def test_entry_block_active_produces_warning_not_critical(self):
+        """Entry block active with read_ok → AMBER (warning), not RED."""
+        svc = self._make_svc_with_entry_block(entry_block_item=self._eb_item(blocked=True))
+        snap = await svc.build_snapshot()
+        assert any("ENTRY_BLOCK" in w for w in snap.warnings)
+        assert not any("ENTRY_BLOCK" in a for a in snap.critical_alerts)
+
+    @pytest.mark.asyncio
+    async def test_entry_block_dynamo_error_sets_error_status(self):
+        dynamo = MagicMock()
+        dynamo.scan.return_value = {"Items": []}
+        dynamo.get_item.side_effect = Exception("DynamoDB unavailable")
+        svc = MonitoringStatusService(
+            dynamo_client=dynamo,
+            positions_table="test-positions",
+            risk_state_table="test-risk",
+        )
+        snap = await svc.build_snapshot()
+        assert snap.entry_block_status.read_status == "ERROR"
+
+    # ── build_snapshot populates safe_actions_status ───────────────────────
+
+    @pytest.mark.asyncio
+    async def test_safe_actions_status_from_live_counters(self):
+        counters = LiveCounters(
+            safe_action_mode="safe_actions",
+            safe_action_executor_active=True,
+            safe_actions_proposed=5,
+            safe_actions_executed=3,
+            safe_actions_blocked=2,
+            safe_actions_idempotency_skips=1,
+            safe_actions_last_action="BLOCK_NEW_ENTRIES",
+        )
+        svc = self._make_svc_with_entry_block(live_counters=counters)
+        snap = await svc.build_snapshot()
+        sa = snap.safe_actions_status
+        assert sa.action_mode == "safe_actions"
+        assert sa.executor_active is True
+        assert sa.actions_proposed == 5
+        assert sa.actions_executed == 3
+        assert sa.actions_blocked == 2
+        assert sa.idempotency_skips == 1
+        assert sa.last_action_type == "BLOCK_NEW_ENTRIES"
+
+    @pytest.mark.asyncio
+    async def test_safe_actions_status_defaults_when_no_counters(self):
+        svc = self._make_svc_with_entry_block()
+        snap = await svc.build_snapshot()
+        sa = snap.safe_actions_status
+        assert sa.action_mode == "notify_only"
+        assert sa.executor_active is False
+        assert sa.actions_executed == 0
+
+    @pytest.mark.asyncio
+    async def test_safe_actions_mode_safe_actions_executor_not_active_produces_warning(self):
+        counters = LiveCounters(
+            safe_action_mode="safe_actions",
+            safe_action_executor_active=False,  # executor not active!
+        )
+        svc = self._make_svc_with_entry_block(live_counters=counters)
+        snap = await svc.build_snapshot()
+        assert any("executor is not active" in w for w in snap.warnings)
+
+    # ── renderer produces §10a and §10b sections ───────────────────────────
+
+    def test_renderer_includes_entry_block_section(self):
+        from services.shared.monitoring.monitoring_status import EntryBlockStatus, SafeActionsStatus
+        snap = _snap(
+            entry_block_status=EntryBlockStatus(
+                active=True,
+                reason="test_reason",
+                source="safe_actions",
+                action_id="act-001",
+                read_status="OK",
+            ),
+        )
+        output = _renderer.render(snap)
+        assert "## 10a. Entry Block Status" in output
+        assert "YES" in output
+        assert "test_reason" in output
+        assert "act-001" in output
+
+    def test_renderer_includes_safe_actions_section(self):
+        from services.shared.monitoring.monitoring_status import EntryBlockStatus, SafeActionsStatus
+        snap = _snap(
+            safe_actions_status=SafeActionsStatus(
+                action_mode="safe_actions",
+                executor_active=True,
+                actions_executed=7,
+                actions_blocked=2,
+            ),
+        )
+        output = _renderer.render(snap)
+        assert "## 10b. Safe Actions Status" in output
+        assert "safe_actions" in output
+        assert "7" in output
+
+    def test_renderer_entry_block_not_active_shows_normal_message(self):
+        from services.shared.monitoring.monitoring_status import EntryBlockStatus, SafeActionsStatus
+        snap = _snap(entry_block_status=EntryBlockStatus(active=False, read_status="OK"))
+        output = _renderer.render(snap)
+        assert "not active" in output
+
+    def test_renderer_entry_block_active_shows_clear_command(self):
+        from services.shared.monitoring.monitoring_status import EntryBlockStatus, SafeActionsStatus
+        snap = _snap(entry_block_status=EntryBlockStatus(
+            active=True, reason="r", source="s", read_status="OK"
+        ))
+        output = _renderer.render(snap)
+        assert "ENTRY_BLOCK" in output
+        assert "delete-item" in output or "Clear" in output

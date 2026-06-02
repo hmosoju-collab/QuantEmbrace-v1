@@ -1,0 +1,132 @@
+# QuantEmbrace — Risk Filter Configuration
+#
+# Filters applied during universe snapshot generation to exclude high-risk stocks.
+# Each filter is independently enabled/disabled per mode.
+#
+# Data sources (production):
+#   - NSE ASM/GSM lists: https://www.nseindia.com/regulations/additional-surveillance-measure
+#   - SEBI surveillance circulars
+#   - NSE corporate actions bulletin
+#
+# Stub policy: if a data source is unavailable, behavior is controlled by
+# the *_unavailable_policy setting: WARN (include with warning) or EXCLUDE.
+
+# What to do when risk metrics (price, volatility, circuits, float) are unavailable.
+# Override per mode below. LIVE_ADVANCED uses EXCLUDE: do not trade uncharacterised risk.
+risk_metrics_unavailable_policy: INCLUDE
+risk_metrics_by_mode:
+  LIVE_ADVANCED:
+    risk_metrics_unavailable_policy: EXCLUDE
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PENNY STOCK FILTER
+# Exclude stocks trading below a minimum price threshold.
+# ─────────────────────────────────────────────────────────────────────────────
+penny_stock:
+  enabled: true
+  min_price_inr: 10.0       # Stocks below ₹10 are excluded
+  by_mode:
+    PAPER_SAFE_START:
+      min_price_inr: 50.0   # NIFTY 50 — effectively never triggers; safety net
+    PAPER_EXPAND:
+      min_price_inr: 20.0
+    LIVE_ADVANCED:
+      min_price_inr: 30.0   # Stricter than paper
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ASM / GSM SURVEILLANCE FILTER
+# Exclude stocks on SEBI/NSE Additional Surveillance Measure or Graded Surveillance.
+# ─────────────────────────────────────────────────────────────────────────────
+surveillance:
+  enabled: true
+  exclude_asm: true           # Exclude ALL ASM-listed stocks (Stage 1–4)
+  exclude_gsm: true           # Exclude ALL GSM-listed stocks (Stage 1–6)
+  data_source_unavailable_policy: WARN   # WARN | EXCLUDE
+  by_mode:
+    LIVE_ADVANCED:
+      data_source_unavailable_policy: EXCLUDE  # Live mode: fail-safe on missing data
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UPPER/LOWER CIRCUIT FREQUENCY FILTER
+# Exclude stocks that hit price circuits too frequently (signal of poor price discovery).
+# ─────────────────────────────────────────────────────────────────────────────
+circuit_frequency:
+  enabled: true
+  max_circuit_hits_last_20d: 3     # Exclude if ≥3 circuit hits in last 20 sessions
+  by_mode:
+    PAPER_SAFE_START:
+      max_circuit_hits_last_20d: 2
+    PAPER_EXPAND:
+      max_circuit_hits_last_20d: 3
+    LIVE_ADVANCED:
+      max_circuit_hits_last_20d: 2  # Stricter for live
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ABNORMAL VOLATILITY FILTER
+# Exclude stocks with extreme historical volatility (daily return std dev).
+# High volatility stocks are harder to control for risk/sizing.
+# ─────────────────────────────────────────────────────────────────────────────
+volatility:
+  enabled: true
+  max_daily_volatility_pct: 8.0    # Exclude if 20d daily return std dev > 8%
+  lookback_days: 20
+  by_mode:
+    PAPER_SAFE_START:
+      max_daily_volatility_pct: 5.0
+    PAPER_EXPAND:
+      max_daily_volatility_pct: 7.0
+    LIVE_ADVANCED:
+      max_daily_volatility_pct: 6.0  # Stricter than paper
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOW FLOAT FILTER
+# Exclude stocks with very low promoter holding / free-float.
+# Low float stocks are susceptible to price manipulation.
+# ─────────────────────────────────────────────────────────────────────────────
+low_float:
+  enabled: true
+  min_free_float_pct: 15.0        # Exclude if free-float < 15% of total shares
+  data_source_unavailable_policy: WARN
+  by_mode:
+    LIVE_ADVANCED:
+      min_free_float_pct: 20.0    # Stricter for live
+      data_source_unavailable_policy: EXCLUDE
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POOR PRICE DISCOVERY FILTER
+# Exclude stocks with persistent zero-volume sessions (no trading activity).
+# ─────────────────────────────────────────────────────────────────────────────
+price_discovery:
+  enabled: true
+  max_zero_volume_days_last_20: 2  # Exclude if ≥2 days with zero volume in last 20 sessions
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RECENT CORPORATE ACTION EXCLUSION
+# Exclude stocks with pending results/major events IF the strategy is not event-driven.
+# Stocks within the exclusion window need manual review before re-inclusion.
+# ─────────────────────────────────────────────────────────────────────────────
+corporate_action_window:
+  enabled: true
+  exclude_pre_results_days: 2      # Exclude 2 trading days before results announcement
+  exclude_post_split_days: 5       # Exclude 5 trading days after a stock split
+  exclude_post_bonus_days: 5       # Exclude 5 trading days after a bonus issue
+  exclude_post_merger_days: 10     # Exclude 10 trading days after merger/demerger
+  event_driven_strategy_override: false  # Set true to disable pre-results exclusion
+  data_source_unavailable_policy: WARN   # WARN | EXCLUDE
+  by_mode:
+    LIVE_ADVANCED:
+      data_source_unavailable_policy: EXCLUDE  # fail-safe: unknown CA status = blocked in live
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SME / EXCHANGE-SPECIFIC EXCLUSIONS
+# Hardcoded policy: always exclude by default.
+# ─────────────────────────────────────────────────────────────────────────────
+instrument_type_policy:
+  exclude_sme_stocks: true          # NSE Emerge / BSE SME: always excluded
+  exclude_bse_only: true            # BSE-only listings (no NSE listing): excluded
+  exclude_etf: true                 # ETF: excluded unless explicitly enabled per mode
+  exclude_reit: true                # REIT: excluded by default
+  exclude_invit: true               # InvIT: excluded by default
+  exclude_preference_shares: true
+  exclude_debentures: true
+  allow_etf_override_by_mode: {}    # e.g. PAPER_EXPAND: true to enable ETFs in that mode

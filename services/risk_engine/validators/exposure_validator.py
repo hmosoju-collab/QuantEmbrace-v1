@@ -15,7 +15,8 @@ from shared.config.settings import AppSettings, get_settings
 from shared.logging.logger import get_logger
 
 from risk_engine.limits.risk_limits import RiskLimits, RiskValidationResult
-from strategy_engine.signals.signal import Signal
+from risk_engine.validators.common import risk_data_unavailable_result
+from shared.models.signal import Signal
 
 logger = get_logger(__name__, service_name="risk_engine")
 
@@ -63,7 +64,7 @@ class ExposureValidator:
             max_exposure_pct = self._limits.get_limit(
                 "max_total_exposure_pct", market=signal.market
             )
-            portfolio_value = self._limits.portfolio_value
+            portfolio_value = self._limits.get_portfolio_value()
             max_exposure_value = portfolio_value * (max_exposure_pct / 100.0)
 
             exposure_pct = (proposed_exposure / portfolio_value) * 100.0
@@ -100,10 +101,10 @@ class ExposureValidator:
 
         except Exception as exc:
             logger.exception("Exposure validation failed")
-            return RiskValidationResult(
-                approved=False,
+            return risk_data_unavailable_result(
+                signal=signal,
                 validator_name=self.VALIDATOR_NAME,
-                reason=f"Validation error: {exc}",
+                reason=f"Exposure state read failed: {exc}",
             )
 
     async def _get_total_exposure(self) -> float:
@@ -117,8 +118,7 @@ class ExposureValidator:
             Total exposure value in base currency.
         """
         if self._dynamo is None:
-            logger.debug("No DynamoDB client — assuming zero total exposure")
-            return 0.0
+            raise RuntimeError("DynamoDB client unavailable for exposure scan")
 
         try:
             total = 0.0
@@ -152,4 +152,4 @@ class ExposureValidator:
 
         except Exception:
             logger.exception("Failed to calculate total exposure from DynamoDB")
-            return 0.0
+            raise

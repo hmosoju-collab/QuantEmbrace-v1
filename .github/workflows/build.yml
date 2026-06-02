@@ -19,7 +19,8 @@ on:
       - main
     paths:
       - "services/**"
-      - "Dockerfile*"
+      - "infra/deployment/Dockerfile"
+      - "services/requirements.txt"
       - "requirements*.txt"
       - ".github/workflows/build.yml"
 
@@ -58,28 +59,33 @@ jobs:
             data_ingestion:
               - 'services/data_ingestion/**'
               - 'services/shared/**'
+              - 'infra/deployment/Dockerfile'
               - 'requirements*.txt'
-              - 'Dockerfile'
+              - 'services/requirements.txt'
             strategy_engine:
               - 'services/strategy_engine/**'
               - 'services/shared/**'
+              - 'infra/deployment/Dockerfile'
               - 'requirements*.txt'
-              - 'Dockerfile'
+              - 'services/requirements.txt'
             execution_engine:
               - 'services/execution_engine/**'
               - 'services/shared/**'
+              - 'infra/deployment/Dockerfile'
               - 'requirements*.txt'
-              - 'Dockerfile'
+              - 'services/requirements.txt'
             risk_engine:
               - 'services/risk_engine/**'
               - 'services/shared/**'
+              - 'infra/deployment/Dockerfile'
               - 'requirements*.txt'
-              - 'Dockerfile'
+              - 'services/requirements.txt'
             ai_engine:
               - 'services/ai_engine/**'
               - 'services/shared/**'
+              - 'infra/deployment/Dockerfile'
               - 'requirements*.txt'
-              - 'Dockerfile'
+              - 'services/requirements.txt'
 
   # ─────────────────────────────────────────────────────────────────────────
   # Build + push each service (matrix, skips unchanged)
@@ -138,7 +144,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile
+          file: infra/deployment/Dockerfile
           push: true
           build-args: |
             SERVICE_NAME=${{ matrix.service }}

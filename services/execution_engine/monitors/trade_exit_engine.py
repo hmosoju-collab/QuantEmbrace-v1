@@ -4,7 +4,7 @@ Trade Exit Engine (TEE) — monitors open positions and triggers exits.
 Runs as a long-lived async task alongside the execution service.
 
 Responsibilities (Phase 3):
-    - Poll DynamoDB positions every TEE_POLL_INTERVAL_SECONDS (default 60).
+    - Poll DynamoDB positions every TEE_POLL_INTERVAL_SECONDS (default 30).
     - For each managed position (direction <> FLAT, stop_price present):
         * Resolve last known price (prices table → position.last_price fallback).
         * Evaluate stop-loss (side-aware). Trigger: STOP_LOSS or TRAILING.
@@ -60,7 +60,7 @@ from services.shared.monitoring.ltp_resolver import LtpResolver
 
 logger = get_logger(__name__, service_name="execution_engine")
 
-_DEFAULT_POLL_INTERVAL: int = int(os.environ.get("TEE_POLL_INTERVAL_SECONDS", "60"))
+_DEFAULT_POLL_INTERVAL: int = int(os.environ.get("TEE_POLL_INTERVAL_SECONDS", "30"))
 
 
 def _session_date_ist() -> str:

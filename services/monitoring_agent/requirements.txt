@@ -1,0 +1,13 @@
+# monitoring_agent — extra runtime dependency NOT already in services/requirements.txt
+# ------------------------------------------------------------------------------------
+# The platform base image (services/requirements.txt) already provides everything the
+# agent needs for its core collectors:
+#   boto3 / botocore      → DynamoDB DescribeTable + bounded read-only scans
+#   confluent-kafka       → AdminClient metadata + committed offsets + watermarks
+#   PyYAML                → rules.yaml policy loader
+#
+# The ONLY thing the agent adds is the Docker SDK, used by docker_collector to read
+# container liveness + restart counts over the Docker socket. It is import-guarded:
+# if this package is absent the DockerCollector degrades to Status.UNKNOWN and the
+# agent keeps running. Pinned to a major it has been validated against.
+docker>=7.1.0,<8.0.0

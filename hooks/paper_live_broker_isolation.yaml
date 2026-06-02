@@ -1,0 +1,116 @@
+name: paper_live_broker_isolation
+type: always
+priority: 1
+mandatory: true
+
+description: |
+  paper_trade=True MUST NEVER route to a real broker endpoint.
+
+  Broker routing rules:
+  - NSE paper trading → PaperSimulator (internal, in-process). Zerodha has NO paper
+    endpoint — there is no Zerodha sandbox. Any call to ZerodhaBrokerClient when
+    paper_trade=True is a CRITICAL safety violation.
+  - NSE live trading → ZerodhaBrokerClient (Kite Connect REST API). Requires
+    QE_EXECUTION_LIVE_TRADING_ENABLED=true AND explicit operator gate sign-off.
+  - US paper trading → AlpacaBrokerClient with paper endpoint
+    (https://paper-api.alpaca.markets). This is NOT shared with NSE paper.
+  - US live trading → AlpacaBrokerClient with live endpoint.
+
+  The signal flow through execution_engine:
+    signals.approved (Kafka)
+      → UniverseOrderValidator (FINAL HARD GATE — no broker call if fails)
+      → idempotency check (DynamoDB cw table)
+      → SmartRouter.route()
+          if paper_trade=True AND exchange=NSE → PaperSimulator.place_order()
+          if paper_trade=True AND exchange=US  → AlpacaAdapter(paper_endpoint=True)
+          if paper_trade=False AND live_gate_open → ZerodhaBrokerClient OR AlpacaAdapter
+      → orders.events (Kafka)
+
+  SmartRouter must check paper_trade flag from DynamoDB strategy-config,
+  NOT from environment variable (env vars can be stale or missing).
+
+trigger:
+  event: always
+  paths:
+    - "services/execution_engine/**"
+
+checks:
+  - id: paper_routes_to_simulator_not_zerodha
+    description: |
+      SmartRouter must dispatch to PaperSimulator when paper_trade=True for NSE signals.
+      ZerodhaBrokerClient.place_order() must NEVER be called when paper_trade=True.
+    detect_violation:
+      pattern: |
+        # VIOLATION: calling Zerodha without checking paper flag
+        await self._zerodha.place_order(...)
+        # (no preceding `if not self._paper_trading` or `if paper_trade is False` guard)
+    correct_pattern: |
+      # CORRECT: always check paper flag before any real broker call
+      if self._paper_trading or strategy_config.paper_trade:
+          result = await self._paper_simulator.place_order(
+              symbol=signal.symbol,
+              side=signal.side,
+              quantity=signal.quantity,
+              order_type=signal.order_type,
+          )
+          return result
+
+      # Only reaches here when paper_trade=False AND live gate is open
+      result = await self._zerodha.place_order(
+          variety="regular",
+          exchange="NSE",
+          tradingsymbol=signal.symbol,
+          transaction_type=signal.side.upper(),
+          quantity=signal.quantity,
+          order_type=signal.order_type.upper(),
+          product="MIS",
+      )
+      return result
+
+  - id: paper_trade_read_from_dynamo
+    description: |
+      paper_trade flag must be read from DynamoDB strategy-config, not env var.
+      The DynamoDB value is the source of truth; env var can be stale.
+    detect_violation:
+      pattern: 'os.environ.get.*paper_trade'
+    correct_pattern: |
+      # strategy_config is loaded from DynamoDB strategy-config table
+      # paper_trade is set per-strategy in that table, default True
+      paper_trade = strategy_config.get("paper_trade", True)
+
+  - id: alpaca_paper_endpoint_us_only
+    description: |
+      AlpacaBrokerClient paper endpoint (paper-api.alpaca.markets) is for US equities
+      only. It must never be used for NSE signals. AlpacaAdapter must enforce this.
+    correct_pattern: |
+      class AlpacaAdapter:
+          PAPER_ENDPOINT = "https://paper-api.alpaca.markets"
+          LIVE_ENDPOINT  = "https://api.alpaca.markets"
+
+          def __init__(self, paper: bool, exchange: str):
+              assert exchange in ("NYSE", "NASDAQ", "US"), \
+                  "AlpacaAdapter is US-only. NSE signals must use ZerodhaBrokerClient."
+              self._base_url = self.PAPER_ENDPOINT if paper else self.LIVE_ENDPOINT
+
+  - id: universe_validator_before_broker
+    description: |
+      UniverseOrderValidator must run BEFORE any broker dispatch.
+      A risk-approved signal that fails universe validation must be rejected
+      with a logged reason code — it must never reach place_order().
+    correct_pattern: |
+      # In execution_engine order submission path:
+      validation_result = self._universe_validator.validate(signal)
+      if not validation_result.valid:
+          await self._audit_log(signal, "UNIVERSE_REJECTED", validation_result.reason)
+          return OrderResult(filled=False, reason=validation_result.reason)
+      # Universe validated — proceed to idempotency then broker
+
+on_violation:
+  - action: block_merge
+  - action: critical_alert
+    message: |
+      CRITICAL SAFETY VIOLATION: paper_live_broker_isolation rule triggered.
+      A code path exists that may call a real broker API when paper_trade=True.
+      This is a HARD SAFETY RULE — paper trades MUST NEVER reach a real broker.
+      Zerodha has no paper endpoint. PaperSimulator is the ONLY valid paper broker.
+      DO NOT merge. Fix the routing guard and re-review.

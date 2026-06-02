@@ -1,0 +1,201 @@
+name: terraform_safety
+type: pre_merge
+priority: 2
+mandatory: true
+
+description: |
+  Terraform changes must not introduce insecure IAM policies, open security groups,
+  banned resource types, or resources that violate the platform architecture.
+
+  Architecture constraints:
+    - Compute: EC2 ARM64 ASGs ONLY (c6g/t4g instance families)
+    - ECS Fargate: REMOVED — no aws_ecs_* resources allowed
+    - Lambda: BANNED for streaming workloads — no aws_lambda_* resources
+    - SQS: REMOVED — Kafka MSK Serverless is the only message bus
+    - All resources use naming: quantembrace-{env}-{name}
+    - State backend: S3 + DynamoDB locking (required in every environment)
+    - Kafka: MSK Serverless with SASL/OAUTHBEARER IAM on port 9098
+
+  Environments: dev, staging, prod
+    - dev/staging may use smaller instance types (t4g.micro/small)
+    - prod must use c6g.large or larger for trading services
+    - All environments share the same module structure
+
+trigger:
+  event: pre_merge
+  paths:
+    - "infra/terraform/**"
+
+checks:
+  - id: no_wildcard_iam_resources
+    description: |
+      IAM policies must not use "*" as the resource. Least-privilege IAM is required.
+      If "*" is necessary (e.g., for S3 List on a prefix), it must be accompanied by
+      an inline comment explaining the justification.
+    detect_violation: |
+      # VIOLATION: wildcard IAM resource without justification
+      resource "aws_iam_policy" "execution_engine" {
+        statement {
+          actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+          resources = ["*"]  # BLOCKED — must specify table ARN
+        }
+      }
+    correct_pattern: |
+      resource "aws_iam_policy" "execution_engine" {
+        statement {
+          actions = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+          resources = [
+            "arn:aws:dynamodb:${var.region}:${var.account_id}:table/quantembrace-${var.env}-orders",
+            "arn:aws:dynamodb:${var.region}:${var.account_id}:table/quantembrace-${var.env}-positions",
+          ]
+        }
+      }
+
+  - id: no_open_security_groups
+    description: |
+      Security groups must not allow 0.0.0.0/0 ingress except for ALB/CloudFront
+      (port 443/80). All other ingress must use specific CIDR blocks or security
+      group references.
+    detect_violation: |
+      # VIOLATION: open ingress on trading service port
+      resource "aws_security_group_rule" "allow_kafka" {
+        type        = "ingress"
+        from_port   = 9098
+        to_port     = 9098
+        protocol    = "tcp"
+        cidr_blocks = ["0.0.0.0/0"]  # BLOCKED — Kafka must not be internet-accessible
+      }
+    correct_pattern: |
+      resource "aws_security_group_rule" "allow_kafka_from_services" {
+        type                     = "ingress"
+        from_port                = 9098
+        to_port                  = 9098
+        protocol                 = "tcp"
+        source_security_group_id = aws_security_group.trading_services.id
+      }
+
+  - id: no_ecs_resources
+    description: |
+      aws_ecs_* resources are BANNED. ECS Fargate was removed from this project.
+      All compute runs on EC2 ARM64 ASGs. Any aws_ecs_* resource is an architecture
+      regression.
+    forbidden_resource_types:
+      - "aws_ecs_cluster"
+      - "aws_ecs_service"
+      - "aws_ecs_task_definition"
+      - "aws_ecs_capacity_provider"
+    detect_violation: |
+      # VIOLATION: banned resource type
+      resource "aws_ecs_service" "execution_engine" { ... }
+      resource "aws_ecs_task_definition" "risk_engine" { ... }
+    correct_alternative: |
+      # Use EC2 ARM64 ASG with launch template:
+      resource "aws_autoscaling_group" "execution_engine" {
+        name                = "quantembrace-${var.env}-execution-engine-asg"
+        min_size            = 1
+        max_size            = 3
+        desired_capacity    = 1
+        vpc_zone_identifier = var.private_subnet_ids
+
+        launch_template {
+          id      = aws_launch_template.execution_engine.id
+          version = "$Latest"
+        }
+      }
+
+  - id: no_lambda_resources
+    description: |
+      aws_lambda_* resources are BANNED. Lambda is not suitable for the streaming,
+      stateful, low-latency workloads in this platform. All services run as long-lived
+      EC2 processes.
+    forbidden_resource_types:
+      - "aws_lambda_function"
+      - "aws_lambda_event_source_mapping"
+      - "aws_lambda_permission"
+    detect_violation: |
+      resource "aws_lambda_function" "signal_processor" { ... }
+
+  - id: no_sqs_resources
+    description: |
+      aws_sqs_* resources are BANNED. SQS was removed — Kafka MSK Serverless is the
+      only message bus. SQS does not support the ordered, compacted, replay-capable
+      semantics required by this platform.
+    forbidden_resource_types:
+      - "aws_sqs_queue"
+      - "aws_sqs_queue_policy"
+    detect_violation: |
+      resource "aws_sqs_queue" "signal_queue" { ... }
+
+  - id: resource_naming_convention
+    description: |
+      All AWS resources must follow: quantembrace-{env}-{name}
+      The {env} must come from var.env (not hardcoded).
+    detect_violation: |
+      # VIOLATION: hardcoded env in name
+      resource "aws_dynamodb_table" "orders" {
+        name = "quantembrace-prod-orders"  # Hardcoded env — use var.env
+      }
+      # VIOLATION: wrong naming scheme
+      resource "aws_dynamodb_table" "orders" {
+        name = "qe-orders-${var.env}"  # Wrong prefix
+      }
+    correct_pattern: |
+      resource "aws_dynamodb_table" "orders" {
+        name = "quantembrace-${var.env}-orders"  # Correct
+      }
+
+  - id: sensitive_outputs_marked
+    description: |
+      Any terraform output that contains a secret, token, key, or password
+      must have sensitive = true to prevent it from appearing in plan/apply output.
+    detect_violation: |
+      # VIOLATION: sensitive data in non-sensitive output
+      output "zerodha_api_secret" {
+        value = aws_secretsmanager_secret_version.zerodha.secret_string
+        # sensitive = true MISSING
+      }
+    correct_pattern: |
+      output "zerodha_api_secret" {
+        value     = aws_secretsmanager_secret_version.zerodha.secret_string
+        sensitive = true
+      }
+
+  - id: s3_dynamodb_state_backend
+    description: |
+      Every Terraform environment must use S3 + DynamoDB for state backend.
+      Local state and other backends are not allowed — they break team collaboration
+      and do not support state locking.
+    correct_pattern: |
+      terraform {
+        backend "s3" {
+          bucket         = "quantembrace-terraform-state"
+          key            = "${var.env}/terraform.tfstate"
+          region         = "ap-south-1"
+          encrypt        = true
+          dynamodb_table = "quantembrace-terraform-locks"
+        }
+      }
+
+  - id: ec2_arm64_instance_families
+    description: |
+      EC2 instances must use ARM64 families: c6g (compute-optimized) or t4g (burstable).
+      x86_64 instance types (c5, m5, t3, etc.) are not allowed — they increase cost
+      without performance benefit for our Python workloads on ARM64 AMIs.
+    allowed_instance_families:
+      - "c6g.*"    # compute-optimized ARM64
+      - "t4g.*"    # burstable ARM64
+      - "r6g.*"    # memory-optimized ARM64 (if needed for model serving)
+    detect_violation: |
+      instance_type = "c5.large"    # x86 — BLOCKED
+      instance_type = "t3.medium"   # x86 — BLOCKED
+      instance_type = "m5.xlarge"   # x86 — BLOCKED
+
+on_violation:
+  - action: block_merge
+  - message: |
+      BLOCKED: terraform_safety rule triggered.
+      Terraform changes violate platform architecture or security constraints.
+      ECS, Lambda, and SQS are banned. IAM must be least-privilege (no wildcard *).
+      Security groups must not allow 0.0.0.0/0 except ALB on 443/80.
+      All resources must be named quantembrace-{env}-{name} using var.env.
+      Use EC2 ARM64 ASGs (c6g/t4g) — never ECS, Lambda, or x86 instance types.

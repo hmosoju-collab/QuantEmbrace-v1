@@ -9,13 +9,10 @@ All AWS clients are created through this module so that:
 LocalStack auto-detection:
   Set LOCALSTACK_ENDPOINT_URL=http://localhost:4566 in your .env file.
   When present, all clients point to LocalStack instead of real AWS.
-  When absent, clients use the standard boto3 credential chain (IAM task role on ECS).
+  When absent, clients use the standard boto3 credential chain (IAM EC2 instance role).
 
 Usage:
-    from shared.aws.clients import get_sqs_client, get_dynamodb_resource, get_s3_client
-
-    sqs = get_sqs_client()
-    sqs.send_message(QueueUrl="...", MessageBody="...")
+    from shared.aws.clients import get_dynamodb_resource, get_s3_client
 
     dynamodb = get_dynamodb_resource()
     table = dynamodb.Table("my-table")
@@ -56,7 +53,6 @@ _BOTO_CONFIG = Config(
 
 # ── Module-level singletons ───────────────────────────────────────────────────
 # One client per type per process. boto3 clients are thread-safe.
-_sqs_client: Any = None
 _s3_client: Any = None
 _dynamodb_resource: Any = None
 _dynamodb_client: Any = None  # Low-level client (for conditional writes)
@@ -68,26 +64,6 @@ def _endpoint_kwargs() -> dict[str, Any]:
     if _LOCALSTACK_URL:
         return {"endpoint_url": _LOCALSTACK_URL}
     return {}
-
-
-def get_sqs_client() -> Any:
-    """
-    Return a shared boto3 SQS client.
-
-    Automatically points to LocalStack when LOCALSTACK_ENDPOINT_URL is set.
-
-    Returns:
-        boto3 SQS client (botocore.client.SQS).
-    """
-    global _sqs_client
-    if _sqs_client is None:
-        _sqs_client = boto3.client(
-            "sqs",
-            config=_BOTO_CONFIG,
-            **_endpoint_kwargs(),
-        )
-        _log_client_init("SQS")
-    return _sqs_client
 
 
 def get_s3_client() -> Any:
@@ -174,8 +150,7 @@ def reset_clients() -> None:
     Used in tests to force fresh client creation with different configs,
     e.g., when patching LOCALSTACK_ENDPOINT_URL between tests.
     """
-    global _sqs_client, _s3_client, _dynamodb_resource, _dynamodb_client, _secretsmanager_client
-    _sqs_client = None
+    global _s3_client, _dynamodb_resource, _dynamodb_client, _secretsmanager_client
     _s3_client = None
     _dynamodb_resource = None
     _dynamodb_client = None

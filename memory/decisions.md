@@ -983,6 +983,99 @@ Single implementation of "read DynamoDB prices table + check freshness" — elim
 
 ---
 
+## ADR-019: Trading Universe Model — Three-Mode Approved-Symbol System
+
+**Date**: 2026-05-26
+**Status**: Accepted — implementation active
+**Reference**: `configs/universe_modes.yaml`, `services/shared/universe/`
+
+### Context
+
+Paper trading sessions operated without a hard approved-symbol gate. Orders could be placed on any NSE symbol that a strategy generated a signal for, even if that symbol was not in the intended watchlist. There was no mechanism to promote from a safe subset to a broader universe, or to enforce the approved set at the order level.
+
+### Decision
+
+Implement a **three-mode universe model** with immutable daily snapshots and a hard order validation gate.
+
+| Mode | Symbols | Use Case |
+|---|---|---|
+| `PAPER_SAFE_START` | NIFTY 50 only (50 symbols) | Initial paper trading — well-known, liquid, well-covered |
+| `PAPER_EXPAND` | NIFTY 100 + active F&O (≈120 symbols) | After ≥5 clean sessions on PAPER_SAFE_START |
+| `LIVE_ADVANCED` | All 3 tiers + screened illiquid (≈200 symbols) | After passing promotion gates in `configs/promotion_gates.yaml` |
+
+### Key Design Choices
+
+1. **Immutable daily snapshot**: Built once at service startup from `configs/universe_modes.yaml`, refreshed at midnight IST by a background loop. After the snapshot is built, it is frozen for the trading day — no mid-session additions.
+
+2. **Hard order validation (`UniverseOrderValidator`)**: Every NSE order is validated against the snapshot. In paper mode, stale or missing snapshots produce warnings but allow orders. In live mode, stale or missing snapshots block all orders.
+
+3. **Daily snapshot refresh loop** (`_universe_snapshot_refresh_loop`): Checks every 60s whether the snapshot date matches today (IST). Rebuilds if stale. `_universe_mode_str` stored as instance var so mode is preserved across rebuilds.
+
+4. **Permissive paper / strict live**: Paper mode never blocks on universe issues — a single bad snapshot cannot prevent a whole paper session. Live mode is fail-closed.
+
+5. **Promotion gates** (`configs/promotion_gates.yaml`): Explicit criteria for moving between modes. `LIVE_ADVANCED` requires ≥5 clean PAPER_EXPAND sessions + all promotion gate metrics passing.
+
+### Consequences
+
+- `UNIVERSE_MODE` env var controls the mode (docker-compose: `PAPER_EXPAND`)
+- `configs/universe_modes.yaml` is mounted read-only into execution_engine container
+- `configs/promotion_gates.yaml` defines numeric thresholds for mode promotion
+- Stale snapshots (day 2+) log a warning per order in paper mode — this is expected and acceptable
+
+---
+
+## ADR-020: Paper Trading Readiness Sweep — Six Execution Quality Fixes
+
+**Date**: 2026-05-27
+**Status**: Accepted — all fixes applied
+**Session**: Post-days-1-6 comprehensive review
+
+### Context
+
+Five paper trading sessions (Days 1-5) produced poor execution quality:
+- Days 1-4: zero paper trades (100% signal rejection)
+- Day 5: some trades, poor signal coverage (60 signal ceiling, 5x NAV mismatch)
+- Day 6: monitoring-only session, no fills
+
+A systematic review identified six execution gaps.
+
+### Root Cause: Days 1-4 (Zero Trades)
+
+**Candle signal age mismatch**: `strategy_engine` stamps `Signal.generated_at = candle.candle_close_time` (not poll time). A 1-minute candle closing at T is written to DynamoDB at T+5s, polled at T+5.5s, enriched by ai_engine, and arrives at risk_engine at T+7-12s. `RISK_MAX_SIGNAL_AGE_SECONDS` was at code default of 5.0s → 100% rejection.
+
+**Fix**: `RISK_MAX_SIGNAL_AGE_SECONDS: "30"` in docker-compose risk_engine block. Hard ceiling `_ABSOLUTE_MAX_AGE_SECONDS = 30.0` in `SignalAgeValidator` prevents mis-configuration above 30s. Regression test: `tests/unit/test_signal_age_candle.py` (8 tests).
+
+### Six Fixes Applied
+
+| Fix | File | Problem | Change |
+|---|---|---|---|
+| FIX-A | `execution_engine/service.py` | `submit_order` return not checked — duplicate could double position | `submitted = await ...; if not submitted: return` |
+| FIX-B | `execution_engine/service.py` | Universe snapshot never refreshed after midnight IST | Added `_universe_snapshot_refresh_loop` background task (task 12) |
+| FIX-C | `docker-compose.yml` (setup block) | `PAPER_SEED_NAV` defaulted to ₹50L; risk_limits uses ₹10L (5x mismatch) | `PAPER_SEED_NAV: "1000000"` |
+| FIX-D | `scripts/setup_local_tables.py` | Strategy configs not seeded — `_DEFAULT_CONFIG` caps at 10 signals/day silently | `_seed_strategy_configs()` seeds all 6 strategies with `max_signals_per_day=0` |
+| FIX-E | `risk_engine/service.py` | `RiskDecision.to_dict()` omitted `enriched` field — session report showed 0% enrichment | `enriched: bool = False` field + set `decision.enriched = True` in enriched loop |
+| FIX-F | `scripts/monitoring/paper_session_report.py` | Enrichment detection checked validator name substring — no validator named "enriched" | Reads `blob.get("enriched", False)` directly |
+
+### Tests Added
+
+- `tests/unit/test_signal_age_candle.py` — 8 tests: candle signal age regression, boundaries, hard ceiling
+- `tests/unit/test_paper_readiness_gaps.py` — 8 tests: paper duplicate suppression (FIX-A), stale snapshot paper vs live mode (FIX-B)
+
+### Operational Requirement
+
+Before next session: `docker-compose down -v && docker-compose run --rm setup`
+
+This is required to pick up FIX-C (new PAPER_SEED_NAV) and FIX-D (strategy config seeds). Existing LocalStack data from prior sessions has the old ₹50L NAV and no strategy config rows.
+
+### Consequences
+
+- Paper sessions should now produce fills if market conditions match any of the 6 strategies
+- Session report enrichment funnel will show accurate `total_enriched` / `total_degraded` split
+- Strategy signal caps no longer silently limit sessions to 60 total signals
+- Pre-flight check (`scripts/deploy/paper_preflight_check.py`) added for session startup validation
+
+---
+
 ## ADR-018: Live Trading Tightening — Lock Poisoning Fix, Stale-LTP Blocking, Preflight Gates
 
 **Date**: 2026-05-25
@@ -1024,4 +1117,450 @@ Pre-live audit revealed four safety gaps:
 - `QE_EXECUTION_LIVE_TRADING_ENABLED` must be explicitly set to `true` to unlock live broker orders.
 - Preflight check now correctly reads kill-switch state from the risk-state table.
 - Monitoring §6 shows `Stale LTP exit blocks` counter; §7 shows `Live exits placed` (successes).
+
+---
+
+## ADR-021: Staleness Monitor Split — Separate Producer and Consumer Freshness Gates
+
+**Date**: 2026-05-29
+**Status**: Accepted (implementation pending)
+
+### Context
+
+During Day 8/9 paper trading session, the `data_staleness_monitor` in risk_engine auto-triggered the kill switch twice. Initial diagnosis incorrectly concluded the Zerodha WebSocket feed was silent. Actual cause: `ticks.nse` had 253,788 messages — the feed was healthy. The real issue was Kafka consumer group rebalancing during a strategy_engine container rebuild froze risk_engine's own consumer briefly, causing `record_data_tick` calls to stop for >300s.
+
+The current design has a single staleness gate: "no `record_data_tick` calls in N seconds → kill switch." This conflates two distinct failure modes:
+1. **Producer stale** — data_ingestion stops publishing to `ticks.nse` (real data feed failure)
+2. **Consumer lagging** — risk_engine's Kafka consumer falls behind or pauses (internal infrastructure issue)
+
+These have very different remediation paths. Producer stale is a genuine data emergency. Consumer lag is an infrastructure/rebalance event that self-resolves within seconds.
+
+Additionally, `risk_limits_production.yaml` (in `configs/`) is NOT wired to risk_engine. The risk_engine reads limits from hardcoded `RiskLimits.for_profile()` in `services/risk_engine/limits/risk_limits.py`. The YAML is aspirational documentation and is not mounted into the risk_engine container. There is no session-level override mechanism for risk limits.
+
+### Decision
+
+**Phase 1 (post Day 8):** Split the staleness monitor into two independent checks:
+
+```python
+# In risk_engine data_staleness_monitor:
+producer_freshness_gate:
+  metric: last_tick_timestamp on ticks.nse topic (high-watermark query)
+  threshold: RISK_TICK_PRODUCER_STALE_SECONDS = 60
+  action_on_breach: kill_switch.activate()
+  rationale: If nobody is publishing ticks, it is a real data emergency
+
+consumer_freshness_gate:
+  metric: risk_engine consumer lag on ticks.nse consumer group
+  threshold: RISK_TICK_CONSUMER_LAG_SECONDS = 60
+  action_on_breach: log WARNING + metrics; do NOT trigger kill switch
+  rationale: Consumer lag is an infra event (rebalance, GC pause); self-resolves
+```
+
+Remove `RISK_DATA_FEED_STALE_SECONDS` as a single undifferentiated gate. Replace with the two thresholds above.
+
+**Phase 2 (pre-live):** Wire `risk_limits_production.yaml` into the risk_engine:
+- Mount `./configs:/app/configs:ro` in docker-compose for risk_engine
+- Add `RiskLimits.from_yaml(path)` loader that overlays the YAML onto `for_profile()` defaults
+- Add session-override support via DynamoDB `risk-state` table (allows session-specific tightening without code changes or container rebuilds)
+
+### Workaround Applied (Day 8)
+
+Set `RISK_DATA_FEED_STALE_SECONDS=3600` in `.env` to prevent false kill-switch triggers during paper sessions where Kafka consumer rebalancing is common. This masks the consumer-lag issue. Acceptable for paper trading only. **Must be reverted to 60s before live trading, or replaced with the Phase 1 split.**
+
+Session guardrails enforced via DynamoDB `max_signals_per_day`:
+- `nse_vwap_reversion`: cap=8 (6 already today → 2 more allowed)
+- `nse_momentum_v1`: cap=2 (0 today → 2 total allowed)
+- `nse_scalp_1m`: enabled=false (disabled for remainder of session)
+
+### Consequences
+
+- `RISK_DATA_FEED_STALE_SECONDS=3600` must be reverted before live trading.
+- Phase 1 implementation requires changes to `services/risk_engine/` staleness monitor.
+- Phase 2 requires docker-compose update (add volumes to risk_engine) and `RiskLimits.from_yaml()` loader.
+- Until Phase 2: `risk_limits_production.yaml` is documentation only, not enforced at runtime.
 - `tee_stale_ltp_blocks` incremented in `LiveCounters` and flushed to monitoring JSON every 60 s.
+
+---
+
+## ADR-022: Live-Readiness Audit — Infrastructure and Code Fixes
+
+**Date:** 2026-05-30
+**Status:** Accepted — fixes applied; 2 Terraform blockers remain for manual edit before `terraform apply`
+
+### Context
+
+A structured four-phase live-readiness audit (Phases A–D) was conducted as a static code and infrastructure review. Phase A covered AWS infrastructure; Phase B covered service code (strategy_engine, ai_engine, data_ingestion); Phase C covered all 12 risk validators; Phase D produced the consolidated pre-live runbook. No runtime AWS state was mutated during the audit.
+
+### Critical Discoveries
+
+**CRITICAL — broke existing sessions silently:**
+- `symbol-status-index` GSI was absent from the orders DynamoDB table. `PositionValidator._get_pending_quantity()` queries this GSI on every signal — its absence caused `ValidationException` on every position check, rejecting all live signals and bypassing dirty-read protection on paper signals.
+- `sessions` DynamoDB table was absent from Terraform. `ZerodhaTokenManager` raises `ResourceNotFoundException` on every token read, causing data_ingestion and execution_engine to use stale env var tokens that expire at 07:30 IST.
+
+**HIGH — would prevent any EC2-deployed session from trading:**
+- `RISK_MAX_SIGNAL_AGE_SECONDS` was not injected into EC2 userdata scripts. Code default is `5s`. Candle signals are 7-12s old at risk_engine; all would be rejected.
+- `RISK_PROFILE` was not injected into risk_engine userdata. Default is `tiny-live` (max 1 concurrent position, ₹5k max order), making paper-session testing unrepresentative.
+- `UNIVERSE_MODE` was not injected into execution_engine userdata.
+- `deploy.yml` references `check_asg_health.py` but only `check_ecs_health.py` (ECS API, wrong interface) existed — every CI/CD deploy failed at the health-check step.
+
+**MEDIUM — race conditions in risk validators:**
+- `DailyLossValidator._apply_fill_to_daily_symbol_pnl()` used get → compute → put without locking. Concurrent fills for the same symbol could corrupt the per-symbol cost basis.
+
+**CODE — pre-live fixes still pending:**
+- `strategy_engine/_candle_processing_loop()`: candle signal publish failures silently dropped (no retry/DLQ). Tick path correctly raises.
+- `strategy_engine/start()`: `asyncio.gather(return_exceptions=True)` silently swallows crashed processing loops. Service appears healthy while generating no signals.
+
+### Decisions
+
+1. **Add `symbol-status-index` GSI** to `infra/terraform/modules/dynamodb/main.tf` orders table. `hash_key=symbol`, `range_key=order_status`, `projection_type=INCLUDE`, `non_key_attributes=["quantity"]`.
+
+2. **Add `sessions` DynamoDB table** to `infra/terraform/modules/dynamodb/main.tf`. TTL 48h; PITR enabled. Required by `ZerodhaTokenManager` in all services.
+
+3. **Inject trading safety env vars** into EC2 userdata scripts:
+   - `risk_engine.sh`: `RISK_MAX_SIGNAL_AGE_SECONDS=30`, `RISK_PROFILE=paper`
+   - `execution_engine.sh`: `UNIVERSE_MODE=PAPER_SAFE_START`, `QE_EXECUTION_LIVE_TRADING_ENABLED` commented out
+   - `strategy_engine.sh`: `RISK_MAX_SIGNAL_AGE_SECONDS=30`
+
+4. **Create `check_asg_health.py`** in `scripts/deploy/` using `autoscaling:describe-auto-scaling-groups` API. Accepts `--asg`, `--min-healthy`, `--allow-zero-desired`. Unblocks every CI/CD deploy.
+
+5. **Per-symbol asyncio lock** in `DailyLossValidator.record_fill()`. `self._symbol_locks.setdefault(symbol, asyncio.Lock())` serializes same-symbol fills without blocking cross-symbol concurrency. Dict is bounded by universe size (~50-200 symbols).
+
+6. **Fix three validator docstrings** (MarginValidator, SlippageValidator, SectorConcentrationValidator) that incorrectly described fail-open behavior on missing live data — actual behavior is fail-closed for live, fail-open for paper.
+
+### Terraform Blockers Still Requiring Manual Edit
+
+The following must be hand-edited before `terraform apply`:
+1. `prod/main.tf:58`: `single_nat_gateway = false` → `ha_nat = true` (VPC module declares `ha_nat`, not `single_nat_gateway` — plan fails without this fix)
+2. Add `sessions` table resource block (provided in `docs/live-readiness/pre-live-runbook.md §5.1`)
+
+### Code Fixes Still Pending
+
+- `strategy_engine/service.py`: candle signal publish retry (B-001) — MEDIUM, pre-live
+- `strategy_engine/service.py`: `asyncio.gather(return_exceptions=True)` → `False` (B-002) — HIGH, pre-live
+- `execution_engine/service.py`: `_signal_locks` cleanup (HIGH-001) — MEDIUM, pre-Stage-2
+
+### Consequences
+
+- The `sessions` table Terraform addition requires a `terraform apply` — new table creation, no existing data affected.
+- The `symbol-status-index` GSI addition to orders is an online DynamoDB update (5-20 min backfill, no downtime).
+- EC2 userdata changes take effect only after an ASG instance refresh (new instances read updated userdata).
+- `RiskLimits` still loaded from `for_profile()` hardcoded defaults (ADR-021 Phase 2 gap). `risk_limits_production.yaml` is still documentation only.
+- Pre-live runbook: `docs/live-readiness/pre-live-runbook.md`.
+
+---
+
+## ADR-023: Phase 3 Code Safety Fixes — Kill Switch, Memory Leak, Staleness Monitor Split
+
+**Date:** 2026-05-30
+**Status:** Accepted — all fixes applied
+
+### Context
+
+Phase 3 code safety audit identified five issues requiring fixes before Stage-1 live validation: a memory leak in execution_engine, a boto3 resource recreation hotspot in strategy_engine, two silent failure modes in the strategy_engine processing loop, and the ADR-021 Phase 1 staleness monitor split that unblocks removal of the `RISK_DATA_FEED_STALE_SECONDS=3600` workaround.
+
+### Decisions and Fixes
+
+**HIGH-001 — `_signal_locks` memory leak (execution_engine/service.py)**
+
+`self._signal_locks.setdefault(signal_id, asyncio.Lock())` accumulated one Lock object per processed signal with no cleanup. Over a long session this grows unboundedly.
+
+Fix: `self._signal_locks.pop(signal_id, None)` inserted before every `return` statement inside the `async with signal_lock:` block (5 locations). The pop happens while the lock is held, preventing a race with any concurrent coroutine waiting on the same lock object.
+
+**B-003 — `get_dynamodb_resource()` in kill switch hot path (strategy_engine/service.py)**
+
+`_is_kill_switch_active()` called `get_dynamodb_resource()` on every 1s cache miss, creating a new boto3 Session + DynamoDB resource each time.
+
+Fix: `self._ks_dynamo_table` cached in `start()` once, reused by `_is_kill_switch_active()`. Falls back to creating a new resource if called before `start()` (defensive `or` expression).
+
+**B-001 — Candle signal publish failure silently dropped (strategy_engine/service.py)**
+
+`_candle_processing_loop()` called `await self._publish_signal()` without checking the return value. Kafka delivery failures were silently swallowed with no metric, no alert, no retry — asymmetric with the tick path which raises.
+
+Fix: return value checked; on failure, logs CRITICAL with signal_id/strategy/symbol and emits `CandleSignalPublishFailed` CloudWatch metric. Loop continues (does not raise) because candle signals are not tied to a retriable Kafka message offset.
+
+**B-002 — `asyncio.gather(return_exceptions=True)` in strategy_engine**
+
+A permanently crashed processing loop (e.g., Kafka auth revoked) was silently swallowed by `return_exceptions=True`. The service appeared healthy while generating no signals.
+
+Fix: keep `return_exceptions=True` so all loops run to completion before the gather returns, but iterate the results and re-raise the first non-CancelledError with a CRITICAL log. This surfaces the crash via service exit → systemd restart while still reporting all crashed loops.
+
+**ADR-021 Phase 1 — Staleness monitor split (risk_engine + data_ingestion)**
+
+The single `_monitor_data_staleness()` (threshold used as `RISK_DATA_FEED_STALE_SECONDS`) conflated two distinct failure modes:
+1. data_ingestion WebSocket dead → no ticks published to Kafka
+2. risk_engine Kafka consumer lagging → signals exist on Kafka but not yet consumed
+
+The 3600s workaround masked mode 2 (consumer rebalancing) at the cost of also masking mode 1 (dead feed). The split separates them:
+
+- **Monitor 3 (renamed `_monitor_consumer_lag`)**: fires when risk_engine receives no signals from Kafka for `consumer_lag_stale_secs` (default 300s). Tolerates consumer rebalancing. `RISK_DATA_FEED_STALE_SECONDS` env var now controls this parameter (set to 300 or omit; remove the 3600 workaround from `.env`).
+
+- **Monitor 5 (`_monitor_producer_heartbeat`)**: fires when `data_ingestion`'s DynamoDB heartbeat key is absent/stale by `producer_heartbeat_stale_secs` (default 60s). data_ingestion writes `HEARTBEAT#{market}/CURRENT` to the latest-prices table every 10s. Disabled if `dynamo_client=None` (backwards-compatible default).
+
+### Consequences
+
+- Remove `RISK_DATA_FEED_STALE_SECONDS=3600` from `.env` — code default of 300s is safe.
+- `KillSwitchMonitor(data_stale_secs=...)` parameter is still accepted (backwards-compatible alias for `consumer_lag_stale_secs`).
+- Producer heartbeat monitor requires data_ingestion to have IAM write access to latest-prices table (already granted).
+- `_signal_locks` dict is now bounded by concurrent in-flight signals (not total historical signals).
+- Strategy engine loop crashes are now visible in CloudWatch Logs and trigger service restart.
+- Candle signal publish failures are now visible in CloudWatch (`CandleSignalPublishFailed` metric) and can be alarmed on.
+
+---
+
+## ADR-024: Monitoring Agent Phase 2 — Enrichment-Only Severity Engine
+
+**Date:** 2026-05-31
+**Status:** Accepted — implemented, 123 tests passing
+
+### Context
+
+Phase 1 of the monitoring agent delivers a coarse per-component `Status` (ok/degraded/down/unknown) with worst-wins roll-up to `overall_status`. This tells an operator *that* something is wrong, but not *how bad* or *how urgent*. An execution_engine that is unreachable and a non-critical sidecar with elevated restart counts are both `DOWN`, but one requires immediate action and the other does not.
+
+Phase 2 was gated on the monitoring LLD being reviewed (ADR implicit in `monitoring_agent_deployment_and_lld.md`). That gate was passed in the previous session. This ADR records the design decisions made during Phase 2 implementation.
+
+### Decision 1: Severity is additive enrichment — it never changes overall_status
+
+The Phase 2 severity report (`SeverityReport`) is attached to the snapshot as `snapshot.severity` and `snapshot.phase = 2`, but it never replaces `overall_status` and never changes when a Slack alert fires (that remains driven by the existing `Status`-based edge-triggered incident log).
+
+**Why:** The incident log is restart-safe and edge-triggered — it replays the on-disk JSONL on restart to restore prior state so it does not re-alert on the same condition after a restart. This property is load-bearing for operational reliability. Wiring alerting to severity (a richer but also more complex classification) would require re-proving restart-safety for the severity track. The additive design preserves all existing guarantees while adding operator visibility.
+
+**Implication:** The existing `test_snapshot_overall_and_json_roundtrip` test (`snap.phase == 1`) passes unchanged because `collect_once` still builds the snapshot with `phase=1`; `run_once` bumps it to `2` after enrichment. Severity is attached only when the engine runs (i.e., in `run_once`); a directly-constructed snapshot has `severity=None`.
+
+### Decision 2: INFO / WARNING / CRITICAL / BLOCKER ladder with capital-protection ordering
+
+Four levels chosen to match operator intuition at trading-platform stakes:
+
+| Severity | Meaning | Example |
+|---|---|---|
+| INFO | Healthy or informational | All services OK; feed fresh; no error-log matches |
+| WARNING | Non-critical impairment — watch | ai_engine down (non-critical); consumer lag approaching threshold; feed mildly stale |
+| CRITICAL | Critical component impaired or blind — page someone | risk_engine degraded; Kafka consumer lag above critical threshold; broker feed very stale; UNKNOWN on critical component |
+| BLOCKER | Critical component down — trading must not proceed | execution_engine unreachable; Kafka event bus down; risk_engine table DELETING |
+
+Mapping rule: `severity_for_status(status, critical=True/False)` is the default; detectors may override directly from numeric measurements (lag, restarts, staleness).
+
+### Decision 3: Detectors are pure (no I/O) — Phase 2 stays observe-only
+
+Each detector implements `detect(result: CollectorResult) -> list[Finding]` with no I/O. It reads only the `details` dict the Phase 1 collector already produced (guaranteed secret-free by the collector contract). This is what keeps Phase 2 strictly observe-only: there is nothing to block, no network call, no write.
+
+The `SeverityEngine` wraps every `detect()` call in a try/except — a malfunctioning detector cannot crash a collection cycle.
+
+### Decision 4: Lag threshold uses max_lag (worst single partition), not total_lag
+
+A single partition falling far behind is the canonical "consumer is stuck" signal. Using `max_lag` keeps thresholds stable regardless of partition count (a 50-partition topic with total_lag=50000 split evenly is fine; one partition at 50000 is not). `total_lag` is still surfaced in the finding's `context` for the operator.
+
+### Decision 5: Broker staleness is market-hours-aware; off-hours → no finding
+
+A stale feed off market hours is expected (no ticks published). The `BrokerDetector` returns `[]` when `market_open=False`. During market hours: `newest_age > max_age` → WARNING; `newest_age > 3× max_age` → CRITICAL ("very stale — feed likely down").
+
+### Decision 6: Slack severity line only shows CRITICAL/BLOCKER findings by message
+
+The Slack payload appends a one-line severity summary (overall + counts) and individually lists CRITICAL/BLOCKER findings by `message` only. WARNING findings are counted but not individually listed (keeps alerts actionable, not verbose). Raw collector `details` are never sent (they may contain log lines or metric values).
+
+### File map
+
+| File | Role |
+|---|---|
+| `services/monitoring_agent/detectors/severity.py` | Severity enum, rank, worst_severity, severity_for_status |
+| `services/monitoring_agent/detectors/base.py` | Finding dataclass, Detector ABC |
+| `services/monitoring_agent/detectors/engine.py` | 6 dedicated detectors + SeverityEngine + SeverityReport |
+| `services/monitoring_agent/detectors/__init__.py` | Re-exports all public API |
+| `services/monitoring_agent/snapshot.py` | Added optional `severity` field + phase=1 default |
+| `services/monitoring_agent/app.py` | run_once: evaluate → attach → persist → transition (Status-based, unchanged) |
+| `services/monitoring_agent/notify/slack.py` | format_slack_payload: optional report → severity line + top findings |
+| `tests/unit/test_monitoring_detectors.py` | 57 new tests (57 + 66 existing = 123 total, all passing) |
+
+### Consequences
+
+- `snapshot.to_dict()` now includes a `"severity"` key when Phase 2 has run. Consumers that read the snapshot file get richer data; consumers that only check `overall_status` are unaffected.
+- Phase 3 (`actions/`) can now read `SeverityReport.findings_at_or_above(Severity.BLOCKER)` to gate risk-reducing actions without re-classifying anything.
+- The Self-Improvement Assistant's planned post-session report can include severity breakdown from the snapshot file with no additional collection.
+
+---
+
+## ADR-025: Monitoring Agent Phase 3 — Safe Actions Layer Design
+
+**Date:** 2026-05-31
+**Status:** Accepted — framework implemented, 53 tests passing
+
+### Context
+
+Phase 2 (ADR-024) delivers a severity-classified snapshot but takes no actions.
+Phase 3 adds the "classify → act conservatively" layer. The key design tension
+is: how do we enable autonomous risk-reducing responses while maintaining strict
+guarantees that live trading state cannot be accidentally mutated?
+
+### Decision 1: safe_actions lives in execution_engine, not monitoring_agent
+
+The safe_actions module (`services/execution_engine/safe_actions/`) owns the
+implementation. The monitoring agent's `actions/__init__.py` re-exports from it.
+This keeps the action logic co-located with the services it acts on, and means
+the monitoring agent does not need to duplicate knowledge of DynamoDB table names,
+Kafka topic names, or kill switch semantics.
+
+### Decision 2: Fail-closed executor — every path writes an audit record
+
+The executor's contract: any unrecognised action type, policy violation,
+precondition failure, or unexpected exception returns an `ExecutionResult` with
+`blocked=True` or `error=<type>`. An audit record is written for every call —
+including blocked and forbidden ones. The caller can unconditionally log the result.
+
+### Decision 3: Docker restart is explicitly forbidden in Phase 3 (and Phase 4)
+
+Restarting Docker containers is not an approved safe action. Reasons: hides root
+cause; operationally invasive; does not directly reduce trading exposure; the
+EnrichmentWatchdog already handles ai_engine unavailability. The classifier sets
+`suppress_docker_restart=True` on every `ClassifiedObservation`. When a service
+is DOWN the classifier proposes `SEND_ALERT` + `GENERATE_RUNBOOK_COMMAND`; the
+operator runs the command manually. See `docs/runbooks/manual-service-restart-runbook.md`.
+
+### Decision 4: Three action types fully implemented; all others are framework stubs
+
+SEND_ALERT, GENERATE_RUNBOOK_COMMAND, and READ_RUNTIME_STATE are fully implemented
+in Phase 3. All DynamoDB/Kafka write actions are framework-complete stubs that
+return `stub_not_implemented=True`. This lets Phase 3 pass end-to-end tests and
+produce real audit records without requiring the write path to exist.
+
+### Decision 5: Idempotency is in-memory per session
+
+The executor tracks executed `idempotency_key` values in a dict for the session
+lifetime. A duplicate key produces `idempotency_skipped=True` and an audit record
+but no re-execution. On restart the store resets (acceptable for Phase 3; Phase 4
+may persist via JSONL replay).
+
+### Decision 6: Policy uses TradingMode, not raw env vars
+
+The executor never reads environment variables directly. `SafeActionPolicy.from_env()`
+resolves `RISK_PROFILE` + `QE_EXECUTION_LIVE_TRADING_ENABLED` to a `TradingMode` enum
+once at construction. This makes policy rules testable without monkeypatching env vars
+in most tests.
+
+### Forbidden actions (enumerated, not inferred)
+
+The forbidden-context list (`FORBIDDEN_CONTEXT_LABELS`) explicitly names 17 operations
+that must never execute. This is a deny-list, not an allow-list — it is additive and
+can only grow. Any operation not in the classifier's code table defaults to `ALERT_ONLY`
+(conservative unknown-code handling).
+
+### Consequences
+
+- 53 new tests; 176 total passing (safe_actions + Phase 2 + Phase 1).
+- The monitoring agent remains in `notify_only` mode; Phase 3 code is present but not
+  wired. Operator must set `ACTION_MODE=safe_actions` to enable Phase 4 execution.
+- Phase 4 adds the two write handlers (BLOCK_NEW_ENTRIES, ACTIVATE_KILL_SWITCH). See ADR-026.
+
+---
+
+## ADR-026: Monitoring Agent Phase 4 — Only Two Write Handlers
+
+**Date:** 2026-05-31
+**Status:** Accepted — implemented, 217 tests passing
+
+### Decision
+
+Phase 4 implements exactly two DynamoDB write handlers:
+`BLOCK_NEW_ENTRIES` and `ACTIVATE_KILL_SWITCH`. All other action types remain
+stubs (framework-complete but no write). This was explicitly confirmed by the
+operator mid-implementation as the correct scoping.
+
+### Why only two
+
+Capital protection is the first principle. Every additional write handler adds
+blast radius. BLOCK_NEW_ENTRIES and ACTIVATE_KILL_SWITCH are the two actions that
+meaningfully reduce risk in an emergency:
+
+- **BLOCK_NEW_ENTRIES** prevents new exposure from being created. It is the
+  minimum viable response to a data quality issue (stale LTP, missing prices)
+  that should not halt current positions.
+- **ACTIVATE_KILL_SWITCH** halts the trading pipeline entirely. It is the
+  correct response to an unmanaged position or a critical infrastructure failure
+  that could cause uncontrolled exposure.
+
+All other actions (paper repairs, runbook generation, reconciliation) are either
+advisory (the human acts) or lower priority than the two above.
+
+### DynamoDB key decisions
+
+**BLOCK_NEW_ENTRIES → `ENTRY_BLOCK/GLOBAL` in risk-state table.**
+There was no existing global entry-block mechanism. The closest existing pattern
+is `max_signals_per_day` in strategy-config (per-strategy), but that mutates
+strategy config — a higher-risk write. A dedicated `ENTRY_BLOCK/GLOBAL` key in
+the risk-state table is narrower, less likely to accidentally affect strategy
+parameters, and consistent with the kill switch pattern (a single global boolean
+in the same table). The reading side (strategy_engine honoring the flag) is Phase 5.
+
+**ACTIVATE_KILL_SWITCH → `KILLSWITCH/GLOBAL` using `kill_switch_item()`.**
+Must use the canonical schema from `shared/risk_state.py` so the existing
+`KillSwitch._load_state()` reader in risk_engine parses the item correctly. Using
+a different schema would break the existing infrastructure.
+
+### Exit management is unaffected
+
+Both writes intentionally leave exit management (TEE, MIS, ExitOrderRouter) untouched.
+BLOCK_NEW_ENTRIES affects only entry-signal production (ENTRY_BLOCK key, not orders/positions).
+ACTIVATE_KILL_SWITCH blocks signal approvals but the execution_engine's exit path
+operates on fills and scheduled events, not approved signals. Verified in tests.
+
+### Consequences
+
+- 41 new tests (20 unit + 21 integration); 217 total passing.
+- The `shared/risk_state.py` gains `ENTRY_BLOCK_PK`, `ENTRY_BLOCK_SK`,
+  `entry_block_key()`, and `entry_block_item()` — safe additions, no existing
+  behavior changed.
+- `SafeActionExecutor` gains `dynamo_writer` optional param — backward compatible
+  (None falls back to stub, preserving all Phase 3 test behavior).
+- Pre-existing failures in test_mis_square_off.py (20), test_position_reconciliation,
+  and test_trade_exit_engine (3) are unrelated to Phase 4 and unchanged.
+- Phase 4 wires the executor into `run_once()` and implements the DynamoDB/Kafka write
+  handlers. Highest-priority Phase 4 actions: BLOCK_NEW_ENTRIES and ACTIVATE_KILL_SWITCH.
+
+---
+
+## ADR-027: Monitoring Agent Phase 5 — ENTRY_BLOCK Enforcement + ACTION_MODE Gate
+
+**Date:** 2026-05-31
+**Status:** Accepted — implemented, 411 tests passing
+
+### Decision 1: EntryBlockReader mirrors the kill-switch reader pattern exactly
+
+The existing `_is_kill_switch_active()` in strategy_engine uses a TTL-cached
+DynamoDB read via `asyncio.to_thread()` with a cached DynamoDB Table object.
+`_is_entry_blocked()` follows the same pattern for consistency and minimal diff:
+`EntryBlockReader` wraps the low-level boto3 client, cache TTL 5s, constructed in
+`start()`. This keeps strategy_engine's two safety-flag patterns identical.
+
+### Decision 2: Check entry-block BEFORE runner dispatch, not in _publish_signal()
+
+The user required "do not increment signals_today if signal was never emitted."
+`_signals_today` is incremented inside `runner.dispatch_tick()` / `runner.dispatch_bar()`
+via `_enforce_daily_cap()`, before `_publish_signal()` is called. So the check must
+happen BEFORE dispatch. For ticks, the existing `suppress_signals` pattern is reused
+(call `runner._strategy.on_tick()` for indicator update, skip dispatch). For candles,
+dispatch is skipped entirely.
+
+### Decision 3: Fail behavior is mode-aware, resolved from RISK_PROFILE
+
+Paper mode (`RISK_PROFILE=paper`): DynamoDB read failure → warn + allow (fail-open).
+Operators in paper mode should not be blocked from trading due to a monitoring
+infrastructure failure. Live modes: fail-closed (block entries). This is the same
+principle as live fail-closed for missing/stale data (CLAUDE.md §Non-Negotiable Safety Rules).
+
+### Decision 4: ACTION_MODE gate in monitoring_agent is opt-in, default notify_only
+
+`MONITORING_ACTION_MODE` defaults to `notify_only` (same as Phase 1). Operators must
+explicitly set `safe_actions` to enable autonomous execution. This preserves the
+original Phase 1/2 safety contract: "the agent only observes, classifies, records,
+and notifies" unless explicitly told otherwise.
+
+### Decision 5: _run_safe_actions() executes only the first proposed action per finding
+
+Executing all proposed actions per finding in one cycle risks race conditions (e.g.
+BLOCK_NEW_ENTRIES + SEND_ALERT both writing in the same 30s cycle). Taking the
+highest-priority action and relying on idempotency for deduplication is safer.
+
+### Consequences
+
+- 411 tests total passing (Phase 5 + 4 + 3 + 2 + 1).
+- `BLOCK_NEW_ENTRIES` is now fully effective: write → read → suppress.
+- `MONITORING_ACTION_MODE=safe_actions` is production-gated; no running session is affected.
+- Pre-existing failures (mis_square_off, position_reconciliation, trade_exit_engine) unchanged.

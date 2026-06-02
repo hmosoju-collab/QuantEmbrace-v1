@@ -171,7 +171,7 @@ An infrastructure change is done when **all** of the following are true:
 - [ ] No wildcard (`*`) permissions on IAM policies unless specifically justified.
 - [ ] Security groups follow least-privilege (no 0.0.0.0/0 ingress unless public-facing).
 - [ ] Secrets are stored in Secrets Manager, not in environment variables or SSM parameters.
-- [ ] Encryption at rest is enabled for all new storage resources (S3, DynamoDB, SQS).
+- [ ] Encryption at rest is enabled for all new storage resources (S3, DynamoDB, Kafka).
 
 ### Review
 - [ ] Infrastructure change has been reviewed by at least one person familiar with the AWS account.
@@ -191,12 +191,12 @@ A deployment is done when **all** of the following are true:
 - [ ] Staging smoke tests include:
   - Service starts without errors
   - Health check endpoint responds
-  - Service can connect to its dependencies (DynamoDB, S3, SQS)
+  - Service can connect to its dependencies (DynamoDB, S3, Kafka)
   - For trading services: paper trade flow completes end-to-end
 
 ### Monitoring
 - [ ] CloudWatch alarms are configured for the service:
-  - ECS task health (running count, restart count)
+  - ASG task health (running count, restart count)
   - Error rate (5xx responses, unhandled exceptions)
   - Latency (p50, p95, p99 for critical paths)
   - Business metrics where applicable (signal rate, order fill rate)
@@ -205,7 +205,7 @@ A deployment is done when **all** of the following are true:
 - [ ] Alert routing is configured (SNS topic to appropriate notification channel).
 
 ### Rollback Plan
-- [ ] Rollback procedure is documented (which ECS task definition revision to roll back to).
+- [ ] Rollback procedure is documented (which ASG task definition revision to roll back to).
 - [ ] Rollback has been tested at least once in staging.
 - [ ] Database migration rollback procedure is documented (if applicable).
 - [ ] Feature flags are in place for gradual rollout (if applicable).

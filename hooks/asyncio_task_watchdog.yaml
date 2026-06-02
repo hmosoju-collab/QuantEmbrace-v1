@@ -1,0 +1,145 @@
+name: asyncio_task_watchdog
+type: pre_merge
+priority: 3
+mandatory: false
+
+description: |
+  Every critical background asyncio.Task in service code must have a companion
+  watchdog coroutine that monitors it and restarts it on unexpected death.
+
+  Root cause (Day 7 incident — candle stream died silently):
+    asyncio.CancelledError is a BaseException, NOT an Exception. Any background
+    task wrapped in `except Exception` will silently swallow CancelledError and
+    exit without logging, triggering restarts, or raising alerts. The candle stream
+    task died silently; candles stopped flowing; strategies produced no signals;
+    the issue was only detected by the absence of fills in the session report.
+
+  Required pattern for ALL critical background tasks:
+    1. asyncio.create_task(some_coroutine()) → assign to self._some_task
+    2. asyncio.create_task(self._some_watchdog()) → assign to self._some_watchdog_task
+    3. The watchdog checks task.done() every 30 seconds
+    4. If task.done() and not cancelled intentionally → log + restart
+    5. The watchdog itself must handle BaseException to avoid silent watchdog death
+
+  Exempt:
+    - Test files (tests/**/*.py)
+    - One-shot tasks with names ending in _once, _single, _startup
+    - asyncio.gather() in __main__ or top-level startup sequences (not background)
+
+trigger:
+  event: pre_merge
+  paths:
+    - "services/**/*.py"
+  exclude_paths:
+    - "services/**/tests/**"
+    - "services/**/test_*.py"
+
+checks:
+  - id: background_task_has_watchdog
+    description: |
+      For every asyncio.create_task() call in a service class, there must be a
+      corresponding watchdog task or watchdog function reference in the same class.
+      Watchdog functions must be named with _watchdog suffix by convention.
+    detect_violation: |
+      # VIOLATION: background task without watchdog
+      class DataIngestionService:
+          async def start(self):
+              self._candle_task = asyncio.create_task(self._candle_stream())
+              # No watchdog — if _candle_stream dies, nothing detects it
+
+    correct_pattern: |
+      class DataIngestionService:
+          async def start(self):
+              self._candle_task = asyncio.create_task(self._candle_stream())
+              self._candle_watchdog_task = asyncio.create_task(
+                  self._candle_stream_watchdog()
+              )
+
+          async def _candle_stream_watchdog(self) -> None:
+              """Monitors _candle_task and restarts it on unexpected death."""
+              WATCHDOG_INTERVAL = 30  # seconds
+              while True:
+                  await asyncio.sleep(WATCHDOG_INTERVAL)
+                  if self._candle_task is None:
+                      continue
+                  if self._candle_task.done():
+                      # Task died — check if it was an intentional cancellation
+                      exc = self._candle_task.exception() if not self._candle_task.cancelled() else None
+                      logger.error(
+                          "candle_stream.task_died",
+                          cancelled=self._candle_task.cancelled(),
+                          exception=str(exc) if exc else None,
+                      )
+                      if not self._shutting_down:
+                          logger.warning("candle_stream.restarting")
+                          self._candle_task = asyncio.create_task(self._candle_stream())
+
+  - id: cancelled_error_not_swallowed
+    description: |
+      asyncio.CancelledError must NOT be caught by generic `except Exception` blocks
+      in background tasks. It must either propagate or be handled explicitly.
+      Silent task death is the primary risk from catching BaseException or failing
+      to catch CancelledError separately.
+    detect_violation: |
+      # VIOLATION: CancelledError swallowed by Exception handler
+      async def _candle_stream(self):
+          while True:
+              try:
+                  data = await self._get_candle_data()
+                  await self._process(data)
+              except Exception as e:
+                  logger.error("error", exc=e)
+                  # asyncio.CancelledError falls through here silently
+
+    correct_pattern: |
+      async def _candle_stream(self):
+          while True:
+              try:
+                  data = await self._get_candle_data()
+                  await self._process(data)
+              except asyncio.CancelledError:
+                  logger.info("candle_stream.cancelled_cleanly")
+                  raise  # Always re-raise CancelledError
+              except Exception as e:
+                  logger.error("candle_stream.error", exc_info=True)
+                  await asyncio.sleep(1)  # Brief backoff before retry
+
+  - id: watchdog_handles_base_exception
+    description: |
+      Watchdog coroutines themselves must handle BaseException (not just Exception)
+      to prevent the watchdog from dying silently — which would defeat its purpose.
+    correct_pattern: |
+      async def _candle_stream_watchdog(self) -> None:
+          try:
+              while True:
+                  await asyncio.sleep(30)
+                  # ... watchdog logic
+          except asyncio.CancelledError:
+              logger.info("candle_stream_watchdog.cancelled")
+              raise
+          except BaseException as e:  # Catch-all for unexpected watchdog death
+              logger.critical("candle_stream_watchdog.died", exc_info=True)
+              raise  # Re-raise so the event loop knows the watchdog died
+
+watchdog_naming_convention:
+  pattern: "_<task_name>_watchdog"
+  examples:
+    - "_candle_stream_watchdog"
+    - "_tick_processor_watchdog"
+    - "_kafka_consumer_watchdog"
+    - "_signal_publisher_watchdog"
+
+exemptions:
+  - "One-shot tasks: `asyncio.create_task(self._migrate_once())` — no watchdog needed"
+  - "Startup tasks: clearly named _startup, _init, _single with bounded execution"
+  - "Test files in tests/**"
+
+on_violation:
+  - action: request_review
+  - message: |
+      WARNING: asyncio_task_watchdog rule triggered.
+      A background asyncio.Task was found without a companion watchdog.
+      asyncio.CancelledError is BaseException — tasks can die silently if not
+      monitored. This caused the Day 7 candle stream outage (zero fills).
+      Add a _watchdog companion coroutine for every critical background task.
+      See: memory/candle_stream_debug.md for the root cause analysis.

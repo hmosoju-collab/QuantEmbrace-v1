@@ -1,5 +1,7 @@
 # QuantEmbrace - Trading Flow
 
+_Last updated: Phase 7 complete (2026-05-27) — EC2 ARM64 ASGs + Kafka MSK Serverless + AI enrichment pipeline (Phase 6) + paper trading readiness (ADR-020) active. SQS removed._
+
 ## Overview
 
 This document details the complete trading lifecycle in QuantEmbrace, from market
@@ -601,10 +603,10 @@ restarts, it reads its state from DynamoDB and resumes exactly where it left off
 Service crashes or is redeployed
      |
      v
-ECS detects task stopped
+ASG health check detects instance stopped
      |
      v
-ECS starts new task (within 30-60 seconds)
+ASG launches replacement instance (within 60-120 seconds)
      |
      v
 New task initializes
@@ -630,7 +632,7 @@ GAP: ticks during downtime are lost
 Service crashes or is redeployed
      |
      v
-ECS starts new task
+ASG launches replacement EC2 instance
      |
      v
 Load strategy configurations from S3
@@ -657,7 +659,7 @@ NOTE: Signals generated before crash that were not yet
 Service crashes or is redeployed
      |
      v
-ECS starts new task
+ASG launches replacement EC2 instance
      |
      v
 Load risk config from DynamoDB (risk-config table)
@@ -689,7 +691,7 @@ CRITICAL: Risk engine must NEVER start in a state that allows
 Service crashes or is redeployed
      |
      v
-ECS starts new task
+ASG launches replacement EC2 instance
      |
      v
 Load pending orders from DynamoDB (orders table, status=PENDING or PLACED)
@@ -949,7 +951,7 @@ async def execute_order(order: ApprovedOrder) -> OrderResult:
 | WebSocket disconnect (exhausted)     | Activate kill switch                | Investigate, deactivate   |
 | Broker API timeout (single order)    | Retry up to 3 times                | None                      |
 | Broker API down (circuit breaker)    | Stop sending orders, test recovery  | Monitor, may need broker  |
-| ECS task crash                       | ECS auto-restarts, state in DynamoDB| None (unless repeated)    |
+| EC2 instance crash                   | ASG auto-replaces, state in DynamoDB| None (unless repeated)    |
 | DynamoDB throttling                  | On-demand auto-scales               | None                      |
 | Daily drawdown exceeded              | Kill switch activates               | Review, deactivate next day|
 | Position mismatch                    | Alert sent, no auto-correct         | Manual reconciliation     |
@@ -966,7 +968,7 @@ The system performs these checks automatically at each market open:
 
 ```
 PRE-MARKET CHECKS (30 min before open):
-  [x] ECS services are running (all 5 tasks healthy)
+  [x] EC2 ASGs healthy (all services have ≥ 1 running instance)
   [x] DynamoDB tables accessible (read/write test)
   [x] S3 buckets accessible (list/write test)
   [x] Broker credentials valid (test API call)

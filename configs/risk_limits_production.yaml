@@ -1,0 +1,172 @@
+# QuantEmbrace — Production Risk Limits Configuration
+#
+# PURPOSE
+# ──────────────────────────────────────────────────────────────────────────────
+# This file is the single source of truth for all risk parameters that gate
+# live trading.  It is read by RiskEngineService at startup and validated by
+# scripts/deploy/preflight_check.py before every session.
+#
+# BEFORE CHANGING ANY VALUE:
+#   1. Understand the downstream effect (which validator reads this field).
+#   2. Run preflight_check.py and verify it produces no new warnings.
+#   3. Commit the change with a message explaining why the limit was adjusted.
+#   4. Reset the 5-day paper trading counter (strategy must re-validate).
+#
+# CAPITAL SCALING GUIDANCE
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase C (initial live): ₹10 lakh  — use values in this file as-is.
+# Phase D (₹25 lakh):     multiply max_single_order_value and portfolio_value
+#                          by 2.5; keep all percentage-based limits unchanged.
+# Phase E (₹1 crore):     multiply again; add external risk review before
+#                          crossing ₹50 lakh.
+#
+# ──────────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT: production
+# LAST REVIEWED: 2026-05-11
+# REVIEWED BY: hari.mosoju@gmail.com
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# ── Portfolio ─────────────────────────────────────────────────────────────────
+
+# Opening NAV for this deployment phase.
+# Phase C: ₹10 lakh (10% of ₹1 crore target).
+# Update this value when capital is scaled.
+portfolio_value: 1_000_000   # ₹10 lakh in rupees (1,000,000 = ₹10,00,000)
+
+
+# ── Daily loss limits ─────────────────────────────────────────────────────────
+
+# Maximum allowed daily P&L loss as a percentage of portfolio_value.
+# At 2%: ₹10 lakh × 2% = ₹2,000 max loss per day before new trades are blocked.
+# Recommended range: 1.5%–2.5% for initial live deployment.
+max_daily_loss_pct: 2.0
+
+# Kill switch auto-trigger threshold.
+# Must be > max_daily_loss_pct so new trades are blocked (validator rejects)
+# BEFORE the kill switch fires (halts everything).
+# At 3%: ₹10 lakh × 3% = ₹3,000 triggers emergency halt.
+kill_switch_daily_loss_pct: 3.0
+
+
+# ── Position sizing ───────────────────────────────────────────────────────────
+
+# Maximum size of a single position as a percentage of portfolio_value.
+# At 5%: ₹10 lakh × 5% = ₹5,000 max per position.
+# Keeps no single name as a concentration risk.
+max_position_size_pct: 5.0
+
+# Maximum total portfolio exposure (sum of all open positions) as a percentage.
+# At 50%: ₹10 lakh × 50% = ₹5,00,000 max deployed capital at any time.
+# Ensures at least 50% cash buffer for adverse moves.
+max_total_exposure_pct: 50.0
+
+# Hard rupee ceiling on any single order, regardless of position size %.
+# Prevents oversized orders due to incorrect quantity calculation.
+# ₹5,000 per order for Phase C.
+max_single_order_value: 5000
+
+# Maximum number of simultaneously open orders (pending + placed).
+max_open_orders: 10
+
+# Maximum number of simultaneously open positions (filled orders, any direction).
+max_concurrent_positions: 8
+
+# Maximum number of open orders for the same symbol at any time.
+# Prevents accidental pyramiding on a single name.
+max_position_per_symbol: 2
+
+
+# ── Sector concentration ──────────────────────────────────────────────────────
+
+# Maximum exposure to any single GICS sector as a percentage of portfolio_value.
+# At 20%: no more than ₹2,000 of the ₹10 lakh in any one sector simultaneously.
+max_sector_exposure_pct: 20.0
+
+
+# ── Market microstructure ─────────────────────────────────────────────────────
+
+# Maximum bid-ask spread in basis points (bps) for a signal to pass.
+# 50 bps = 0.5%. Orders with wider spreads indicate illiquid conditions;
+# execution slippage will likely exceed signal conviction.
+max_spread_bps: 50.0
+
+# Maximum order size as a percentage of Average Daily Volume (ADV) for the symbol.
+# 1% of ADV ensures the order does not meaningfully move the market.
+max_order_adv_pct: 1.0
+
+
+# ── Leverage ──────────────────────────────────────────────────────────────────
+
+# Leverage is disabled for Phase C.
+# Set to true only after at least 60 days of profitable live trading with full
+# reconciliation confidence. Requires external risk review before enabling.
+allow_leverage: false
+
+
+# ── Signal quality ────────────────────────────────────────────────────────────
+
+# Minimum AI enrichment quality_score for a signal to be approved.
+# Range: 0.0 (all signals pass) to 1.0 (only highest-confidence signals pass).
+# 0.0 means the quality filter is disabled — set to at least 0.3 for live trading.
+# This is a global default; per-strategy overrides live in DynamoDB strategy-config.
+min_quality_score: 0.3
+
+# Maximum age of a signal in seconds before it is rejected as stale.
+# 30s is appropriate for candle-based strategies (1m candles = 60s window).
+# For tick-based momentum strategies, consider lowering to 10s.
+max_signal_age_seconds: 30
+
+
+# ── Slippage ──────────────────────────────────────────────────────────────────
+
+# Maximum acceptable slippage from signal price to execution price as a percentage.
+# 0.15% = 15 bps. Signals where the market has moved more than this since signal
+# generation are rejected to avoid chasing adverse moves.
+max_slippage_pct: 0.15
+
+
+# ── Per-strategy allocation ───────────────────────────────────────────────────
+# These are maximum capital allocations per strategy as a percentage of
+# portfolio_value.  They supplement (not replace) max_position_size_pct.
+# Start at 10% per strategy for Phase C; scale after 5 live READY days.
+#
+# NOTE: These values are informational here. The live allocation enforcement
+# is in DynamoDB strategy-config (quality_filter_threshold, max_signals_per_day).
+# Update this section when adjusting strategy allocations.
+
+strategy_allocation:
+  momentum:            10.0   # % of portfolio_value
+  mean_reversion:      10.0
+  stat_arb:            10.0
+  breakout:            10.0
+  trend_following:     10.0
+  regime_adaptive:     10.0
+
+
+# ── Intraday controls ─────────────────────────────────────────────────────────
+
+# NSE MIS (intraday) positions must be closed before this time (IST).
+# The MIS square-off manager in execution_engine targets 15:10 IST (5 min buffer
+# before Zerodha's auto square-off at 15:15 IST).
+# This field is informational; the actual time is hardcoded in mis_square_off.py.
+mis_squareoff_time_ist: "15:10"
+
+# US equities: do not hold overnight positions without explicit strategy approval.
+# Set to false to allow overnight positions (PDT rules apply for accounts < $25k).
+us_intraday_only: true
+
+
+# ── Checklist confirmation ────────────────────────────────────────────────────
+# Set all items to true only after manually verifying each condition.
+# preflight_check.py will WARN if any item is false in production.
+
+go_live_checklist:
+  blocker_001_pnl_race_fixed:         true   # update_item ADD in place
+  blocker_002_pagination_fixed:       true   # paginated scan/query in place
+  blocker_003_this_file_exists:       true   # this file exists
+  instruments_yaml_verified:          false  # instruments.yaml reviewed for current session
+  five_day_paper_counter_reset:       false  # reset paper counter before each live start
+  zerodha_token_refreshed:            false  # set true each morning after token refresh
+  kill_switch_confirmed_inactive:     false  # set true after preflight kill_switch check
+  terraform_plan_clean:               false  # set true after running terraform plan

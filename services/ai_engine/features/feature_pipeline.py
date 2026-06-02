@@ -1,153 +1,157 @@
-"""Feature Pipeline.
+"""
+FeaturePipeline — reads live features from the Phase 5 DynamoDB feature store.
 
-Extracts features from market data for ML model inference.
-Reads historical data from S3 and computes technical indicators,
-volatility metrics, and volume-based features.
+Replaces the old S3-based placeholder with the real ``FeatureReader`` from
+``shared/features/feature_reader.py``.  The FeatureReader provides
+interval-aware staleness checking and graceful ``None`` degradation.
+
+Phase 6 design (ADR-014 §5.4):
+  Reading features from DynamoDB (online store) instead of S3 keeps enrichment
+  within the 6–8ms latency budget.  S3 reads (historical data) are only used
+  for model training (offline, not in production inference path).
+
+Feature set provided to models (from Phase 5 FeatureSet):
+    rsi_14, ema_9, ema_21, vwap, atr_14, adx_14,
+    macd, macd_signal, macd_hist, volume_ratio
+
+Degradation contract:
+  ``get_features`` returns ``None`` when:
+    - FeatureReader.get_latest returns None (stale or missing)
+    - Any DynamoDB error
+  The caller (RegimeClassifier, SignalQualityScorer) must handle None gracefully.
 """
 
-from datetime import datetime, timezone
+from __future__ import annotations
+
 from typing import Any, Optional
 
-import structlog
+from shared.features.feature_reader import FeatureReader
+from shared.logging.logger import get_logger
+from shared.models.feature_set import FeatureSet
 
-from services.shared.logging.logger import get_logger
-
-logger = get_logger(__name__)
+logger = get_logger(__name__, service_name="ai_engine")
 
 
 class FeaturePipeline:
-    """Computes features from market data for model inference.
+    """
+    Thin wrapper around FeatureReader for the AI engine inference path.
 
-    Features include:
-        - Technical indicators (SMA, EMA, RSI, MACD, Bollinger Bands)
-        - Volatility metrics (historical vol, ATR, implied vol proxy)
-        - Volume features (VWAP, volume ratio, OBV)
-        - Price action (returns, momentum, mean reversion signals)
+    Converts ``FeatureSet`` into a plain ``dict[str, float]`` suitable for
+    passing to sklearn / hmmlearn model ``.predict()`` calls.
+
+    Args:
+        feature_reader: Phase 5 FeatureReader (DynamoDB online store).
     """
 
-    # Standard feature set used across all models
-    STANDARD_FEATURES: list[str] = [
-        "sma_20",
-        "sma_50",
-        "ema_12",
-        "ema_26",
+    # Ordered feature list — governs the feature vector passed to models.
+    # Matches Phase 5 FeatureSet fields.  Order must be consistent with
+    # the ``features.json`` used during model training.
+    MODEL_FEATURES: list[str] = [
         "rsi_14",
-        "macd_signal",
-        "bollinger_upper",
-        "bollinger_lower",
-        "atr_14",
-        "historical_vol_20",
+        "ema_9",
+        "ema_21",
         "vwap",
+        "atr_14",
+        "adx_14",
+        "macd",
+        "macd_signal",
+        "macd_hist",
         "volume_ratio",
-        "returns_1d",
-        "returns_5d",
-        "momentum_10",
     ]
 
-    def __init__(self, s3_bucket: str, region: str) -> None:
-        self._s3_bucket = s3_bucket
-        self._region = region
-        # TODO: Initialize boto3 S3 client
-        # self._s3_client = boto3.client("s3", region_name=region)
+    def __init__(self, feature_reader: FeatureReader) -> None:
+        self._reader = feature_reader
 
-    async def compute_features(
+    async def get_features(
         self,
-        symbol: str,
-        lookback_days: int = 60,
-        feature_set: Optional[list[str]] = None,
-    ) -> dict[str, float]:
-        """Compute features for a given symbol.
+        market:   str,
+        symbol:   str,
+        interval: str = "1m",
+    ) -> Optional[dict[str, float]]:
+        """
+        Return the latest features for a symbol as a float dict.
+
+        Returns ``None`` if no fresh feature set is available.  All callers must
+        degrade gracefully when this returns ``None``.
 
         Args:
-            symbol: Trading symbol (e.g., 'RELIANCE', 'AAPL').
-            lookback_days: Number of historical days to use for feature computation.
-            feature_set: Specific features to compute. Defaults to STANDARD_FEATURES.
+            market:   Market identifier e.g. ``"NSE"`` or ``"US"``.
+            symbol:   Trading symbol e.g. ``"RELIANCE"``.
+            interval: Candle interval e.g. ``"1m"``, ``"5m"``, ``"15m"``.
 
         Returns:
-            Dictionary mapping feature names to computed values.
+            ``dict[str, float]`` with feature values, or ``None`` on degradation.
         """
-        features_to_compute = feature_set or self.STANDARD_FEATURES
+        try:
+            feature_set: Optional[FeatureSet] = await self._reader.get_latest(
+                market=market,
+                symbol=symbol,
+                interval=interval,
+            )
+        except Exception as exc:
+            logger.error(
+                "feature_pipeline.reader_error",
+                market=market,
+                symbol=symbol,
+                interval=interval,
+                error=str(exc),
+            )
+            return None
 
-        logger.info(
-            "feature_pipeline.computing",
-            symbol=symbol,
-            lookback_days=lookback_days,
-            num_features=len(features_to_compute),
-        )
+        if feature_set is None:
+            logger.debug(
+                "feature_pipeline.no_features",
+                market=market,
+                symbol=symbol,
+                interval=interval,
+            )
+            return None
 
-        # Load historical data from S3
-        historical_data = await self._load_historical_data(symbol, lookback_days)
+        return self._feature_set_to_dict(feature_set)
 
-        if not historical_data:
-            logger.warning("feature_pipeline.no_data", symbol=symbol)
-            return {}
+    def _feature_set_to_dict(self, fs: FeatureSet) -> dict[str, float]:
+        """
+        Convert a FeatureSet to a float dict, omitting None-valued features.
 
-        # Compute requested features
-        features: dict[str, float] = {}
+        Only features in ``MODEL_FEATURES`` are included.  None values are
+        dropped — callers check completeness via ``has_required_features``.
+        """
+        result: dict[str, float] = {}
+        for name in self.MODEL_FEATURES:
+            value: Optional[float] = getattr(fs, name, None)
+            if value is not None:
+                result[name] = value
+        return result
 
-        for feature_name in features_to_compute:
-            try:
-                value = self._compute_single_feature(feature_name, historical_data)
-                if value is not None:
-                    features[feature_name] = value
-            except Exception as exc:
-                logger.error(
-                    "feature_pipeline.feature_error",
-                    feature=feature_name,
-                    symbol=symbol,
-                    error=str(exc),
-                )
-
-        logger.info(
-            "feature_pipeline.computed",
-            symbol=symbol,
-            features_computed=len(features),
-        )
-
-        return features
-
-    async def _load_historical_data(
-        self, symbol: str, lookback_days: int
-    ) -> list[dict[str, Any]]:
-        """Load historical OHLCV data from S3.
+    def has_required_features(
+        self,
+        features: dict[str, float],
+        required: list[str],
+    ) -> bool:
+        """
+        Return True if all ``required`` feature names are present and non-None
+        in ``features``.
 
         Args:
-            symbol: Trading symbol.
-            lookback_days: Number of days of history to load.
-
-        Returns:
-            List of OHLCV records sorted by date ascending.
+            features: Dict from ``get_features``.
+            required: Feature names the model needs.
         """
-        # TODO: Implement S3 data loading
-        # Key format: s3://{bucket}/historical/{symbol}/{date}.parquet
-        # Use S3 Select or load Parquet files for the lookback period
-        logger.info(
-            "feature_pipeline.loading_data",
-            symbol=symbol,
-            lookback_days=lookback_days,
-            bucket=self._s3_bucket,
-        )
-        return []
+        return all(name in features for name in required)
 
-    def _compute_single_feature(
-        self, feature_name: str, data: list[dict[str, Any]]
-    ) -> Optional[float]:
-        """Compute a single feature from historical data.
+    def to_feature_vector(
+        self,
+        features: dict[str, float],
+        feature_names: list[str],
+    ) -> list[float]:
+        """
+        Build an ordered feature vector for model.predict().
 
         Args:
-            feature_name: Name of the feature to compute.
-            data: Historical OHLCV data.
+            features:      Dict of feature name → value.
+            feature_names: Ordered list of feature names the model expects.
 
         Returns:
-            Computed feature value, or None if insufficient data.
+            List of float values in the order specified by ``feature_names``.
+            Missing features are filled with 0.0.
         """
-        # TODO: Implement feature computations using numpy/pandas
-        # Each feature maps to a specific technical indicator calculation
-        #
-        # Example implementations:
-        # "sma_20" -> np.mean(closes[-20:])
-        # "rsi_14" -> compute RSI with 14-period lookback
-        # "macd_signal" -> EMA(12) - EMA(26), then signal = EMA(9) of MACD
-        # "atr_14" -> Average True Range over 14 periods
-        # "vwap" -> cumulative(price * volume) / cumulative(volume)
-        return None
+        return [features.get(name, 0.0) for name in feature_names]

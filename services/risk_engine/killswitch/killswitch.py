@@ -17,19 +17,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 
 from shared.config.settings import AppSettings, get_settings
 from shared.logging.logger import get_logger
+from shared.risk_state import (
+    attr_bool,
+    attr_string,
+    kill_switch_item,
+    kill_switch_key,
+)
 from shared.utils.helpers import utc_iso, utc_now
 
 logger = get_logger(__name__, service_name="risk_engine")
-
-# DynamoDB key for the kill switch record
-_KILLSWITCH_PK = "KILLSWITCH"
-_KILLSWITCH_SK = "GLOBAL"
-
 
 class KillSwitch:
     """
@@ -62,7 +63,11 @@ class KillSwitch:
         self._settings = settings or get_settings()
         self._dynamo = dynamo_client
         self._sns = sns_client
-        self._table_name = table_name or self._settings.aws.dynamodb_table_orders
+        self._table_name = table_name or getattr(
+            self._settings.aws,
+            "dynamodb_table_risk_state",
+            self._settings.aws.dynamodb_table_orders,
+        )
         self._sns_topic_arn = sns_topic_arn or getattr(
             self._settings.aws, "sns_kill_switch_topic_arn", ""
         )
@@ -194,8 +199,9 @@ class KillSwitch:
         """
         Restore kill switch state from DynamoDB on service startup.
 
-        If the record is missing or the read fails, the switch defaults
-        to *inactive* (fail-open on read, fail-closed on write).
+        If the record is missing or the read fails, the switch keeps the
+        in-memory state. This avoids clearing an already-active halt because
+        DynamoDB had a transient read problem.
         """
         if self._dynamo is None:
             logger.warning("No DynamoDB client — kill switch state not loaded from persistence")
@@ -205,20 +211,22 @@ class KillSwitch:
             response = await asyncio.to_thread(
                 self._dynamo.get_item,
                 TableName=self._table_name,
-                Key={
-                    "PK": {"S": _KILLSWITCH_PK},
-                    "SK": {"S": _KILLSWITCH_SK},
-                },
+                Key=kill_switch_key(),
             )
 
             item = response.get("Item")
             if item:
-                self._active = item.get("active", {}).get("BOOL", False)
-                activated_at_str = item.get("activated_at", {}).get("S", "")
+                self._active = attr_bool(item, "active", False)
+                activated_at_str = (
+                    attr_string(item, "activated_at", "")
+                    or attr_string(item, "activation_time", "")
+                )
                 if activated_at_str:
                     self._activated_at = datetime.fromisoformat(activated_at_str)
-                self._reason = item.get("reason", {}).get("S", "")
-                self._activated_by = item.get("activated_by", {}).get("S", "unknown")
+                elif not self._active:
+                    self._activated_at = None
+                self._reason = attr_string(item, "reason", "")
+                self._activated_by = attr_string(item, "activated_by", "unknown")
                 logger.info(
                     "Kill switch state loaded | active=%s | reason=%s",
                     self._active,
@@ -228,7 +236,10 @@ class KillSwitch:
                 logger.info("No kill switch record in DynamoDB — defaulting to inactive")
 
         except Exception:
-            logger.exception("Failed to load kill switch state — defaulting to inactive")
+            logger.exception(
+                "Failed to load kill switch state — keeping in-memory state active=%s",
+                self._active,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -241,16 +252,15 @@ class KillSwitch:
             return
 
         try:
-            item: dict[str, Any] = {
-                "PK": {"S": _KILLSWITCH_PK},
-                "SK": {"S": _KILLSWITCH_SK},
-                "active": {"BOOL": self._active},
-                "reason": {"S": self._reason},
-                "activated_by": {"S": self._activated_by},
-                "updated_at": {"S": utc_iso()},
-            }
-            if self._activated_at:
-                item["activated_at"] = {"S": self._activated_at.isoformat()}
+            now = utc_iso()
+            item: dict[str, Any] = kill_switch_item(
+                active=self._active,
+                reason=self._reason,
+                activated_by=self._activated_by,
+                activated_at=self._activated_at.isoformat() if self._activated_at else None,
+                deactivated_at=now if not self._active else None,
+                updated_at=now,
+            )
 
             await asyncio.to_thread(
                 self._dynamo.put_item,
