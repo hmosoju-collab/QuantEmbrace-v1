@@ -473,6 +473,113 @@ def test_dynamodb_collector_no_rules_is_unknown():
     assert res.status is Status.UNKNOWN
 
 
+# ── Kill switch probe tests ───────────────────────────────────────────────────
+
+def _rules_with_kill_switch_probe() -> MonitoringRules:
+    from monitoring_agent.rules import DynamoTableRule
+    return MonitoringRules(
+        dynamodb_tables=(
+            DynamoTableRule(suffix="risk-state", critical=True, kill_switch_probe=True),
+        )
+    )
+
+
+def _make_dynamo_collector_with_mock(active: bool) -> DynamoDBCollector:
+    """Return a DynamoDBCollector whose Table mock reports active/inactive KS."""
+    from unittest.mock import MagicMock
+    col = DynamoDBCollector(_cfg(), _rules_with_kill_switch_probe())
+
+    table_mock = MagicMock()
+    table_mock.table_status = "ACTIVE"
+    ks_item = {"active": True, "reason": "data stale"} if active else {}
+    table_mock.get_item.return_value = {"Item": ks_item}
+
+    resource_mock = MagicMock()
+    resource_mock.Table.return_value = table_mock
+
+    import services.monitoring_agent.collectors.dynamodb_collector as _mod
+    col._orig_get_resource = getattr(_mod, "_get_resource", None)
+
+    # Patch get_dynamodb_resource inside the collector module
+    import unittest.mock as mock
+    col._patch = mock.patch(
+        "shared.aws.clients.get_dynamodb_resource", return_value=resource_mock
+    )
+    col._patch.start()
+    col._resource_mock = resource_mock
+    return col
+
+
+def test_kill_switch_probe_active_returns_down(monkeypatch):
+    """DynamoDB collector must return Status.DOWN when kill switch active=True."""
+    from unittest.mock import MagicMock, patch
+    from monitoring_agent.rules import DynamoTableRule
+
+    col = DynamoDBCollector(_cfg(), _rules_with_kill_switch_probe())
+
+    table_mock = MagicMock()
+    table_mock.table_status = "ACTIVE"
+    table_mock.get_item.return_value = {"Item": {"active": True, "reason": "stale feed"}}
+    resource_mock = MagicMock()
+    resource_mock.Table.return_value = table_mock
+
+    with patch("shared.aws.clients.get_dynamodb_resource", return_value=resource_mock):
+        res = asyncio.run(col.run())
+
+    assert res.status is Status.DOWN, f"expected DOWN when kill switch active, got {res.status}"
+    assert res.details is not None
+    assert any(
+        t.get("kill_switch_active") is True
+        for t in res.details.get("tables", [])
+    )
+
+
+def test_kill_switch_probe_inactive_returns_ok(monkeypatch):
+    """DynamoDB collector must return Status.OK when kill switch active=False / absent."""
+    from unittest.mock import MagicMock, patch
+
+    col = DynamoDBCollector(_cfg(), _rules_with_kill_switch_probe())
+
+    table_mock = MagicMock()
+    table_mock.table_status = "ACTIVE"
+    # active=False (or item missing entirely) → kill switch is off
+    table_mock.get_item.return_value = {"Item": {"active": False}}
+    resource_mock = MagicMock()
+    resource_mock.Table.return_value = table_mock
+
+    with patch("shared.aws.clients.get_dynamodb_resource", return_value=resource_mock):
+        res = asyncio.run(col.run())
+
+    assert res.status is Status.OK
+
+
+def test_kill_switch_probe_parsed_from_rules_yaml():
+    """kill_switch_probe: true in rules.yaml must parse correctly into DynamoTableRule."""
+    rules = load_rules(str(RULES_YAML))
+    ks_tables = [t for t in rules.dynamodb_tables if t.suffix == "risk-state"]
+    assert ks_tables, "risk-state table must be in rules.yaml"
+    assert ks_tables[0].kill_switch_probe is True, (
+        "risk-state table must have kill_switch_probe=True in rules.yaml"
+    )
+
+
+def test_blocker_pattern_matches_actual_kill_switch_log():
+    """The blocker pattern must match the log line killswitch.py actually emits."""
+    import yaml
+    with open(str(RULES_YAML)) as fh:
+        data = yaml.safe_load(fh)
+    blocker_pats = data.get("container_logs", {}).get("blocker_patterns", [])
+    actual_log_line = (
+        '{"level": "CRITICAL", "service": "risk_engine", '
+        '"message": "KILL SWITCH ACTIVATED | reason=data stale | by=consumer_lag_monitor"}'
+    )
+    matched = any(pat in actual_log_line for pat in blocker_pats)
+    assert matched, (
+        f"No blocker pattern matches the actual kill switch log. "
+        f"Patterns: {blocker_pats}. Log: {actual_log_line!r}"
+    )
+
+
 def test_base_run_converts_exceptions_to_unknown():
     res = asyncio.run(_FixedCollector("boom", Status.OK, boom=True).run())
     assert res.status is Status.UNKNOWN

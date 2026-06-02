@@ -72,6 +72,19 @@ class DynamoDBCollector(Collector):
                 if rule.probe_key:
                     table.get_item(Key=rule.probe_key)  # read-only point read
                     entry["probe"] = "ok"
+                if rule.kill_switch_probe and status == Status.OK:
+                    ks_resp = table.get_item(
+                        Key={"PK": "KILLSWITCH", "SK": "GLOBAL"},
+                        ProjectionExpression="#a, #r",
+                        ExpressionAttributeNames={"#a": "active", "#r": "reason"},
+                    )
+                    ks_item = ks_resp.get("Item", {})
+                    if ks_item.get("active") is True:
+                        status = Status.DOWN
+                        entry["kill_switch_active"] = True
+                        entry["kill_switch_reason"] = ks_item.get("reason", "unknown")
+                    else:
+                        entry["kill_switch_active"] = False
             except ClientError as exc:
                 code = exc.response.get("Error", {}).get("Code", "")
                 entry["error_code"] = code

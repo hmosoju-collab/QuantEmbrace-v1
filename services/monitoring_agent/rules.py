@@ -188,6 +188,7 @@ class DynamoTableRule:
     max_age_seconds: Optional[float] = None
     timestamp_attr: Optional[str] = None
     probe_key: dict[str, Any] = field(default_factory=dict)
+    kill_switch_probe: bool = False  # if True, read KILLSWITCH/GLOBAL and DOWN if active=True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DynamoTableRule":
@@ -197,6 +198,7 @@ class DynamoTableRule:
             max_age_seconds=_as_opt_float(d.get("max_age_seconds")),
             timestamp_attr=_as_opt_str(d.get("timestamp_attr")),
             probe_key=_as_dict(d.get("probe_key")),
+            kill_switch_probe=_as_bool(d.get("kill_switch_probe"), False),
         )
 
 

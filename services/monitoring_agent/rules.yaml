@@ -90,6 +90,7 @@ dynamodb_tables:
     critical: true
   - suffix: risk-state           # holds the kill switch (PK=KILLSWITCH/SK=GLOBAL)
     critical: true
+    kill_switch_probe: true      # read KILLSWITCH/GLOBAL; Status.DOWN if active=True
   - suffix: strategy-config       # paper_trade flag + universe mode
     critical: true
   - suffix: latest-prices         # LtpResolver / execution depends on this
@@ -159,8 +160,7 @@ container_logs:
 
   # ── BLOCKER: halt-level events — alert immediately ──────────────────────────
   blocker_patterns:
-    - "kill_switch.activated"      # kill switch fired
-    - "kill_switch.trigger"        # kill switch trigger event
+    - "KILL SWITCH ACTIVATED"      # kill switch fired — matches killswitch.py logger.critical
     - "HARD BLOCK"                 # live trading gate breached
 
   # ── CRITICAL: data loss / audit trail broken / unhandled exceptions ─────────
