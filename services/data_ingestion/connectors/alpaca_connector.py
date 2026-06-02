@@ -41,12 +41,14 @@ logger = get_logger(__name__, service_name="data_ingestion")
 try:
     from alpaca.data.live import StockDataStream          # type: ignore[import]
     from alpaca.data.models import Trade, Quote           # type: ignore[import]
+    from alpaca.data.enums import DataFeed                # type: ignore[import]
     _ALPACA_AVAILABLE = True
 except ImportError:
     _ALPACA_AVAILABLE = False
     StockDataStream = None  # type: ignore[assignment,misc]
     Trade = None            # type: ignore[assignment,misc]
     Quote = None            # type: ignore[assignment,misc]
+    DataFeed = None         # type: ignore[assignment,misc]
 
 # Data feed selection — ALPACA_DATA_FEED env var is REQUIRED in production.
 #
@@ -171,10 +173,21 @@ class AlpacaConnector(BaseConnector):
             "Initializing Alpaca StockDataStream (feed=%s)", self._data_feed
         )
 
+        # StockDataStream requires a DataFeed enum, not a plain string.
+        # Convert "iex"/"sip" → DataFeed.IEX / DataFeed.SIP.
+        try:
+            feed_enum = DataFeed(self._data_feed)
+        except (ValueError, TypeError):
+            logger.warning(
+                "Unknown ALPACA_DATA_FEED %r — falling back to DataFeed.IEX",
+                self._data_feed,
+            )
+            feed_enum = DataFeed("iex")
+
         self._stream = StockDataStream(
             api_key=self._api_key,
             secret_key=self._api_secret,
-            feed=self._data_feed,
+            feed=feed_enum,
         )
         self._connected = True
         logger.info("Alpaca StockDataStream initialized")
@@ -388,7 +401,11 @@ class AlpacaConnector(BaseConnector):
         """
         try:
             logger.info("Alpaca stream running (feed=%s)", self._data_feed)
-            await self._stream.run()
+            # StockDataStream.run() calls asyncio.run() internally — it is a
+            # blocking function that cannot be awaited from a running event loop.
+            # Run it in a thread-pool executor so it gets its own event loop.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._stream.run)
         except asyncio.CancelledError:
             logger.info("Alpaca stream task cancelled — shutting down")
         except Exception:

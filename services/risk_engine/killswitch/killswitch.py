@@ -227,13 +227,20 @@ class KillSwitch:
                     self._activated_at = None
                 self._reason = attr_string(item, "reason", "")
                 self._activated_by = attr_string(item, "activated_by", "unknown")
-                logger.info(
-                    "Kill switch state loaded | active=%s | reason=%s",
-                    self._active,
-                    self._reason,
-                )
+                if self._active:
+                    logger.info(
+                        "Kill switch state loaded | active=%s | reason=%s",
+                        self._active,
+                        self._reason,
+                    )
+                else:
+                    logger.debug(
+                        "Kill switch state loaded | active=%s | reason=%s",
+                        self._active,
+                        self._reason,
+                    )
             else:
-                logger.info("No kill switch record in DynamoDB — defaulting to inactive")
+                logger.debug("No kill switch record in DynamoDB — defaulting to inactive")
 
         except Exception:
             logger.exception(

@@ -917,7 +917,10 @@ class OrderManager:
                     raw_items.extend(r)
 
             orders = [_unmarshal_item(item) for item in raw_items]
-            logger.info("Found %d open orders during reconciliation", len(orders))
+            if orders:
+                logger.info("Found %d open orders during reconciliation", len(orders))
+            else:
+                logger.debug("Found 0 open orders during reconciliation")
             return orders
 
         except Exception:
