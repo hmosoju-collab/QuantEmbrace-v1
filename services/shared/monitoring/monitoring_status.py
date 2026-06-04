@@ -274,6 +274,13 @@ class LiveCounters:
     tee_stale_ltp_blocks: int = 0
     tee_latest_events: list[str] = field(default_factory=list)
 
+    # TEE — R-based strategy-aware exit counters (added 2026-06-05)
+    tee_trailing_activations_r: int = 0   # trailing activations under R-based policy
+    tee_partial_bookings: int = 0          # partial profit exits booked
+    tee_breakeven_shifts: int = 0          # breakeven stop shifts triggered
+    tee_max_hold_exits: int = 0            # exits triggered by max_hold_minutes
+    tee_hard_time_exits: int = 0           # exits triggered by hard_exit_time
+
     # Router
     router_mode: str = "PAPER"
     router_paper_exits: int = 0
