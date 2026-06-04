@@ -163,3 +163,80 @@ scalp_1m:
   min_net_edge_pct: 0.12         # reject if gross_edge - roundtrip_costs < 0.12%
   reject_if_spread_unavailable: true   # reject if bar_range is zero (can't estimate spread)
   reject_if_ltp_stale: true      # reject if candle timestamp > 2 minutes old
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategy-aware R-based exit policies (TEE strategy-aware mode — 2026-06-05)
+#
+# R = (price_move_in_your_favor) / initial_risk
+# initial_risk = abs(entry_price - stop_price)
+#
+# These policies are loaded by ExitPolicyLoader (separate from the tier-based
+# ExitPolicyConfig above) and applied per strategy_id stored on each position.
+# The existing tier-based config (above) remains unchanged and continues to be
+# used for stop/TP placement at entry time.
+#
+# Safety: all policies below are paper-only. No changes to live_trading_enabled.
+# ─────────────────────────────────────────────────────────────────────────────
+strategies:
+  nse_vwap_reversion:
+    breakeven_at_r: 0.6
+    partial_profit_at_r: 0.8
+    partial_qty_pct: 50
+    trailing_activate_at_r: 0.9
+    trailing_distance_r: 0.35
+    max_hold_minutes: 20
+    fixed_tp_enabled: true
+    suppress_fixed_tp_after_trailing: false   # VWAP: keep fixed TP even when trailing active
+
+  nse_momentum_v1:
+    breakeven_at_r: 0.8
+    partial_profit_at_r: 1.2
+    partial_qty_pct: 40
+    trailing_activate_at_r: 1.5
+    trailing_distance_r: 0.6
+    fixed_tp_enabled: true
+    suppress_fixed_tp_after_trailing: false   # allow partial TP then trailing remainder
+
+  nse_intraday_trend_15m:
+    breakeven_at_r: 1.0
+    partial_profit_at_r: 1.5
+    partial_qty_pct: 30
+    trailing_activate_at_r: 1.5
+    trailing_distance_r: 0.75
+    fixed_tp_enabled: false                  # trend: suppress fixed TP, use trailing runner
+    suppress_fixed_tp_after_trailing: true
+
+  nse_orb_15m:
+    breakeven_at_r: 1.0
+    partial_profit_at_r: 1.5
+    partial_qty_pct: 50
+    trailing_activate_at_r: 1.5
+    trailing_distance_r: 0.5
+    fixed_tp_enabled: true
+    suppress_fixed_tp_after_trailing: true
+
+  nse_preclose_momentum:
+    breakeven_at_r: 0.6
+    partial_profit_at_r: 0.8
+    partial_qty_pct: 50
+    trailing_activate_at_r: 0.9
+    trailing_distance_r: 0.35
+    hard_exit_time: "15:03"
+    fixed_tp_enabled: true
+    suppress_fixed_tp_after_trailing: false
+
+  nse_scalp_1m:
+    # Scalp keeps current fixed TP/SL — too short a hold for R-based trailing
+    breakeven_at_r: null
+    partial_profit_at_r: null
+    trailing_activate_at_r: null
+    trailing_distance_r: null
+    fixed_tp_enabled: true
+    suppress_fixed_tp_after_trailing: false
+
+  _default:
+    # Fallback for any strategy not listed above
+    trailing_activate_at_r: 1.25   # old behaviour preserved
+    trailing_distance_r: 0.6
+    fixed_tp_enabled: true
+    suppress_fixed_tp_after_trailing: true

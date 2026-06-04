@@ -838,20 +838,28 @@ class TestTrailingStopBehavior:
         assert req.close_side == "SELL"
 
     async def test_tp_suppressed_when_trailing_active(self) -> None:
-        """When trailing is active, TP must not fire even if price > take_profit."""
+        """When trailing is active, TP must not fire even if price > take_profit.
+
+        R-based path (_manage_trailing_stop_r) is used when entry_price > 0.
+        Legacy pct-based path (_manage_trailing_stop) is used when entry_price == 0.
+        The key safety invariant is that the router does NOT fire a TP exit.
+        """
         pos = _open_position(
             "NHPC", "LONG", 1270.0,
             stop_price=95.0, take_profit=110.0, last_price=115.0, avg_price=100.0,
         )
         pos["exit_state"] = "TRAILING_ACTIVE"
-        # price=115 > stop=95 (no SL trigger) and > take_profit=110 but trailing is active
-        # TP must be suppressed; _manage_trailing_stop should be called instead
+        # price=115 > stop=95 (no SL trigger) and > take_profit=110 but trailing is active.
+        # _default policy has suppress_fixed_tp_after_trailing=True → TP blocked.
+        # Either _manage_trailing_stop_r (R-path, avg_price>0) or _manage_trailing_stop
+        # (legacy, avg_price==0) is called; the critical assertion is no TP exit fires.
 
-        with patch.object(self.tee, "_manage_trailing_stop", AsyncMock()) as mock_trail:
+        with patch.object(self.tee, "_manage_trailing_stop_r", AsyncMock()) as mock_trail_r, \
+             patch.object(self.tee, "_manage_trailing_stop", AsyncMock()):
             await self.tee._evaluate_exit_conditions(pos)
 
-        self.router.route.assert_not_called()  # no exit fired
-        mock_trail.assert_called_once()         # trailing management was invoked
+        self.router.route.assert_not_called()  # no exit fired — TP suppressed by trailing
+        mock_trail_r.assert_called_once()       # R-based trailing management was invoked
 
     async def test_trailing_disabled_tee_does_not_call_manage(self) -> None:
         """When trailing_enabled=False, _manage_trailing_stop is never called."""
