@@ -10,15 +10,22 @@
 
 ## Decision
 
-**PAPER_ONLY_NEEDS_MORE_DATA**
+**APPROVED_FOR_PAPER_ONLY** *(updated 2026-06-05 by operator)*
 
-R-based trailing shows strong theoretical improvement for VWAP reversion (trailing would
-activate on 100% of TP-hitting trades under the new policy vs 0% under the old policy).
-However, this analysis is based on a static replay without tick-level data, a single
-session, and without strategy_id on positions. Live paper data with strategy_id tracking
-is required before drawing production conclusions.
+R-based trailing approved for paper/backtest deployment. Analysis confirms structural
+mismatch between old 1.25R threshold and VWAP TP targets at 1.0R — new policy resolves
+this. Approved to run in paper sessions to collect empirical data.
 
-Do NOT approve for Stage-1 live based on this analysis.
+Constraints:
+- Paper/backtest only. Do NOT enable live trading.
+- Do NOT place broker orders.
+- Do NOT change capital limits.
+- scalp_1m remains on fixed TP/SL only (no R-based trailing).
+- Stage-1 live requires full `tee-strategy-aware-paper-validation-report.md` gate
+  (≥3 clean paper sessions, profit_capture_ratio improvement, no duplicate exits).
+
+See `docs/live-readiness/tee-strategy-aware-paper-validation-report.md` for the
+3-session tracking template and Stage-1 acceptance criteria.
 
 ---
 
