@@ -1,0 +1,42 @@
+# Paper trading strategy optimization controls.
+# Applied during PAPER_SAFE_START and PAPER_EXPAND modes only.
+# Never applied in LIVE_ADVANCED mode.
+#
+# Confidence threshold history:
+#   Session 1–10:  0.60 (VWAPReversionStrategy default, enforced in strategy_engine)
+#                  0.95 was set here but never enforced (quality gate validator not yet wired)
+#   Session 11+:   0.90 (enforced in risk_engine PaperQualityGateValidator, wired 2026-06-05)
+#   Session 16+ (Week-1 rebuild, 2026-06-10):
+#     - Validator lookup fixed: keys here are unprefixed; signals carry
+#       market-prefixed names (nse_*). Sessions 12–15 had BOTH filters silently
+#       disabled by the name mismatch — these thresholds are live for the
+#       first time from Session 16.
+#     - orb_15m min_confidence rescaled to the orb_v2 formula (0.45–1.0 range,
+#       proximity+volume based; the old formula pinned at 1.0).
+#     - max_trades_per_day now ENFORCED by SymbolTradeCountValidator
+#       (GLOBAL_DAILY_ENTRY_LIMIT_REACHED) — committee cap 15/day.
+
+risk:
+  max_trades_per_day: 15
+  max_trades_per_symbol_per_day: 1
+  daily_loss_limit_inr: 2500
+  strategy_loss_limit_inr:
+    vwap_reversion: 1500
+    orb_15m: 1500
+
+entry_filters:
+  min_confidence:
+    vwap_reversion: 0.90
+    orb_15m: 0.65
+  min_reward_risk_ratio:
+    vwap_reversion: 1.40   # backstop below the strategy's own 1.5 gate (4dp rounding margin)
+    orb_15m: 1.30
+
+time_filters:
+  vwap_reversion_start_time: "10:15"
+  orb_start_time: "09:30"
+  no_new_entries_after: "14:30"
+
+strategy_controls:
+  disable_strategy_after_consecutive_sl: 3
+  disable_symbol_after_consecutive_sl: 2

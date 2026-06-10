@@ -1,0 +1,30 @@
+{
+  "knowledge_base": "quantembrace-backtest-kb",
+  "description": "RAG corpus for the backtesting GenAI layer. Backtest artifacts + design docs ONLY. No live/paper data, no PII, no secrets.",
+  "data_classification": "backtest-only",
+  "embedding_model": "amazon.titan-embed-text-v2:0",
+  "chunking": {"strategy": "fixed", "max_tokens": 512, "overlap_tokens": 64},
+  "sources": [
+    {"id": "design-docs", "type": "s3_prefix", "ref": "s3://quantembrace-backtest-results/../docs/backtesting/", "glob": "*.md", "note": "steering, spec, contracts, phase reports"},
+    {"id": "run-reports", "type": "s3_prefix", "ref": "s3://quantembrace-backtest-results/runs/", "glob": "*/summary.md"},
+    {"id": "run-metrics", "type": "s3_prefix", "ref": "s3://quantembrace-backtest-results/runs/", "glob": "*/metrics.json"},
+    {"id": "walkforward", "type": "s3_prefix", "ref": "s3://quantembrace-backtest-results/walkforward/", "glob": "*/aggregate.json"},
+    {"id": "dataset-manifests", "type": "s3_prefix", "ref": "s3://quantembrace-backtest-results/datasets/", "glob": "*/manifest.json"},
+    {"id": "architecture", "type": "repo", "ref": "architecture/system_design.md"},
+    {"id": "decisions", "type": "repo", "ref": "memory/decisions.md"}
+  ],
+  "exclusions": [
+    "Any file containing secrets, API keys, or broker credentials",
+    "Live/paper trading tables and logs",
+    "configs/.env, .env, Secrets Manager values"
+  ],
+  "guardrails": {
+    "advisory_only": true,
+    "no_live_enable": true,
+    "no_order_placement": true,
+    "no_config_or_capital_mutation": true,
+    "no_strategy_auto_promotion": true,
+    "redact_secrets_before_embedding": true
+  },
+  "refresh": {"trigger": "on_run_completed_eventbridge", "mode": "incremental"}
+}
