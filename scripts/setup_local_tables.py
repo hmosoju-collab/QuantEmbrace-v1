@@ -293,11 +293,17 @@ def _seed_paper_nav() -> None:
 
 
 def _seed_strategy_configs() -> None:
-    """Seed default strategy configs so strategies aren't capped at 10 signals/day.
+    """Seed per-strategy configs per the Week-1 committee allocation.
 
-    The StrategyConfigLoader falls back to _DEFAULT_CONFIG(max_signals_per_day=10) when
-    no DynamoDB row exists. For paper testing we want 0 (unlimited) so a single busy
-    session can't silently top out at 10 signals per strategy (60 total).
+    Retail Quant Investment Committee Report (2026-06-10):
+      - nse_orb_15m / nse_vwap_reversion: 6 signals/day each
+      - nse_intraday_trend_15m: 8 signals/day (workhorse once warm-up lands)
+      - nse_momentum_v1: RETIRED (MERGE into trend_15m — TICK interface never
+        calls on_bar, so it has never fired; do not re-enable)
+      - nse_scalp_1m: RETIRED (its own viability gate rejects 100% of signals —
+        1m scalping cannot clear the 0.20% round-trip cost)
+      - nse_preclose_momentum: RETIRED (fire window 14:45–15:10 sits inside
+        no_new_entry_after_ist=14:45; intraday form fails the cost floor)
     """
     from datetime import datetime, timezone
     dynamodb = _resource("dynamodb")
@@ -308,16 +314,17 @@ def _seed_strategy_configs() -> None:
         print("strategy-config table not found — skipping strategy seed")
         return
 
-    strategies = [
-        "nse_momentum_v1",
-        "nse_orb_15m",
-        "nse_scalp_1m",
-        "nse_vwap_reversion",
-        "nse_intraday_trend_15m",
-        "nse_preclose_momentum",
-    ]
+    # strategy → (enabled, max_signals_per_day); 0 = unlimited
+    strategies = {
+        "nse_orb_15m":            (True,  6),
+        "nse_vwap_reversion":     (True,  6),
+        "nse_intraday_trend_15m": (True,  8),
+        "nse_momentum_v1":        (False, 0),
+        "nse_scalp_1m":           (False, 0),
+        "nse_preclose_momentum":  (False, 0),
+    }
     seeded = 0
-    for name in strategies:
+    for name, (enabled, max_signals) in strategies.items():
         pk = f"STRATEGY_CONFIG#{name}"
         sk = f"ENV#{env}"
         try:
@@ -325,9 +332,9 @@ def _seed_strategy_configs() -> None:
                 Item={
                     "PK":                                    pk,
                     "SK":                                    sk,
-                    "enabled":                               True,
+                    "enabled":                               enabled,
                     "paper_trade":                           True,
-                    "max_signals_per_day":                   0,
+                    "max_signals_per_day":                   max_signals,
                     "circuit_breaker_threshold_consecutive": 5,
                     "circuit_breaker_threshold_rate":        10,
                     "circuit_breaker_state":                 "CLOSED",
@@ -343,7 +350,11 @@ def _seed_strategy_configs() -> None:
                 pass  # row already exists — leave it
             else:
                 print(f"  WARN: strategy config seed failed for {name}: {exc}")
-    print(f"Strategy configs seeded: {seeded}/{len(strategies)} (0 = unlimited signals/day)")
+    enabled_names = [n for n, (e, _) in strategies.items() if e]
+    print(
+        f"Strategy configs seeded: {seeded}/{len(strategies)} "
+        f"(enabled: {', '.join(enabled_names)}; others retired per committee report)"
+    )
 
 
 def main() -> None:

@@ -340,6 +340,63 @@ class LiveCounters:
     safe_actions_last_action: str = ""
     safe_actions_last_blocked_reason: str = ""
 
+    # Cross-strategy netting protection counters
+    netting_conflicts_seen: int = 0              # opposite-direction entry signals detected
+    netting_conflicts_rejected: int = 0          # correctly rejected before any order/fill
+    netting_rejected_with_order_id: int = 0      # FAIL: rejected signal produced an order_id
+    netting_rejected_with_fill_id: int = 0       # FAIL: rejected signal produced a fill
+    netting_rejected_with_position_mutation: int = 0  # FAIL: rejected signal mutated position
+    netting_policy_overwrite_blocked: int = 0    # exit policy overwrites blocked
+    netting_policy_overwrite_mutations: int = 0  # FAIL: overwrite still mutated policy
+    netting_entry_unwound_recon_failures: int = 0  # ENTRY_UNWOUND_BY_COMPETING_ENTRY events
+    netting_store_outage_live_rejected: int = 0  # OK: live entry rejected because store unavailable
+    netting_store_outage_live_allow_through: int = 0  # FAIL: live entry allowed despite store outage
+    netting_audit_chain_breaks: int = 0          # FAIL: signal→order→fill→position chain broken
+
+    # §17 — Adaptive circuit-breaker counters (set by AdaptiveStrategyControls)
+    adaptive_cb_strategy_disabled: int = 0
+    adaptive_cb_symbol_disabled: int = 0
+
+    # §17 — Quality gate rejection counters (read from DynamoDB risk_state by monitor)
+    quality_gate_rejected_confidence: int = 0
+    quality_gate_rejected_rr: int = 0
+    quality_gate_rejected_symbol_count: int = 0
+
+    # §17 — Strategy performance (set externally by paper_trading_monitor.py)
+    _perf_status: Optional[Any] = field(default=None)
+
+
+# ── Cross-strategy netting protection ────────────────────────────────────────
+
+
+@dataclass
+class NettingProtectionStatus:
+    conflicts_seen: int = 0
+    conflicts_rejected: int = 0
+    rejected_with_order_id: int = 0
+    rejected_with_fill_id: int = 0
+    rejected_with_position_mutation: int = 0
+    policy_overwrite_blocked: int = 0
+    policy_overwrite_mutations: int = 0
+    entry_unwound_recon_failures: int = 0
+    store_outage_live_rejected: int = 0       # correct live fail-closed behavior (allowed >= 0)
+    store_outage_live_allow_through: int = 0  # FAIL: live entry allowed despite store outage
+    audit_chain_breaks: int = 0
+
+    @property
+    def gate_pass(self) -> bool:
+        return (
+            # Every seen conflict was rejected (none slipped through as an allow)
+            self.conflicts_seen >= self.conflicts_rejected
+            and self.rejected_with_order_id == 0
+            and self.rejected_with_fill_id == 0
+            and self.rejected_with_position_mutation == 0
+            and self.policy_overwrite_mutations == 0
+            and self.entry_unwound_recon_failures == 0
+            and self.store_outage_live_allow_through == 0  # dangerous: must stay zero
+            and self.audit_chain_breaks == 0
+        )
+
 
 # ── Top-level snapshot ────────────────────────────────────────────────────────
 
@@ -400,6 +457,15 @@ class MonitoringStatusSnapshot:
     data_quality_issues: list[str] = field(default_factory=list)
     operational_issues: list[str] = field(default_factory=list)
 
+    # §16 — Cross-strategy netting protection
+    netting_status: NettingProtectionStatus = field(default_factory=NettingProtectionStatus)
+
+    # §17 — Strategy Performance Health (populated externally; None = data unavailable)
+    performance_status: Optional[Any] = field(default=None)
+
+    # §17 — Quality gate rejection counts (read from DynamoDB by build_snapshot)
+    quality_gate_rejections: dict = field(default_factory=dict)  # reason_code → count
+
     # §14 — Actions
     action_required: bool = False
     actions: list[str] = field(default_factory=list)
@@ -424,6 +490,7 @@ class MonitoringStatusService:
         positions_table: str,
         risk_state_table: str,
         prices_table: Optional[str] = None,
+        orders_table: Optional[str] = None,
         trading_mode: str = "paper",
         live_trading_enabled: bool = False,
         live_counters: Optional[LiveCounters] = None,
@@ -433,6 +500,7 @@ class MonitoringStatusService:
         self._positions_table = positions_table
         self._risk_state_table = risk_state_table
         self._prices_table = prices_table
+        self._orders_table = orders_table
         self._trading_mode = trading_mode.upper()
         self._live_trading_enabled = live_trading_enabled
         self._c = live_counters or LiveCounters()
@@ -807,7 +875,101 @@ class MonitoringStatusService:
             actions=actions,
             final_status=overall,
             final_summary=summary,
+            netting_status=NettingProtectionStatus(
+                conflicts_seen=self._c.netting_conflicts_seen,
+                conflicts_rejected=self._c.netting_conflicts_rejected,
+                rejected_with_order_id=self._c.netting_rejected_with_order_id,
+                rejected_with_fill_id=self._c.netting_rejected_with_fill_id,
+                rejected_with_position_mutation=self._c.netting_rejected_with_position_mutation,
+                policy_overwrite_blocked=self._c.netting_policy_overwrite_blocked,
+                policy_overwrite_mutations=self._c.netting_policy_overwrite_mutations,
+                entry_unwound_recon_failures=self._c.netting_entry_unwound_recon_failures,
+                store_outage_live_rejected=self._c.netting_store_outage_live_rejected,
+                store_outage_live_allow_through=self._c.netting_store_outage_live_allow_through,
+                audit_chain_breaks=self._c.netting_audit_chain_breaks,
+            ),
+            # Performance status is set externally by paper_trading_monitor.py
+            # to avoid a blocking orders-table scan on every monitoring refresh
+            performance_status=getattr(self._c, "_perf_status", None),
+            quality_gate_rejections=await self._read_quality_gate_counts(),
         )
+
+    # ── Quality gate rejection counters ──────────────────────────────────────
+
+    async def _read_quality_gate_counts(self) -> dict:
+        """Read today's quality gate rejection counts from DynamoDB risk_state,
+        and count accepted entry orders from the orders table.
+
+        Rejection counts written atomically by risk_engine (fire-and-forget).
+        Accepted entry count scanned from orders table (if orders_table provided).
+        Returns empty dict if DynamoDB is unavailable.
+
+        Keys returned:
+            CONFIDENCE_BELOW_THRESHOLD  → int
+            REWARD_RISK_TOO_LOW         → int
+            MAX_TRADES_PER_SYMBOL_REACHED → int
+            accepted_entry_count        → int  (0 if orders table unavailable)
+        """
+        if self._dynamo is None:
+            return {}
+        today = datetime.now(_IST).strftime("%Y-%m-%d")
+
+        # Read rejection counters
+        reason_codes = [
+            "CONFIDENCE_BELOW_THRESHOLD",
+            "REWARD_RISK_TOO_LOW",
+            "MAX_TRADES_PER_SYMBOL_REACHED",
+        ]
+        counts: dict[str, Any] = {}
+        for code in reason_codes:
+            try:
+                resp = await asyncio.to_thread(
+                    self._dynamo.get_item,
+                    TableName=self._risk_state_table,
+                    Key={
+                        "PK": {"S": f"QUALITY_GATE_REJECT#{code}"},
+                        "SK": {"S": f"DAY#{today}"},
+                    },
+                )
+                item = resp.get("Item")
+                if item:
+                    raw = item.get("count", {})
+                    n = raw.get("N", "0") if isinstance(raw, dict) else "0"
+                    counts[code] = int(float(n))
+            except Exception:
+                pass
+
+        # Count accepted entry fills from orders table
+        accepted = 0
+        if self._orders_table and self._dynamo is not None:
+            try:
+                kwargs: dict = dict(
+                    TableName=self._orders_table,
+                    FilterExpression=(
+                        "trade_date = :td"
+                        " AND (order_status = :filled OR order_status = :pfilled)"
+                        " AND NOT begins_with(signal_id, :exit_prefix)"
+                    ),
+                    ExpressionAttributeValues={
+                        ":td":          {"S": today},
+                        ":filled":      {"S": "FILLED"},
+                        ":pfilled":     {"S": "PAPER_FILLED"},
+                        ":exit_prefix": {"S": "EXIT-"},
+                    },
+                    Select="COUNT",
+                )
+                while True:
+                    resp = await asyncio.to_thread(self._dynamo.scan, **kwargs)
+                    accepted += resp.get("Count", 0)
+                    last = resp.get("LastEvaluatedKey")
+                    if not last:
+                        break
+                    kwargs["ExclusiveStartKey"] = last
+            except Exception:
+                pass
+        counts["accepted_entry_count"] = accepted
+
+        return counts
 
     # ── LTP enrichment ────────────────────────────────────────────────────────
 
@@ -933,16 +1095,27 @@ class MonitoringStatusService:
     async def _fetch_entry_block(self) -> "EntryBlockStatus":
         """Read ENTRY_BLOCK/GLOBAL from DynamoDB. Returns EntryBlockStatus."""
         try:
-            from shared.risk_state import ENTRY_BLOCK_PK, ENTRY_BLOCK_SK, attr_bool, attr_string  # noqa: PLC0415
+            # Relative import: resolves under both import roots — in-container
+            # ("shared.monitoring.*") and host scripts ("services.shared.monitoring.*").
+            # The absolute "shared.risk_state" form raised ModuleNotFoundError from
+            # host scripts and was swallowed below as read_status=ERROR.
+            from ..risk_state import ENTRY_BLOCK_PK, ENTRY_BLOCK_SK, attr_bool, attr_string  # noqa: PLC0415, TID252
 
             resp = await asyncio.to_thread(
                 self._dynamo.get_item,
                 TableName=self._risk_state_table,
                 Key={"PK": {"S": ENTRY_BLOCK_PK}, "SK": {"S": ENTRY_BLOCK_SK}},
                 ProjectionExpression=(
-                    "blocked, #st, reason, source, action_id, idempotency_key, created_at"
+                    "blocked, #st, #rsn, #src, action_id, idempotency_key, created_at"
                 ),
-                ExpressionAttributeNames={"#st": "status"},
+                ExpressionAttributeNames={
+                    # status, source, and reason are DynamoDB reserved keywords —
+                    # unaliased they make every read raise ValidationException,
+                    # which rendered §10a as read_status=ERROR on all sessions.
+                    "#st": "status",
+                    "#rsn": "reason",
+                    "#src": "source",
+                },
             )
             item = resp.get("Item")
             if not item:
@@ -1005,6 +1178,8 @@ class MonitoringStatusRenderer:
             self._s13(snap),
             self._s14(snap),
             self._s15(snap),
+            self._s16(snap),
+            self._s17(snap),
         ]
         return "\n".join(parts)
 
@@ -1395,6 +1570,163 @@ class MonitoringStatusRenderer:
             s.final_summary,
         ]
         return "\n".join(lines)
+
+    # ── §16 Cross-Strategy Netting Protection ─────────────────────────────────
+
+    def _s16(self, s: MonitoringStatusSnapshot) -> str:
+        n = s.netting_status
+        gate = "**PASS**" if n.gate_pass else "**FAIL**"
+
+        def _ok(val: int, expected: int = 0) -> str:
+            return str(val) if val == expected else f"**{val} ← FAIL**"
+
+        rows = [
+            "---",
+            "## 16. Cross-Strategy Netting Protection\n",
+            "| Metric | Value |",
+            "|---|---:|",
+            f"| Opposite-direction entry conflicts seen | {n.conflicts_seen} |",
+            f"| Conflicts rejected before order placement | {n.conflicts_rejected} |",
+            f"| Rejected conflicts with order_id | {_ok(n.rejected_with_order_id)} |",
+            f"| Rejected conflicts with fill_id | {_ok(n.rejected_with_fill_id)} |",
+            f"| Rejected conflicts with position mutation | {_ok(n.rejected_with_position_mutation)} |",
+            f"| Exit policy overwrite blocked | {n.policy_overwrite_blocked} |",
+            f"| Exit policy overwrite mutations | {_ok(n.policy_overwrite_mutations)} |",
+            f"| ENTRY_UNWOUND_BY_COMPETING_ENTRY | {_ok(n.entry_unwound_recon_failures)} |",
+            f"| Store outage → live entry REJECTED (correct) | {n.store_outage_live_rejected} |",
+            f"| Store outage → live entry ALLOWED (FAIL) | {_ok(n.store_outage_live_allow_through)} |",
+            f"| Audit chain breaks (signal→order→fill→position) | {_ok(n.audit_chain_breaks)} |",
+            f"| Gate status | {gate} |",
+            "",
+            "Gate rules (must hold for live promotion):",
+            "- `conflicts_seen >= conflicts_rejected`: no conflict was silently allowed through",
+            "- `rejected_with_order_id = 0`: rejected conflict produced no order",
+            "- `rejected_with_fill_id = 0`: rejected conflict produced no fill",
+            "- `rejected_with_position_mutation = 0`: rejected conflict mutated no position",
+            "- `policy_overwrite_mutations = 0`: no exit policy was silently overwritten",
+            "- `entry_unwound_recon_failures = 0`: no ENTRY order reduced a position without EXIT",
+            "- `store_outage_live_allow_through = 0`: live mode always fails-closed on store outage",
+            "- `audit_chain_breaks = 0`: every filled ENTRY has a complete signal→position chain",
+            "",
+            "Note: `store_outage_live_rejected >= 0` is allowed — that is the correct fail-closed behavior.",
+        ]
+        return "\n".join(rows)
+
+    # ── §17 Strategy Performance Health ──────────────────────────────────────
+
+    def _s17(self, s: MonitoringStatusSnapshot) -> str:
+        """§17 Strategy Performance Health."""
+        # Module-level flag: set True while Session 12 note is active.
+        # Change to False once Session 12 context is no longer relevant.
+        _SESSION12_NOTE_ACTIVE = True
+
+        p = s.performance_status
+        qg = s.quality_gate_rejections
+        conf_rej = qg.get("CONFIDENCE_BELOW_THRESHOLD", 0)
+        rr_rej = qg.get("REWARD_RISK_TOO_LOW", 0)
+        sym_rej = qg.get("MAX_TRADES_PER_SYMBOL_REACHED", 0)
+        total_qg_rej = conf_rej + rr_rej + sym_rej
+        accepted = qg.get("accepted_entry_count", 0)
+        total_attempted = accepted + total_qg_rej
+        pass_rate_str = (
+            f"{accepted / total_attempted * 100:.1f}%"
+            if total_attempted > 0
+            else "—"
+        )
+
+        # Gate-active flag: True when ANY quality gate rejection counter > 0.
+        # Confirms that the quality-gate validators in the running image are
+        # processing signals and producing counter increments.
+        gate_active = (conf_rej > 0) or (rr_rej > 0) or (sym_rej > 0)
+        gate_active_str = "true" if gate_active else "false"
+
+        qg_rows = [
+            "",
+            "**Quality gate rejections (Session 12 filters):**",
+            "",
+            "| Metric | Count |",
+            "|---|---:|",
+            f"| Accepted entry orders | {accepted} |",
+            f"| CONFIDENCE_BELOW_THRESHOLD | {conf_rej} |",
+            f"| REWARD_RISK_TOO_LOW | {rr_rej} |",
+            f"| MAX_TRADES_PER_SYMBOL_REACHED | {sym_rej} |",
+            f"| Total quality gate rejections | {total_qg_rej} |",
+            f"| **Pass-through rate** | **{pass_rate_str}** |",
+            f"| Gate active | {gate_active_str} |",
+            "",
+            "_High rejection count + better expectancy = good filtering._",
+            "_High rejection count + no trades = thresholds may be too strict._",
+            "_Low rejection count + negative P&L = filter too weak or wrong signal feature._",
+        ]
+
+        if _SESSION12_NOTE_ACTIVE:
+            qg_rows.append(
+                "\n_Session 12 is the first valid quality-gate test "
+                "(stale-image rebuild completed 2026-06-05)._"
+            )
+
+        perf_unavailable = p is None or p.gate_status == "UNKNOWN"
+        if perf_unavailable:
+            perf_note = (
+                "Performance metrics unavailable — paper order rows do not carry "
+                "`realized_pnl` (TEE writes exit P&L to risk_state, not back to orders table). "
+                "Use §12 Realized P&L and §6 SL/TP counts for intraday performance. "
+                "Full expectancy/PF analysis available in session close report."
+            )
+            if p is None:
+                rows = [
+                    "---",
+                    "## 17. Strategy Performance Health\n",
+                    perf_note,
+                ]
+            else:
+                rows = [
+                    "---",
+                    "## 17. Strategy Performance Health\n",
+                    f"| Gate status | UNKNOWN — 0 closed trades with P&L data |",
+                    "",
+                    perf_note,
+                ]
+            rows.extend(qg_rows)
+            return "\n".join(rows)
+
+        gate = {"PASS": "**PASS**", "WARN": "**WARN**", "FAIL": "**FAIL**"}.get(p.gate_status, p.gate_status)
+        sl_tp_str = "inf" if p.sl_tp_ratio == float("inf") else f"{p.sl_tp_ratio:.1f}"
+        pf_str = "—" if p.profit_factor == 0.0 and p.losing_trades == 0 else f"{p.profit_factor:.2f}"
+
+        rows = [
+            "---",
+            "## 17. Strategy Performance Health\n",
+            "| Metric | Value |",
+            "|---|---:|",
+            f"| Realized P&L | ₹{p.realized_pnl:,.2f} |",
+            f"| Total closed trades | {p.total_trades} |",
+            f"| Win rate | {p.win_rate*100:.1f}% |",
+            f"| SL:TP ratio | {sl_tp_str} |",
+            f"| Profit factor | {pf_str} |",
+            f"| Expectancy | ₹{p.expectancy:,.2f} |",
+            f"| Worst strategy | {p.worst_strategy} |",
+            f"| Best strategy | {p.best_strategy} |",
+            f"| Worst symbol | {p.worst_symbol} |",
+            f"| Best symbol | {p.best_symbol} |",
+            f"| Gate status | {gate} |",
+        ]
+        rows.extend(qg_rows)
+        rows.extend([
+            "",
+            "Gate rules:",
+            "- PASS: realized_pnl > 0, expectancy > 0, profit_factor > 1.2",
+            "- WARN: realized_pnl < 0 but expectancy >= 0 (strategy improving)",
+            "- FAIL: realized_pnl < 0 and expectancy < 0",
+            "- UNKNOWN: no trades yet",
+            "",
+            "Live-readiness verdict:",
+            "- LIVE_BLOCKED if gate_status is FAIL",
+            "- PAPER_OPTIMIZATION if gate_status is WARN or FAIL",
+            "- SHADOW_LIVE_READY only after ≥5 clean paper sessions with PASS gate",
+        ])
+        return "\n".join(rows)
+
 
     # ── Formatting helpers ────────────────────────────────────────────────────
 

@@ -50,93 +50,104 @@ or max drawdown exceeds 1.5× old TEE baseline in any single session.
 
 ## Session 1
 
-**Date:** ___________  
-**Session archive:** `session-archives/YYYY-MM-DD/`
+**Date:** 2026-06-05 (Session 11 — second run of the day; quality gate inactive due to missing YAML in container)
+**Session archive:** `session-archives/2026-06-05/`
 
 ### 18 Tracked Metrics
 
+Only vwap_reversion active. No momentum, orb, trend_15m, preclose, scalp_1m strategies running.
+
 | # | Metric | vwap_reversion | momentum | orb | trend_15m | preclose | scalp_1m | ALL |
 |---|---|---|---|---|---|---|---|---|
-| 1 | Total trades | | | | | | | |
-| 2 | Net P&L (₹) | | | | | | | |
-| 3 | Win rate (%) | | | | | | | |
-| 4 | Avg winner (₹) | | | | | | | |
-| 5 | Avg loser (₹) | | | | | | | |
-| 6 | Profit factor | | | | | | | |
-| 7 | Max drawdown (₹) | | | | | | | |
-| 8 | MFE avg (est.) | | | | | | | |
-| 9 | MAE avg (est.) | | | | | | | |
-| 10 | profit_capture_ratio | | | | | | | |
-| 11 | Breakeven shift count | | | | | | | |
-| 12 | Partial booking count | | | | | | | |
-| 13 | Trailing activation count | | | | | | | |
-| 14 | Trailing stop hit count | | | | | | | |
-| 15 | Max hold exit count | | | | | | | |
-| 16 | Hard time exit count | | | | | | | |
-| 17 | MIS square-off count | | | | | | | |
-| 18 | Trades old TEE would exit earlier | | | | | | | |
+| 1 | Total trades (exits) | — | — | — | — | — | — | 158 (132 TEE + 26 MIS) |
+| 2 | Net P&L (₹) | — | — | — | — | — | — | -5,688 |
+| 3 | Win rate (%) | — | — | — | — | — | — | 48.1% (63 TP / 131 TEE exits) |
+| 4 | Avg winner (₹) | — | — | — | — | — | — | unknown (not in counters) |
+| 5 | Avg loser (₹) | — | — | — | — | — | — | unknown (not in counters) |
+| 6 | Profit factor | — | — | — | — | — | — | unknown (orders.json analysis needed) |
+| 7 | Max drawdown (₹) | — | — | — | — | — | — | unknown (max_intraday_drawdown: null) |
+| 8 | MFE avg (est.) | — | — | — | — | — | — | unknown |
+| 9 | MAE avg (est.) | — | — | — | — | — | — | unknown |
+| 10 | profit_capture_ratio | — | — | — | — | — | — | unknown (MFE not tracked) |
+| 11 | Breakeven shift count | — | — | — | — | — | — | 0 |
+| 12 | Partial booking count | — | — | — | — | — | — | 0 (counter not in LiveCounters — see Notes) |
+| 13 | Trailing activation count | — | — | — | — | — | — | 1 (tee_trailing_activated) |
+| 14 | Trailing stop hit count | — | — | — | — | — | — | 1 (tee_trailing_hits) |
+| 15 | Max hold exit count | — | — | — | — | — | — | unknown (not tracked) |
+| 16 | Hard time exit count | — | — | — | — | — | — | unknown (not tracked) |
+| 17 | MIS square-off count | — | — | — | — | — | — | 26 |
+| 18 | Trades old TEE would exit earlier | — | — | — | — | — | — | unknown |
 
 ### Safety Gate Checks (Session 1)
 
 | Gate | Required | Actual | Pass? |
 |---|---|---|---|
-| Duplicate exits | 0 | | ☐ |
-| Unmanaged positions at close | 0 | | ☐ |
-| Daily cap blocked exits | 0 | | ☐ |
-| Live broker calls | 0 | | ☐ |
-| tee_trailing_activations_r visible | present | | ☐ |
-| tee_partial_bookings visible | present | | ☐ |
-| scalp_1m using fixed TP/SL | confirmed | | ☐ |
+| Duplicate exits | 0 | 0 (tee_duplicate_exits_prevented=0) | ✅ PASS |
+| Unmanaged positions at close | 0 | 0 (tee_unmanaged_detections=0) | ✅ PASS |
+| Daily cap blocked exits | 0 | 0 (daily_cap_reached=false) | ✅ PASS |
+| Live broker calls | 0 | 0 (router_live_attempts=0) | ✅ PASS |
+| tee_trailing_activations_r visible | present | tee_trailing_activated=1 present | ✅ PASS |
+| tee_partial_bookings visible | present | MISSING from LiveCounters JSON | ❌ FAIL |
+| scalp_1m using fixed TP/SL | confirmed | scalp_1m not deployed — N/A | — N/A |
 
-**Session 1 verdict:** ☐ CLEAN &nbsp; ☐ ISSUES (describe below)
+**Session 1 verdict:** ☒ ISSUES
 
 **Notes:**
+- Quality gate (paper_optimization.yaml) was NOT active — YAML not in Docker container. 267 entries, 0 rejections. All filters bypassed. Fixed with bind-mount in docker-compose.yml for Session 12.
+- `tee_partial_bookings` counter not flushed to live_counters.json. LiveCounters dataclass may not have this field yet — needs adding to §11 counter spec.
+- MIS fired cleanly at 15:05 IST: 26 positions discovered, 26 flat, 0 rejected, closed before 15:10 deadline.
+- L12 criterion (partial_booking_count > 0) cannot be verified this session.
 
 ---
 
 ## Session 2
 
-**Date:** ___________  
-**Session archive:** `session-archives/YYYY-MM-DD/`
+**Date:** 2026-06-10 (Session 15 — last session on pre-ADR-030 code; sessions 2026-06-08/06-09 ran the new TEE but were not recorded in this tracker)
+**Session archive:** `session-archives/2026-06-10/`
 
 ### 18 Tracked Metrics
 
+Only vwap_reversion and orb_15m produced fills (momentum/trend_15m/preclose structurally dead, scalp_1m self-gated — see ADR-030).
+
 | # | Metric | vwap_reversion | momentum | orb | trend_15m | preclose | scalp_1m | ALL |
 |---|---|---|---|---|---|---|---|---|
-| 1 | Total trades | | | | | | | |
-| 2 | Net P&L (₹) | | | | | | | |
-| 3 | Win rate (%) | | | | | | | |
-| 4 | Avg winner (₹) | | | | | | | |
-| 5 | Avg loser (₹) | | | | | | | |
-| 6 | Profit factor | | | | | | | |
-| 7 | Max drawdown (₹) | | | | | | | |
-| 8 | MFE avg (est.) | | | | | | | |
-| 9 | MAE avg (est.) | | | | | | | |
-| 10 | profit_capture_ratio | | | | | | | |
-| 11 | Breakeven shift count | | | | | | | |
-| 12 | Partial booking count | | | | | | | |
-| 13 | Trailing activation count | | | | | | | |
-| 14 | Trailing stop hit count | | | | | | | |
-| 15 | Max hold exit count | | | | | | | |
-| 16 | Hard time exit count | | | | | | | |
-| 17 | MIS square-off count | | | | | | | |
-| 18 | Trades old TEE would exit earlier | | | | | | | |
+| 1 | Total trades (closed) | 37 | 0 | 55 | 0 | 0 | 0 | 94 entries / 92 TEE exits + 2 MIS |
+| 2 | Net P&L (₹) | -3,165 | — | -5,452 | — | — | — | **-8,617** |
+| 3 | Win rate (%) | 43.2% | — | 23.6% | — | — | — | 31.5% (29 TP+trail / 92) |
+| 4 | Avg winner (₹) | +157 | — | +92 | — | — | — | from positions.json |
+| 5 | Avg loser (₹) | -270 | — | -158 | — | — | — | from positions.json |
+| 6 | Profit factor | 0.44 | — | 0.18 | — | — | — | 0.29 |
+| 7 | Max drawdown (₹) | — | — | — | — | — | — | unknown (not tracked) |
+| 8 | MFE avg (est.) | — | — | — | — | — | — | unknown |
+| 9 | MAE avg (est.) | — | — | — | — | — | — | unknown |
+| 10 | profit_capture_ratio | — | — | — | — | — | — | unknown (MFE not tracked) |
+| 11 | Breakeven shift count | — | — | — | — | — | — | 0 |
+| 12 | Partial booking count | — | — | — | — | — | — | 0 (counter present, never triggered) |
+| 13 | Trailing activation count | — | — | — | — | — | — | 2 (tee_trailing_activations_r=2) |
+| 14 | Trailing stop hit count | — | — | — | — | — | — | 2 (+₹410 — only net-positive exit type) |
+| 15 | Max hold exit count | — | — | — | — | — | — | 0 (tee_max_hold_exits) |
+| 16 | Hard time exit count | — | — | — | — | — | — | 0 (tee_hard_time_exits) |
+| 17 | MIS square-off count | — | — | — | — | — | — | 2 (discovered 2, placed 2, flat 2, before 15:10) |
+| 18 | Trades old TEE would exit earlier | — | — | — | — | — | — | 2 (TRAILING exits) |
 
 ### Safety Gate Checks (Session 2)
 
 | Gate | Required | Actual | Pass? |
 |---|---|---|---|
-| Duplicate exits | 0 | | ☐ |
-| Unmanaged positions at close | 0 | | ☐ |
-| Daily cap blocked exits | 0 | | ☐ |
-| Live broker calls | 0 | | ☐ |
-| tee_trailing_activations_r visible | present | | ☐ |
-| tee_partial_bookings visible | present | | ☐ |
-| scalp_1m using fixed TP/SL | confirmed | | ☐ |
+| Duplicate exits | 0 | 0 (tee_duplicate_exits_prevented=0) | ✅ PASS |
+| Unmanaged positions at close | 0 | 0 (book flat, recon clean) | ✅ PASS |
+| Daily cap blocked exits | 0 | 0 (daily_cap_reached=false) | ✅ PASS |
+| Live broker calls | 0 | 0 (router_live_exits=0) | ✅ PASS |
+| tee_trailing_activations_r visible | present | present (=2) | ✅ PASS |
+| tee_partial_bookings visible | present | present (=0) | ✅ PASS |
+| scalp_1m using fixed TP/SL | confirmed | scalp_1m emitted 0 signals (viability self-gate) — N/A | — N/A |
 
-**Session 2 verdict:** ☐ CLEAN &nbsp; ☐ ISSUES (describe below)
+**Session 2 verdict:** ☑ CLEAN (operationally) &nbsp; ☐ ISSUES
 
 **Notes:**
+- MIS validated again: 2 positions discovered at 15:05, both flat before deadline, no kill switch. Second consecutive MIS PASS (after Session 13).
+- R-ladder steps (breakeven/partial) never engaged: trades reach SL/TP within 1–2 TEE polls because targets are 0.16–0.36% on pre-ADR-030 stops. L12 (partial bookings > 0) remains unmet — re-evaluate after Session 16 runs the Week-1 wider stops (committee report / ADR-030).
+- ADR-030 (2026-06-10): risk-engine confidence/RR quality filters were silently disabled Sessions 12–15 by a strategy-name key mismatch. This session's entry quality is therefore unfiltered; the 5-session live-gate counter restarted at Session 16.
 
 ---
 

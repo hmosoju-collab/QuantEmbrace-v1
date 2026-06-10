@@ -13,16 +13,23 @@ Logic:
           (wick pokes through the band but closes back inside).
     4. Direction: BUY when below lower band with reversal wick, SELL above upper band.
     5. ATR-based stop: entry ± ``atr_stop_multiplier`` × ATR(14).
-       Minimum stop = half the band width (so we're never stopped by VWAP noise).
+       Minimum stop = max(half band width, ``min_stop_pct`` of price).
     6. Take-profit: VWAP itself (mean-reversion target).
-    7. Confidence: based on how many standard deviations the close is from VWAP.
+    7. Reward:risk gate (vwap_rev_v2): distance-to-VWAP must be ≥
+       ``min_reward_risk`` × stop distance — entries barely beyond the band
+       have RR ≈ 1 and lose after costs. Plus the universal viability gate
+       (strategies/_viability.py).
+    8. Confidence: based on how many standard deviations the close is from VWAP.
        More deviation + wick → higher confidence.
-    8. One signal per symbol per deviation event (cooldown ``signal_cooldown_bars``
-       bars before the same symbol can signal again in the same direction).
+    9. Direction-aware cooldown (``signal_cooldown_bars`` per symbol+direction),
+       max ``max_signals_per_symbol_direction`` per day per (symbol, direction)
+       (stops averaging into trend days), and a strategy-wide
+       ``max_signals_per_day`` budget.
 
 Phase gates:
-    NORMAL only (09:30–14:45 IST).
-    Does NOT fire if VWAP < 5 bars of data (insufficient intraday history).
+    NORMAL only (10:15–14:30 IST).
+    Does NOT fire before 10:15 — VWAP bands are unreliable without 60 min of history.
+    Does NOT fire if intraday VWAP history < min_vwap_bars (default 60).
     Does NOT fire in the last 15 minutes before PRE_CLOSE (liquidity thins).
 
 Separation of concerns:
@@ -41,12 +48,16 @@ from shared.models.signal import Direction, Signal
 
 from strategy_engine.strategies._math import atr_wilder, vwap_bands
 from strategy_engine.strategies._position_sizer import size_position
+from strategy_engine.strategies._viability import MIN_STOP_PCT, check_signal_viability
 from strategy_engine.strategies.base_strategy import Bar, BaseStrategy
 
 logger = get_logger(__name__, service_name="strategy_engine")
 
 _IST_MARKET_OPEN = 9 * 60 + 15   # 09:15 IST
 _IST_NORMAL_START = 9 * 60 + 30  # 09:30 IST
+# 10:15 IST — entries need 60 minutes of VWAP history; the old 09:45 start
+# fired on statistically thin bands exactly when volatility is highest.
+_IST_VWAP_START   = 10 * 60 + 15
 _IST_NORMAL_END   = 14 * 60 + 30 # 14:30 IST (stop 15min before pre-close)
 
 
@@ -83,12 +94,17 @@ class VWAPReversionStrategy(BaseStrategy):
         name: str = "vwap_reversion",
         symbols: list[str] | None = None,
         market: str = "NSE",
-        band_std: float = 2.0,
+        band_std: float = 2.5,
         atr_period: int = 14,
         atr_stop_multiplier: float = 1.0,
         min_confidence: float = 0.60,
-        signal_cooldown_bars: int = 5,
+        signal_cooldown_bars: int = 15,
         min_wick_ratio: float = 0.4,
+        min_vwap_bars: int = 60,
+        min_reward_risk: float = 1.5,
+        min_stop_pct: float = MIN_STOP_PCT,
+        max_signals_per_day: int = 6,
+        max_signals_per_symbol_direction: int = 2,
         nav: float = 1_000_000.0,
         paper_trade: bool = True,
     ) -> None:
@@ -99,6 +115,15 @@ class VWAPReversionStrategy(BaseStrategy):
         self._min_conf         = min_confidence
         self._cooldown         = signal_cooldown_bars
         self._min_wick_ratio   = min_wick_ratio
+        # Minimum candles in the intraday VWAP history before signals are valid;
+        # prevents entries on thin early-session VWAP with few data points
+        self._min_vwap_bars    = min_vwap_bars
+        # Mean reversion at RR ≈ 1 needs ~65% WR after costs — committee gate:
+        # distance-to-VWAP must be ≥ min_reward_risk × stop distance.
+        self._min_rr           = min_reward_risk
+        self._min_stop_pct     = min_stop_pct
+        self._max_signals_per_day = max_signals_per_day
+        self._max_per_sym_dir  = max_signals_per_symbol_direction
         self._nav              = nav
         self._paper            = paper_trade
 
@@ -114,8 +139,14 @@ class VWAPReversionStrategy(BaseStrategy):
         self._atr_lows:   dict[str, deque[float]] = {}
         self._atr_closes: dict[str, deque[float]] = {}
 
-        # Cooldown counter: symbol → bars since last signal
-        self._bars_since_signal: dict[str, int] = {}
+        # Direction-aware cooldown: per-symbol bar index + last signal index
+        # per (symbol, direction). The old per-symbol counter let the strategy
+        # re-fire the same direction every 5 bars into a trend day.
+        self._bar_index: dict[str, int] = {}
+        self._last_signal_idx: dict[tuple[str, str], int] = {}
+        # Daily budgets
+        self._signals_today: int = 0
+        self._sym_dir_count: dict[tuple[str, str], int] = {}
 
         self._pending_signal: Optional[Signal] = None
 
@@ -149,18 +180,19 @@ class VWAPReversionStrategy(BaseStrategy):
         self._atr_lows[symbol].append(bar.low)
         self._atr_closes[symbol].append(bar.close)
 
-        # Cooldown tick
-        self._bars_since_signal[symbol] = self._bars_since_signal.get(symbol, self._cooldown) + 1
+        # Bar index tick (drives the direction-aware cooldown)
+        self._bar_index[symbol] = self._bar_index.get(symbol, 0) + 1
 
-        # Phase gate
-        if not (_IST_NORMAL_START <= ist < _IST_NORMAL_END):
+        # Phase gate: VWAP entries wait until 10:15 so bands form on 60min of data
+        if not (_IST_VWAP_START <= ist < _IST_NORMAL_END):
+            return
+
+        # Strategy-wide daily signal budget (committee cap: 6/day)
+        if self._signals_today >= self._max_signals_per_day:
             return
 
         n_intraday = len(self._intraday_closes.get(symbol, []))
-        if n_intraday < 5:   # Need at least 5 intraday bars for meaningful VWAP
-            return
-
-        if self._bars_since_signal.get(symbol, 0) < self._cooldown:
+        if n_intraday < self._min_vwap_bars:
             return
 
         # Compute VWAP + bands
@@ -192,7 +224,7 @@ class VWAPReversionStrategy(BaseStrategy):
         if bar.close < lower_band:
             lower_wick = bar.close - bar.low
             wick_ratio = lower_wick / bar_range
-            if wick_ratio >= self._min_wick_ratio:
+            if wick_ratio >= self._min_wick_ratio and self._can_fire(symbol, Direction.BUY):
                 # Lower wick pokes below band, close rises back — rejection confirmed
                 deviation_std = (vwap_val - bar.close) / (vwap_val - lower_band) if (vwap_val - lower_band) != 0 else 0
                 confidence = min(1.0, 0.5 + deviation_std * 0.25 + wick_ratio * 0.25)
@@ -203,7 +235,7 @@ class VWAPReversionStrategy(BaseStrategy):
         elif bar.close > upper_band:
             upper_wick = bar.high - bar.close
             wick_ratio = upper_wick / bar_range
-            if wick_ratio >= self._min_wick_ratio:
+            if wick_ratio >= self._min_wick_ratio and self._can_fire(symbol, Direction.SELL):
                 deviation_std = (bar.close - vwap_val) / (upper_band - vwap_val) if (upper_band - vwap_val) != 0 else 0
                 confidence = min(1.0, 0.5 + deviation_std * 0.25 + wick_ratio * 0.25)
                 if confidence >= self._min_conf:
@@ -216,6 +248,16 @@ class VWAPReversionStrategy(BaseStrategy):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    def _can_fire(self, symbol: str, direction: Direction) -> bool:
+        """Direction-aware cooldown + per-(symbol, direction) daily budget."""
+        key = (symbol, direction.value)
+        if self._sym_dir_count.get(key, 0) >= self._max_per_sym_dir:
+            return False
+        last = self._last_signal_idx.get(key)
+        if last is not None and self._bar_index.get(symbol, 0) - last < self._cooldown:
+            return False
+        return True
+
     def _emit(
         self,
         bar: Bar,
@@ -227,11 +269,44 @@ class VWAPReversionStrategy(BaseStrategy):
         confidence: float,
     ) -> None:
         price      = bar.close
-        stop_dist  = max(self._atr_stop_mult * atr, abs(upper_band - lower_band) / 2)
+        stop_dist  = max(
+            self._atr_stop_mult * atr,
+            abs(upper_band - lower_band) / 2,
+            (self._min_stop_pct / 100.0) * price,
+        )
         stop_loss  = (price - stop_dist) if direction == Direction.BUY else (price + stop_dist)
         take_profit = vwap_val   # Mean-reversion target
 
         if stop_dist <= 0:
+            return
+
+        # Reward:risk gate — the distance back to VWAP is all the trade can
+        # earn; entries barely beyond the band have RR ≈ 1 and lose after costs.
+        reward = abs(vwap_val - price)
+        if reward < self._min_rr * stop_dist:
+            logger.info(
+                "vwap_reversion.rejected_rr",
+                symbol=bar.symbol,
+                direction=direction.value,
+                price=price,
+                reward=round(reward, 4),
+                stop_distance=round(stop_dist, 4),
+                reward_risk=round(reward / stop_dist, 2),
+                min_reward_risk=self._min_rr,
+            )
+            return
+
+        viability = check_signal_viability(
+            price, stop_dist, reward, min_stop_pct=self._min_stop_pct
+        )
+        if not viability.viable:
+            logger.info(
+                "vwap_reversion.rejected_viability",
+                symbol=bar.symbol,
+                direction=direction.value,
+                price=price,
+                reject_reason=viability.reason,
+            )
             return
 
         sizing = size_position(price, stop_dist, self._nav, confidence)
@@ -267,12 +342,17 @@ class VWAPReversionStrategy(BaseStrategy):
                 "band_std":       self._band_std,
                 "atr":            round(atr, 4),
                 "stop_distance":  round(stop_dist, 4),
+                "reward_risk":    round(reward / stop_dist, 4),
                 "paper_trade":    self._paper,
-                "strategy_version": "vwap_rev_v1",
+                "strategy_version": "vwap_rev_v2",
+                **viability.to_metadata(),
                 **sizing.to_metadata(),
             },
         )
-        self._bars_since_signal[bar.symbol] = 0
+        key = (bar.symbol, direction.value)
+        self._last_signal_idx[key] = self._bar_index.get(bar.symbol, 0)
+        self._sym_dir_count[key] = self._sym_dir_count.get(key, 0) + 1
+        self._signals_today += 1
 
     def _ensure_buffers(self, symbol: str) -> None:
         if symbol not in self._intraday_closes:
@@ -283,7 +363,7 @@ class VWAPReversionStrategy(BaseStrategy):
             self._atr_highs[symbol]  = deque(maxlen=60)
             self._atr_lows[symbol]   = deque(maxlen=60)
             self._atr_closes[symbol] = deque(maxlen=60)
-            self._bars_since_signal[symbol] = self._cooldown
+            self._bar_index[symbol]  = 0
 
     def reset_daily(self) -> None:
         """Reset all intraday state. Call at POST_CLOSE."""
@@ -292,5 +372,8 @@ class VWAPReversionStrategy(BaseStrategy):
             self._intraday_lows[symbol]    = []
             self._intraday_closes[symbol]  = []
             self._intraday_volumes[symbol] = []
-            self._bars_since_signal[symbol] = self._cooldown
+            self._bar_index[symbol]        = 0
+        self._last_signal_idx.clear()
+        self._sym_dir_count.clear()
+        self._signals_today = 0
         logger.info("vwap_reversion.daily_reset", strategy=self.name)

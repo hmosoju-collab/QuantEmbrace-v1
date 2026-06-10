@@ -810,6 +810,8 @@ Full platform review conducted. Three critical blockers identified and fixed bef
 - HIGH-002: Strategy engine kill switch uses hand-rolled poll, not `KillSwitchCache` — **STILL OPEN** (confirmed 2026-05-30: strategy_engine/service.py:705 `_is_kill_switch_active()` does direct `get_item`, not KillSwitchCache)
 - ~~HIGH-003: `InstrumentRegistry` load failure silently disables 3 risk validators in production~~ — **✅ FIXED (verified 2026-05-30)**: sector/liquidity/spread_gate now **fail closed** via `risk_data_unavailable_result(...)` on missing data (sector_validator.py:79/84/95, liquidity:98, spread_gate:96). This bullet is stale — validators reject, they do not silently pass.
 - HIGH-004: MIS square-off background task has no watchdog / failure alerting — **STILL OPEN** (confirmed 2026-05-30: no MIS watchdog; MIS import only at execution_engine/service.py:322)
+  - **Session 9 incident (2026-06-04):** MIS was scheduled (`mis_square_off.scheduled` logged at startup, `seconds_until_close=16244`) but `mis_square_off.starting` never appeared. 30 positions stranded open at session close. Root cause unknown — candidates: asyncio event loop saturated by 30-symbol stale-LTP TEE cycle blocking the sleep wakeup; or all open positions had stale `exit_order_id` locks causing MIS scan to skip them all. **Requires `mis_square_off.watchdog`**: a separate asyncio task that checks at 15:10 IST whether `mis_positions_flat` counter is still null/zero and alerts (or force-closes) if MIS did not run. Must add before next session.
+  - **Stranded positions:** cleared automatically by `docker-compose down -v` at next session start — no manual action needed.
 - HIGH-005: `datetime.utcnow()` deprecated in `_OrderPlacementLimiter` — **STILL OPEN (LOW)** (confirmed 2026-05-30: zerodha_broker.py:102/129)
 
 Review document: `docs/reviews/platform_review_2026-05-11.md`
@@ -1243,3 +1245,68 @@ PYTHONPATH=services python3 scripts/read_only_live_readiness_runtime_check.py --
 **Full pre-live gate checklist:** `docs/live-readiness/pre-live-runbook.md §4`
 
 Until every box is checked from a real host run: **NO GO.**
+
+
+---
+
+## Cross-Strategy Netting Protection — RESOLVED 2026-06-05
+
+**ADR-028** · Triggered by: Session 10 (2026-06-05) UNIONBANK paper trade anomaly
+
+| Blocker | Status |
+|---|---|
+| Bug: competing entry signals net against open positions | ✅ FIXED — `check_direction_conflict` in `order_manager.py` |
+| Bug: `attach_exit_policy` overwrites active policy from different signal | ✅ FIXED — `entry_signal_id` guard in `order_manager.py` |
+| Live: fail-open on position-store outage | ✅ FIXED — `fail_open=False` in live path |
+| Reconciliation: no detection of entry-unwound-by-competing-entry | ✅ FIXED — `check_competing_entry_unwind` + `check_audit_chain` |
+| Monitoring: no visibility into netting protection state | ✅ FIXED — Section 16 in `paper_trading_monitor.py` |
+| Tests | ✅ 20 tests in `tests/unit/test_cross_strategy_netting.py` |
+
+### Live Promotion Path for This Class: CONDITIONALLY UNBLOCKED
+
+| Step | Status | Condition |
+|---|---|---|
+| Fix deployed + tested | ✅ | — |
+| Section 16 gate: PASS | 🔲 | Requires 1 clean paper session with guard active |
+| Shadow-live session | 🔲 | Broker calls disabled; must not skip |
+| Limited live (1-symbol, hard notional cap) | 🔲 | Only after clean paper + clean shadow-live |
+
+**Do not skip the shadow-live step.** The UNIONBANK failure class (silent position mutation) is exactly the kind of bug that appears between paper and live.
+
+---
+
+## 5-Session Live Gate Progress (Session 16+ valid sessions only — counter RESTARTED by ADR-030)
+
+> **2026-06-10 (ADR-030):** Sessions 12–15 are NOT valid quality-gate sessions — the
+> confidence/RR filters were silently disabled by a strategy-name key mismatch
+> (YAML keys unprefixed vs `nse_`-prefixed signal names). The 5-session counter
+> restarts at Session 16, the first session with the Week-1 entry-economics
+> rebuild active (universal viability gate, ORB v2, VWAP v2, 15-entry/day budget).
+> Session 13's prior 1/5 credit is void (its MIS/HIGH-004 validation still stands).
+
+| # | Session | Date | S4 MIS | Result | Notes |
+|---|---|---|---|---|---|
+| 1/5 | Session 16 | TBD | — | — | First valid quality-gate session (ADR-030) |
+| 2/5 | Session 17 | TBD | — | — | |
+| 3/5 | Session 18 | TBD | — | — | |
+| 4/5 | Session 19 | TBD | — | — | |
+| 5/5 | Session 20 | TBD | — | — | |
+
+**Live gate BLOCKED** until all 5 sessions show S4 PASS + strategy performance gates (PF ≥ 1.2, expectancy > 0).
+
+### Required before Session 16
+
+- [x] ~~S3 bucket creation in setup~~ — verified 2026-06-10: `_create_s3_buckets()` in `setup_local_tables.py` creates `{prefix}-data` and `{prefix}-logs` (fix landed after Session 13).
+- [x] ~~Rebuild ALL service images~~ — done post-close 2026-06-10: strategy_engine, risk_engine, execution_engine rebuilt and **verified to contain ADR-030 code** (_viability.py, orb_v2, _threshold_for, GLOBAL_DAILY_ENTRY_LIMIT, YAML max_trades_per_day=15).
+
+### Week-2 items (committee roadmap — not started)
+
+- [ ] intraday_trend_15m 15m warm-up replay from candle history (strategy cannot fire without it — needs 52×15m bars, buffers reset nightly)
+- [ ] Persist `strategy_id` to positions table at fill time (per-strategy P&L attribution)
+- [ ] NIFTY index regime gate (longs above day-VWAP / shorts below) for trend_15m + ORB
+- [ ] Gross-vs-net cost attribution line in `paper_session_report.py`
+
+### HIGH-004 — ✅ FULLY CLOSED (fix validated Session 13, 2026-06-09)
+
+Fix: 60-second polling loop in `MISSquareOffManager.run()` + CRITICAL log on task cancellation.
+Evidence: `mis_square_off.all_positions_closed` at 15:05:13 IST — 3 positions closed before deadline.

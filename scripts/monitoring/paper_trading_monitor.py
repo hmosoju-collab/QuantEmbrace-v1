@@ -51,6 +51,7 @@ try:
         MonitoringStatusService,
         StrategyStatusRow,
     )
+    from services.shared.monitoring.strategy_performance import StrategyPerformanceAnalyzer
 except ImportError as exc:
     print(f"Import error: {exc}")
     print("Run from the project root with the virtualenv active.")
@@ -122,17 +123,33 @@ async def _build_and_render(
     positions_table: str,
     risk_state_table: str,
     prices_table: str,
+    orders_table: str,
     trading_mode: str,
     counters: Optional[LiveCounters],
 ) -> tuple[str, str]:
+    # Populate Section 17 performance metrics from DynamoDB orders table.
+    # Runs concurrently with snapshot build — adds ~50ms, makes §17 live.
+    effective_counters = counters or LiveCounters()
+    if effective_counters._perf_status is None:
+        try:
+            analyzer = StrategyPerformanceAnalyzer(
+                dynamo_client=dynamo,
+                orders_table=orders_table,
+                risk_state_table=risk_state_table,
+            )
+            effective_counters._perf_status = await analyzer.analyze()
+        except Exception:
+            pass  # §17 degrades gracefully to "unavailable" if this fails
+
     svc = MonitoringStatusService(
         dynamo_client=dynamo,
         positions_table=positions_table,
         risk_state_table=risk_state_table,
         prices_table=prices_table,
+        orders_table=orders_table,
         trading_mode=trading_mode,
         live_trading_enabled=False,
-        live_counters=counters,
+        live_counters=effective_counters,
     )
     snap = await svc.build_snapshot()
     return _RENDERER.render(snap), snap.overall_status
@@ -204,7 +221,11 @@ def main() -> None:
 
     positions_table  = f"{prefix}-positions"
     risk_state_table = f"{prefix}-risk-state"
-    prices_table     = f"{prefix}-prices"
+    # The LiveQuotePoller writes quotes to "{prefix}-latest-prices" (settings
+    # dynamodb_table_prices). "{prefix}-prices" does not exist — using it made
+    # the LtpResolver silently fall back to fill prices for every position.
+    prices_table     = f"{prefix}-latest-prices"
+    orders_table     = f"{prefix}-orders"
 
     counters: Optional[LiveCounters] = None
     if args.counters:
@@ -227,7 +248,8 @@ def main() -> None:
 
     async def _run_once() -> None:
         output, status = await _build_and_render(
-            dynamo, positions_table, risk_state_table, prices_table, args.trading_mode, counters
+            dynamo, positions_table, risk_state_table, prices_table,
+            orders_table, args.trading_mode, counters,
         )
         _print_render(output, status, prefix, endpoint, args.counters)
 

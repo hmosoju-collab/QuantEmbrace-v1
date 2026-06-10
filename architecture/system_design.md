@@ -337,18 +337,22 @@ A restarted strategy engine replaying the same candle/tick produces the same sig
 
 Signals carry `expires_at = signal_time + 30s`. The risk engine rejects expired signals to prevent stale execution after queue backlogs.
 
-### Pluggable Strategies (Phase 3 — all active)
+### Pluggable Strategies (Week-1 entry-economics rebuild, ADR-030 — 2026-06-10)
 
-| Strategy | Interface | Interval | Status |
-|---|---|---|---|
-| `MomentumStrategy` | TICK | — | Active (paper) |
-| `ORBStrategy` | CANDLE | 15min | Active (paper) |
-| `Scalp1mStrategy` | CANDLE | 1min | Active (paper) |
-| `VWAPReversionStrategy` | CANDLE | 5min | Active (paper) |
-| `IntradayTrend15mStrategy` | CANDLE | 15min | Active (paper) |
-| `PreCloseMomentumStrategy` | CANDLE | 15min | Active (paper) |
+| Strategy | Interface | Interval | Status | Daily signal budget |
+|---|---|---|---|---|
+| `ORBStrategy` (orb_v2) | CANDLE | 1min (stops from internal 5m aggregation) | Active (paper) | 6 |
+| `VWAPReversionStrategy` (vwap_rev_v2) | CANDLE | 1min | Active (paper) | 6 |
+| `IntradayTrend15mStrategy` | CANDLE | 15min | Active (paper) — cannot fire until 15m warm-up replay lands (needs 52×15m bars; buffers reset nightly) | 8 |
+| `MomentumStrategy` | TICK | — | **RETIRED** (interface bug: signal logic in `on_bar`, never called on tick path; merged into trend_15m) | — |
+| `Scalp1mStrategy` | CANDLE | 1min | **RETIRED** (own viability gate rejects 100% of signals — 1m scalping cannot clear the 0.20% round-trip cost) | — |
+| `PreCloseMomentumStrategy` | CANDLE | 5min | **RETIRED** (fire window 14:45–15:10 sits inside the 14:45 entry block; ≤13-min hold fails the cost floor) | — |
 
-All strategies import `Signal`, `Direction` from `shared.models.signal` (not from any service-local re-export). All start with `paper_trade=True` in DynamoDB strategy-config until 5-day paper validation passes.
+All strategies import `Signal`, `Direction` from `shared.models.signal` (not from any service-local re-export). All start with `paper_trade=True` in DynamoDB strategy-config until 5-day paper validation passes. Retirements are config-level (`enabled=false` seeded by `scripts/setup_local_tables.py`) — code remains for the backtest lab.
+
+**Universal viability gate** (`strategy_engine/strategies/_viability.py`, ADR-030): no strategy may emit a signal whose stop distance is < 0.40% of entry or whose profit target is < 2.5× the 0.20% round-trip cost baseline (slippage + spread + Indian statutory charges). Extracted from scalp_1m's hardened filter; wired into ORB and VWAP signal construction. See `docs/strategy/retail-quant-investment-committee-report-2026-06-10.md` Standing Rules R1/R2.
+
+**Entry budgets** (risk_engine): `max_trades_per_symbol_per_day=1` and a book-wide `max_trades_per_day=15` (`GLOBAL_DAILY_ENTRY_LIMIT_REACHED`), both enforced by `SymbolTradeCountValidator` from `paper_optimization.yaml`. Exits are always exempt. The `PaperQualityGateValidator` threshold lookup is prefix-tolerant as of ADR-030 (`nse_vwap_reversion` matches the `vwap_reversion` YAML key) — note Sessions 12–15 ran with these filters silently disabled by the name mismatch.
 
 ### Per-Strategy Failure Isolation
 

@@ -38,7 +38,7 @@ import os
 import signal
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -75,6 +75,8 @@ from risk_engine.validators.signal_age_validator import SignalAgeValidator
 from risk_engine.validators.slippage_validator import SlippageValidator
 from risk_engine.validators.reconciliation_validator import ReconciliationValidator
 from risk_engine.validators.spread_gate_validator import SpreadGateValidator
+from risk_engine.validators.symbol_trade_count_validator import SymbolTradeCountValidator
+from risk_engine.validators.paper_quality_gate_validator import PaperQualityGateValidator
 from shared.config.settings import AppSettings, get_settings
 from shared.health.health_server import HealthServer
 from shared.kafka.retry_replayer import KafkaRetryReplayer
@@ -84,6 +86,8 @@ from shared.risk_state import attr_string, nav_key, risk_decision_key
 from shared.utils.helpers import utc_now
 
 logger = get_logger(__name__, service_name="risk_engine")
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 _RISK_DECISION_PUBLISH_PENDING = "PENDING"
 _RISK_DECISION_PUBLISH_PUBLISHED = "PUBLISHED"
@@ -298,6 +302,44 @@ class RiskEngineService:
             cache_ttl_seconds=5.0,
         )
 
+        # ── Session 11: SymbolTradeCountValidator + PaperQualityGateValidator ──
+        # Load thresholds from paper_optimization.yaml if available.
+        # Defaults match the YAML values; YAML is the authoritative source.
+        _paper_opt_cfg, _paper_opt_path = self._load_paper_optimization_config()
+        _entry_filters = _paper_opt_cfg.get("entry_filters", {})
+        _risk_cfg = _paper_opt_cfg.get("risk", {})
+
+        self._symbol_trade_count_validator = SymbolTradeCountValidator(
+            dynamo_client=self._dynamo,
+            orders_table=self._settings.aws.dynamodb_table_orders,
+            max_trades_per_symbol=int(_risk_cfg.get("max_trades_per_symbol_per_day", 1)),
+            max_entries_per_day=int(_risk_cfg.get("max_trades_per_day", 15)),
+            risk_profile=_risk_profile,
+        )
+        self._paper_quality_gate_validator = PaperQualityGateValidator(
+            min_confidence_by_strategy=_entry_filters.get("min_confidence", {}),
+            min_rr_by_strategy=_entry_filters.get("min_reward_risk_ratio", {}),
+        )
+
+        # ── Session 12: Startup config audit log ─────────────────────────────
+        # Emitted once at service init so that every container log has a
+        # structured record of the quality-gate thresholds that are in effect.
+        # Grep for QUALITY_GATES_CONFIG_LOADED to confirm the image is current.
+        logger.info(
+            "QUALITY_GATES_CONFIG_LOADED",
+            paper_optimization_path=_paper_opt_path,
+            symbol_trade_count_validator_enabled=True,
+            paper_quality_gate_validator_enabled=True,
+            vwap_reversion_min_confidence=_entry_filters.get("min_confidence", {}).get("vwap_reversion"),
+            vwap_reversion_min_reward_risk_ratio=_entry_filters.get("min_reward_risk_ratio", {}).get("vwap_reversion"),
+            orb_15m_min_confidence=_entry_filters.get("min_confidence", {}).get("orb_15m"),
+            orb_15m_min_reward_risk_ratio=_entry_filters.get("min_reward_risk_ratio", {}).get("orb_15m"),
+            max_trades_per_symbol_per_day=int(_risk_cfg.get("max_trades_per_symbol_per_day", 1)),
+            max_trades_per_day=int(_risk_cfg.get("max_trades_per_day", 15)),
+            live_trading_enabled=False,
+            paper_mode=True,
+        )
+
         # ── Phase 4: KillSwitchCache (in-memory, 1s DynamoDB poll) ────────────
         # Wraps existing KillSwitch with a background poll loop so kill switch
         # state is always current even if Kafka/SNS propagation path fails.
@@ -348,6 +390,67 @@ class RiskEngineService:
             port=getattr(self._settings, "health_check_port", 8080),
             service_name="risk_engine",
         )
+
+    # ── Config helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_paper_optimization_config() -> tuple[dict, str]:
+        """Load paper_optimization.yaml, returning (config_dict, path_str) tuple.
+
+        Returns:
+            (config_dict, path_str): where path_str is the resolved file path on
+            success or "defaults" when the file cannot be found or parsed.
+        """
+        from pathlib import Path
+        import yaml  # noqa: PLC0415
+        candidates = [
+            # When running from project root or inside services/risk_engine
+            Path(__file__).parent.parent / "strategy_engine" / "config" / "paper_optimization.yaml",
+            Path("services/strategy_engine/config/paper_optimization.yaml"),
+        ]
+        env_path = os.environ.get("PAPER_OPTIMIZATION_CONFIG_PATH")
+        if env_path:
+            candidates.insert(0, Path(env_path))
+        for path in candidates:
+            if path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8") as fh:
+                        cfg = yaml.safe_load(fh) or {}
+                    logger.info("Loaded paper_optimization.yaml from %s", path)
+                    return cfg, str(path)
+                except Exception as exc:
+                    logger.warning("Failed to load paper_optimization.yaml from %s: %s", path, exc)
+        logger.warning(
+            "paper_optimization.yaml not found — using hardcoded defaults for quality gate"
+        )
+        return {}, "defaults"
+
+    async def _increment_quality_gate_rejection(self, reason_code: str) -> None:
+        """Atomically increment a quality gate rejection counter in DynamoDB.
+
+        Non-critical: if the write fails, the rejection is already logged to S3.
+        Counters are read by the monitoring script for Section 17 display.
+        """
+        if self._dynamo is None:
+            return
+        try:
+            today = datetime.now(_IST).strftime("%Y-%m-%d")
+            await asyncio.to_thread(
+                self._dynamo.update_item,
+                TableName=self._settings.aws.dynamodb_table_risk_state,
+                Key={
+                    "PK": {"S": f"QUALITY_GATE_REJECT#{reason_code}"},
+                    "SK": {"S": f"DAY#{today}"},
+                },
+                UpdateExpression="ADD #cnt :one SET updated_at = :ts",
+                ExpressionAttributeNames={"#cnt": "count"},
+                ExpressionAttributeValues={
+                    ":one": {"N": "1"},
+                    ":ts": {"S": datetime.now(timezone.utc).isoformat()},
+                },
+            )
+        except Exception:
+            pass  # non-critical — rejection already logged to S3
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -721,6 +824,59 @@ class RiskEngineService:
             )
             return decision
         validator_results.append(eb_result)
+
+        # 2c. Symbol trade-count check — blocks re-entry into the same symbol
+        #     after max_trades_per_symbol_per_day is reached for the session.
+        #     Exit signals are always exempt (exits continue to work).
+        stc_result = await self._symbol_trade_count_validator.validate(signal_obj)
+        if not stc_result.approved:
+            decision = RiskDecision(
+                risk_decision_id=risk_decision_id,
+                signal_id=signal_obj.signal_id,
+                status=RiskDecisionStatus.REJECTED,
+                reason=stc_result.reason,
+                validator_results=[*validator_results, stc_result],
+            )
+            await self._log_decision(decision)
+            logger.info(
+                "Signal %s REJECTED — %s",
+                signal_obj.signal_id,
+                stc_result.reason,
+            )
+            asyncio.create_task(
+                self._increment_quality_gate_rejection("MAX_TRADES_PER_SYMBOL_REACHED")
+            )
+            return decision
+        validator_results.append(stc_result)
+
+        # 2d. Paper quality gate — confidence threshold + reward:risk ratio.
+        #     Synchronous (no DB reads). Exit signals are exempt.
+        qg_result = self._paper_quality_gate_validator.validate(signal_obj)
+        if not qg_result.approved:
+            decision = RiskDecision(
+                risk_decision_id=risk_decision_id,
+                signal_id=signal_obj.signal_id,
+                status=RiskDecisionStatus.REJECTED,
+                reason=qg_result.reason,
+                validator_results=[*validator_results, qg_result],
+            )
+            await self._log_decision(decision)
+            logger.info(
+                "Signal %s REJECTED — %s",
+                signal_obj.signal_id,
+                qg_result.reason,
+            )
+            # Identify specific reason code for Section 17 counter
+            reason_code = (
+                "CONFIDENCE_BELOW_THRESHOLD"
+                if "CONFIDENCE_BELOW_THRESHOLD" in qg_result.reason
+                else "REWARD_RISK_TOO_LOW"
+            )
+            asyncio.create_task(
+                self._increment_quality_gate_rejection(reason_code)
+            )
+            return decision
+        validator_results.append(qg_result)
 
         # 3. Reconciliation check — O(1) cached (1s TTL), no extra DynamoDB round-trip.
         #    Phase 8 (ADR-015 F7): rejects non-closeout live signals when position

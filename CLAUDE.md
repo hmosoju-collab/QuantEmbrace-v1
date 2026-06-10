@@ -1,6 +1,6 @@
 # QuantEmbrace — Claude Rules & Protocols
 
-_Last updated: 2026-05-30 | Detail in `architecture/system_design.md`, `docs/`, `memory/`_
+_Last updated: 2026-06-05 | Detail in `architecture/system_design.md`, `docs/`, `memory/`_
 
 ---
 
@@ -26,12 +26,19 @@ _Last updated: 2026-05-30 | Detail in `architecture/system_design.md`, `docs/`, 
 **Load before touching any service:**
 `architecture/system_design.md` · `memory/decisions.md` · `memory/paper_trading_fixes.md` · `memory/open_tasks.md` · `docs/operations/paper-trading-acceptance-checklist.md`
 
-**Pre-session sequence (all steps mandatory):**
+**Preferred startup command (Session 12+):**
 ```bash
+make start-paper-session   # rebuilds risk_engine image, validates quality gates, starts stack
+```
+
+**Manual pre-session sequence (backup if make is unavailable — all steps mandatory):**
+```bash
+docker-compose build risk_engine               # MUST rebuild to pick up quality-gate validators
 docker-compose down -v
 docker-compose up -d localstack redpanda
 docker-compose run --rm setup
 python scripts/deploy/paper_preflight_check.py   # must exit 0 — STOP if fails
+python scripts/validate_session12_runtime.py     # must exit 0 — STOP if any check fails
 python scripts/zerodha_login.py
 docker-compose up -d
 ```
@@ -48,8 +55,68 @@ docker-compose up -d
 | Real Zerodha credentials | **HARD BLOCK** — stop session if detected |
 | `PAPER_SEED_NAV` | `1000000` |
 
-**During session:** `python scripts/monitoring/paper_trading_monitor.py --counters /tmp/qe_live_counters.json`
-**Session close:** `python scripts/monitoring/paper_session_report.py --date YYYY-MM-DD`
+**During session:** `python scripts/monitoring/paper_trading_monitor.py --counters /tmp/qe_live_counters.json --prefix quantembrace-development --endpoint http://localhost:4566`
+**Session close:** `AWS_ENDPOINT_URL=http://localhost:4566 python scripts/monitoring/paper_session_report.py --date YYYY-MM-DD`
+
+---
+
+## AWS Historical Backtesting Protocol
+
+**Status: `[PLANNED — not yet implemented]`.** The lab's design docs, commands, agents, and skills exist; the engine code and AWS infra do **not** yet. Do not claim any lab phase works until its files exist at the claimed path.
+
+**Governance invariant (NON-NEGOTIABLE):**
+- Backtesting can **recommend**. Backtesting **cannot promote**.
+- GenAI can **explain**. GenAI **cannot trade**.
+- **A human approves all production changes.**
+
+The backtesting lab is an **offline research environment, fully isolated from live/paper trading.** It validates strategy edge over 10–15 yr NSE history, runs TEE old-vs-new and walk-forward validation, and generates AI quality-scorer training datasets. It is **advisory only** — it never promotes a strategy or changes trading behavior.
+
+**Trigger phrases:**
+
+- "start AWS backtesting"
+- "run 10 year backtest"
+- "run 15 year NSE backtest"
+- "AWS backtest phase"
+- "historical backtesting project"
+- "build model dataset"
+
+→ Execute `.claude/commands/aws_bt_session_start.md`. Load context, summarize lab state, **stop for approval.** Never auto-proceed between phases.
+
+**Before AWS backtesting work, Claude must read:**
+
+1. `CLAUDE.md`
+2. `architecture/system_design.md`
+3. `memory/open_tasks.md`
+4. `memory/decisions.md`
+5. AWS onboarding/deployment docs if present (`docs/06_aws_infrastructure.md`, `docs/phase1_ec2_migration.md`)
+6. `docs/backtesting/aws-backtesting-steering.md`
+7. `docs/backtesting/aws-backtesting-specification.md`
+8. `docs/backtesting/aws-backtesting-implementation-plan.md`
+
+Engine to **reuse**: `services/strategy_engine/backtesting/backtester.py` (never rewrite — `prefer_refactor_over_rewrite`).
+
+**Rules:**
+
+- AWS backtesting only.
+- No live trading.
+- No broker orders.
+- No capital changes.
+- No live table mutation.
+- No paper/live table mixing.
+- Use existing AWS architecture.
+- No Fargate/EKS/Lambda-only redesign unless explicitly approved.
+- S3 is the source of historical data.
+- DynamoDB is run registry and metadata only.
+- Large backtest outputs go to S3.
+- Every long run must be resumable.
+- Every run must persist config, code version, data version, trades, metrics, equity curve, reports, labels, and logs.
+- Costs and slippage are mandatory.
+- No lookahead leakage.
+- Every phase writes a report and stops for approval.
+- GitHub/free datasets default to **LOW trust** and must be quarantined (validate before promotion to the curated lake — see `docs/backtesting/aws-data-lake-contract.md`).
+- Licensed/vendor/NSE data required for production strategy validation.
+
+**Approved infra (design only; build is later, phase-gated):** separate `backtest` env / `qe-bt-` table prefix / `quantembrace-backtest-*` buckets · EC2 ARM64 `backtest-worker` ASG (scale-from-0) · DynamoDB `qe-bt-runs`/`qe-bt-checkpoints`/`qe-bt-datasets` · CloudWatch `QuantEmbrace/Backtest` · SNS `quantembrace-backtest-alerts` · on-demand serverless GenAI (EventBridge + Step Functions + Bedrock — no SQS, no polling). No Fargate/ECS/EKS/Lambda-for-compute. Each phase produces a report and **stops for human approval** before the next.
 
 ---
 
@@ -81,6 +148,30 @@ Detail: `architecture/system_design.md`
 - Strategy changes must be evidence-based (from logs, session reports, tests), tested, and reversible.
 - Do not silently ignore missing or stale data — log, alert, degrade or fail.
 - Never include secrets (API keys, tokens, credentials) in reports, logs, Claude prompts, or generated artifacts.
+
+### Strategy Performance Live-Readiness Rule
+
+The platform is **not live-ready just because infrastructure is healthy**.
+
+Live trading remains BLOCKED until ALL of the following pass across ≥5 consecutive paper sessions:
+- Strategy expectancy > 0
+- Profit factor > 1.2
+- Realized P&L > 0
+- Reconciliation: 0 mismatches
+- Section 16 netting gate: PASS
+- TEE: exits routing correctly
+- MIS square-off: all positions closed
+- Section 17 Strategy Performance Health gate: PASS
+
+Until all pass: verdict = `PAPER_OPTIMIZATION`. Do not promote to live.
+
+### Session Validity Rules
+- Sessions 10 and 11 ran on a stale Docker image. Quality gates were inactive. They are NOT valid quality-gate performance tests.
+- Sessions 12–15 ran with the confidence/RR quality filters **silently disabled** by a strategy-name key mismatch (YAML keys unprefixed, signals `nse_`-prefixed — fixed in ADR-030, 2026-06-10). They are NOT valid quality-gate performance tests either.
+- Session 16 is the first valid quality-gate proof session (Week-1 entry-economics rebuild: universal viability gate, ORB v2, VWAP v2, 15-entry/day global budget — ADR-030).
+- A paper session is not valid unless `scripts/validate_session12_runtime.py` passes at startup.
+- Live trading remains BLOCKED until ≥5 consecutive valid quality-gate sessions pass all strategy performance gates.
+- Infrastructure health alone does not prove strategy edge.
 
 ### Claude-Specific Rules
 - Read code before making claims. Documentation and code may disagree — code is truth.

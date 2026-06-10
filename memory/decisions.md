@@ -1564,3 +1564,194 @@ highest-priority action and relying on idempotency for deduplication is safer.
 - `BLOCK_NEW_ENTRIES` is now fully effective: write → read → suppress.
 - `MONITORING_ACTION_MODE=safe_actions` is production-gated; no running session is affected.
 - Pre-existing failures (mis_square_off, position_reconciliation, trade_exit_engine) unchanged.
+
+
+## ADR-028: Cross-Strategy Position Netting Protection
+
+**Date:** 2026-06-05  
+**Status:** RESOLVED — verified by tests + runtime Section 16 gate  
+**Trigger:** Session 10 paper trading exposed UNIONBANK SHORT -296 (nse_vwap_reversion) silently reduced to -1 by a competing nse_orb_15m BUY 295 entry signal, followed by exit policy overwrite and TEE stop-out of the residual.
+
+### Context
+
+The execution engine used symbol as the sole position key. When two strategies independently generated opposing signals for the same symbol, the second entry netted against the first, bypassing TEE exit management and overwriting the original exit policy. This is not a P0 in paper mode (paper_trade=True, no real capital) but is a hard blocker for any live trading.
+
+### Root Cause
+
+`apply_fill_to_position` blindly added/subtracted quantity regardless of whether the incoming order was an entry or an exit. `attach_exit_policy` overwrote the active policy unconditionally.
+
+### Decisions
+
+1. **Direction conflict gate** (`check_direction_conflict`): Before accepting any entry signal, read the current position. If an open position exists in the opposite direction, reject the new entry with `DIRECTION_CONFLICT_EXISTING_POSITION`. No order, no fill, no position mutation.
+
+2. **Mode-aware fail behavior**: Paper mode fails open on position-store outage (warn + allow). Live mode fails closed — rejects the entry with `POSITION_STORE_UNAVAILABLE`. This is the same principle as all other live fail-closed rules in CLAUDE.md.
+
+3. **Exit policy protection** (`attach_exit_policy` `entry_signal_id` parameter): If an active policy from a different signal_id already owns the position, block the overwrite and return False. TEE callers (no `entry_signal_id`) bypass the guard.
+
+4. **End-of-session reconciliation** (`check_competing_entry_unwind`, `check_audit_chain`): Post-session gates detect any position reduced by a competing entry (not an explicit EXIT), and any broken signal→order→fill→position audit chain.
+
+5. **Section 16 in monitoring report**: Live counters surface all netting protection metrics in every monitoring report. `gate_pass` is FAIL if any of the must-be-zero counters are non-zero.
+
+### Counter semantics
+
+| Counter | Meaning | Gate |
+|---|---|---|
+| `netting_conflicts_seen` | Guard detected a conflict | allowed ≥ 0 |
+| `netting_conflicts_rejected` | Correctly rejected before order | allowed ≥ 0 |
+| `netting_store_outage_live_rejected` | Live fail-closed on store outage | allowed ≥ 0 |
+| `netting_rejected_with_order_id` | Rejected signal leaked an order | must = 0 |
+| `netting_rejected_with_fill_id` | Rejected signal produced a fill | must = 0 |
+| `netting_rejected_with_position_mutation` | Rejected signal mutated position | must = 0 |
+| `netting_policy_overwrite_mutations` | Policy overwrite silently succeeded | must = 0 |
+| `netting_entry_unwound_recon_failures` | ENTRY_UNWOUND_BY_COMPETING_ENTRY | must = 0 |
+| `netting_store_outage_live_allow_through` | Live entry allowed despite outage | must = 0 |
+| `netting_audit_chain_breaks` | signal→position chain broken | must = 0 |
+
+### Live promotion gate for this class
+
+RESOLVED — verified by:
+- 20 unit tests in `tests/unit/test_cross_strategy_netting.py` (all passing)
+- Runtime Section 16 gate in paper_trading_monitor
+- `gate_pass` property on `NettingProtectionStatus`
+
+Remaining promotion requirements (not this ADR):
+1. 1 clean paper session with Section 16 gate PASS
+2. Shadow-live session (broker calls disabled)
+3. Limited live (one-symbol whitelist, hard max notional)
+
+### Files Changed
+
+- `services/execution_engine/orders/order_manager.py` — `check_direction_conflict()`, `attach_exit_policy(entry_signal_id, fail_open)`
+- `services/execution_engine/service.py` — direction conflict guard (paper + live paths), counter increments
+- `services/execution_engine/reconciliation/reconciliation.py` — `ENTRY_UNWOUND_BY_COMPETING_ENTRY` mismatch type, `check_competing_entry_unwind()`, `check_audit_chain()`
+- `services/shared/monitoring/monitoring_status.py` — `NettingProtectionStatus`, `LiveCounters` netting fields, `_s16` renderer
+
+---
+
+## ADR-029: MIS Square-Off Task Resilience Fix (HIGH-004 Closed)
+
+**Date**: 2026-06-08
+**Status**: Accepted
+
+### Context
+
+Session 12 (first valid quality-gate session) ended with 6 positions unmanaged because the MIS square-off task never fired at 15:05 IST. Investigation showed the `MISSquareOffManager.run()` method used a single `asyncio.sleep(~17000s)` from service startup to the 15:05 fire time. At 15:00:38 IST, the kill switch auto-triggered (Kafka consumer lag after market signal generation dried up). The MIS task was silently cancelled with no log emitted (the `_on_task_done` callback had `if task.cancelled(): return` — completely silent). The same root cause stranded 30 positions in Session 9.
+
+### Decision
+
+1. **Replace the single long sleep with a 60-second polling loop** in `MISSquareOffManager.run()`. Wall clock is re-checked every tick via `_seconds_until_ist(_CLOSE_TIME)`. If the task is cancelled mid-sleep or the event loop stalls, the next 60-second tick self-corrects. This makes MIS robust to any external interference regardless of root cause.
+
+2. **Log CRITICAL on MIS task cancellation** in `service.py` `_on_task_done`. Any future cancellation of the `execution-mis-square-off` task immediately emits a CRITICAL log instead of disappearing silently.
+
+### Consequences
+
+- MIS fires correctly even if the kill switch activates in the same ~15-minute window before 15:05 IST.
+- Task cancellation (whatever the cause) is now immediately visible in execution_engine logs.
+- All 41 existing MIS unit tests pass unchanged — the polling loop is a drop-in behavioral replacement.
+
+### Files Changed
+
+- `services/execution_engine/mis_square_off.py` — polling loop replaces `asyncio.sleep(wait_secs)` at line 177
+- `services/execution_engine/service.py` — `_on_task_done` logs CRITICAL on MIS task cancellation
+- `tests/unit/test_cross_strategy_netting.py` — 20 tests (new file)
+
+---
+
+## ADR-030: Week-1 Entry-Economics Rebuild — Universal Viability Gate, ORB v2, VWAP v2, Global Entry Budget, Strategy Retirements
+
+**Date**: 2026-06-10
+**Status**: Accepted (operator-approved implementation of the Retail Quant Investment Committee Report, `docs/strategy/retail-quant-investment-committee-report-2026-06-10.md`)
+
+### Context
+
+Sessions 7–15 audit: no paper session was net profitable; the entire daily loss
+(₹3.6k–14k) was explained by round-trip costs (~0.20% of notional) exceeding the
+strategies' profit targets (median 0.33–0.36%). Session-15 live economics: ORB
+WR 22% / PF 0.17, VWAP WR 43% / PF 0.37 — average losers larger than average
+winners in both. Three of six strategies were structurally dead, and two latent
+bugs hid the problem from monitoring (full root-cause record:
+auto-memory `strategy_pnl_root_causes_2026_06_10`).
+
+### Decisions
+
+1. **Universal viability gate** — new `services/strategy_engine/strategies/_viability.py`
+   (extracted from scalp_1m's hardened filter). Standing Rules R1/R2: reject any
+   signal whose stop < 0.40% of entry or whose target < 2.5 × 0.20% round-trip
+   cost. Wired into ORB and VWAP `_build_signal`/`_emit`.
+
+2. **ORB v2** (`orb_strategy.py`): stop = WIDER of OR-midpoint / 1.5×ATR(14) on
+   internally aggregated 5m bars / 0.45% floor (was: tighter-of with 1m ATR →
+   median 0.163% stops, cost > 1R); breakout requires close beyond boundary +
+   0.15×OR-range buffer; volume check rejects when average volume unavailable
+   (was fail-open); minimum OR range ≥ 0.5% of price; breakout window 09:30–11:30
+   (was –14:45); confidence = proximity-to-boundary + volume ratio (old formula
+   rewarded chase distance and pinned at 1.0, max-sizing the worst entries);
+   strategy budget 6 signals/day. `strategy_version: orb_v2`.
+
+3. **VWAP v2** (`vwap_reversion_strategy.py`): bands 2.5σ (was 2.0σ); entries
+   from 10:15 IST on 60 min of VWAP history (was 09:45/30); reward:risk gate —
+   distance-to-VWAP ≥ 1.5 × stop (observed RR was ~1.0–1.1, a structural loser
+   at 43% WR); stop floor 0.40%; direction-aware cooldown (15 bars) + max 2
+   signals per (symbol, direction) per day (stops averaging into trend days —
+   SHREECEM fired SELL 16× on 06-10); strategy budget 6 signals/day.
+   `strategy_version: vwap_rev_v2`.
+
+4. **Quality-gate name-mismatch fix** (`paper_quality_gate_validator.py`):
+   thresholds are keyed `vwap_reversion`/`orb_15m` in paper_optimization.yaml but
+   signals carry `nse_`-prefixed names — the exact-match lookup returned 0.0 for
+   every live strategy, so the confidence/RR filters were **silently disabled in
+   Sessions 12–15**. `_threshold_for()` now strips `nse_`/`us_` prefixes.
+   YAML recalibrated: orb_15m min_confidence 0.93 → 0.65 (orb_v2 confidence
+   scale), vwap min_rr 1.20 → 1.40 (backstop under the strategy's 1.5 gate),
+   `max_trades_per_day` 20 → 15.
+
+5. **Global daily entry budget** (`symbol_trade_count_validator.py` +
+   `risk_engine/service.py`): `GLOBAL_DAILY_ENTRY_LIMIT_REACHED` at 15 filled
+   entries/day (YAML `risk.max_trades_per_day`, previously declared but never
+   enforced). Exits always exempt.
+
+6. **Strategy retirements** (`scripts/setup_local_tables.py` seeding):
+   `nse_scalp_1m` (own viability gate rejects 100% of signals — 1m scalping
+   cannot clear retail costs), `nse_preclose_momentum` (fire window sits inside
+   the 14:45 entry block; ≤13-min hold fails the cost floor), `nse_momentum_v1`
+   (TICK-registered but signal logic in on_bar — never fired; merged into
+   trend_15m's validation grid) seeded `enabled=false`. Enabled budgets:
+   orb 6/day, vwap 6/day, intraday_trend_15m 8/day.
+
+7. **Ops fixes**: (a) `monitoring_status.py` ENTRY_BLOCK read failed on every
+   call — `source`/`reason`/`status` are DynamoDB reserved words in the
+   ProjectionExpression (now aliased) AND the inline `from shared.risk_state`
+   import broke under host-script sys.path (now relative `..risk_state`);
+   (b) `paper_trading_monitor.py` read `{prefix}-prices` (nonexistent) instead
+   of `{prefix}-latest-prices` — the §5 LTP column silently fell back to fill
+   prices for every position on every session. Monitoring now renders GREEN
+   with live LTPs/ages against the running stack.
+
+### Consequences
+
+- Expected trade count drops from ~90/day to ≤15/day; cost drag from ₹6–8k/day
+  to <₹1.5k/day. Signals must clear the cost floor before emission.
+- intraday_trend_15m remains unable to fire until its 15m warm-up replay lands
+  (Week-2 item) — the book trades ORB v2 + VWAP v2 only until then.
+- Session 16 is the first session with the quality gates actually active —
+  Sessions 12–15 were NOT valid quality-gate tests (name-mismatch bug).
+- Tests: `tests/unit/test_week1_entry_economics.py` (33 tests) + all touched
+  suites pass per-file (scalp 13, runner 31, gate-log 4, netting 20,
+  monitoring 126, TEE 72). Pre-existing failures noted, not touched:
+  `test_strategy_config_loader.py` (4 stale PK/SK-format assertions) and
+  cross-file stub pollution when `test_monitoring_status.py` runs before
+  `test_cross_strategy_netting.py` in the same pytest process.
+
+### Files Changed
+
+- `services/strategy_engine/strategies/_viability.py` — new shared gate
+- `services/strategy_engine/strategies/orb_strategy.py` — orb_v2
+- `services/strategy_engine/strategies/vwap_reversion_strategy.py` — vwap_rev_v2
+- `services/risk_engine/validators/paper_quality_gate_validator.py` — prefix-tolerant lookup
+- `services/risk_engine/validators/symbol_trade_count_validator.py` — global entry budget
+- `services/risk_engine/service.py` — budget wiring + startup log field
+- `services/strategy_engine/config/paper_optimization.yaml` — recalibrated thresholds
+- `scripts/setup_local_tables.py` — per-strategy budgets + retirements
+- `services/shared/monitoring/monitoring_status.py` — ENTRY_BLOCK read fixes
+- `scripts/monitoring/paper_trading_monitor.py` — latest-prices table name
+- `tests/unit/test_week1_entry_economics.py` — 33 tests (new file)

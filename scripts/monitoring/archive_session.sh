@@ -113,7 +113,10 @@ echo ""
 echo "[3/5] Docker logs..."
 for svc in "${SERVICES[@]}"; do
     outfile="${ARCHIVE_DIR}/${svc}.log"
-    if docker logs "${svc}" > "${outfile}" 2>&1; then
+    # Resolve the compose container ID — container names carry the project
+    # prefix (e.g. quantembrace-...-data_ingestion-1), so bare names fail.
+    cid=$(docker compose ps -q "${svc}" 2>/dev/null || true)
+    if [ -n "${cid}" ] && docker logs "${cid}" > "${outfile}" 2>&1; then
         lines=$(wc -l < "${outfile}" | tr -d ' ')
         echo "      PASS → ${svc}.log  (${lines} lines)"
         PASS=$((PASS + 1))
