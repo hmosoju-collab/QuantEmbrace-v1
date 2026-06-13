@@ -1343,3 +1343,29 @@ to `alpha.opportunities` Kafka topic. Labels matured forecasts every 5min. EOD r
 - [x] ~~Alpha accuracy stats in per-model breakdown~~ — done 2026-06-13 (commit 78e947b): `ModelAccuracy` dataclass, `by_model` field in `AlphaMetrics`, `_fetch_alpha_metrics` groups by `model_id` from DynamoDB; per-model table rendered in alpha section; 19 tests.
 - [ ] alpha_engine champion-challenger promotion workflow (ADR-031 #9)
 - [ ] AWS Phase 9: model dataset generation from labeled alpha-forecasts
+
+---
+
+## Backtesting Data Lake — Phase 1 Local Download (2026-06-14)
+
+**Status:** IN PROGRESS. `scripts/backtest/download_bhavcopy.py` committed (eb3d4e7, fc6f34a). Download running in background (PID 73365 as of 2026-06-14 session start).
+
+**What it does:** Downloads NSE `sec_bhavdata_full_DDMMYYYY.csv` from `nsearchives.nseindia.com` into `backtest-data/raw/bhavcopy/{ingest_date}/` and normalizes to Parquet lake at `backtest-data/lake/ohlcv/market=NSE/segment=EQ/symbol={SYM}/interval=1d/year={YYYY}/part-0.parquet`.
+
+**Archive scope:** `nsearchives.nseindia.com` only has `sec_bhavdata_full` format from Oct 2019 onward. Before that returns 404 (different format used pre-2019). Use `--start 2019-10-01`. Current run: 1,632 weekday dates (Oct 2019 → Dec 2025), ~33 min at 1 req/sec.
+
+**Known issues / fixes applied:**
+- NSE home (`www.nseindia.com`) TLS handshake hangs on macOS — priming runs in daemon thread with 8s queue timeout (commit fc6f34a)
+- Must use `PYTHONUNBUFFERED=1` when running with `nohup` (file buffering suppresses all output otherwise)
+- `backtest-data/` added to `.gitignore` (commit eb3d4e7) — ~7GB of CSVs + Parquet not committed
+
+**Launch command:**
+```bash
+nohup env PYTHONUNBUFFERED=1 python scripts/backtest/download_bhavcopy.py \
+  --start 2019-10-01 --end 2025-12-31 --base backtest-data > backtest-data/download.log 2>&1 &
+```
+
+**Next steps after download completes:**
+- [ ] Verify Parquet lake at `backtest-data/lake/ohlcv/` (check row counts, schema, IST timestamps)
+- [ ] Update `CLAUDE.md` backtesting status from `[PLANNED]` to reflect Phase 1 data lake is available locally
+- [ ] Phase 2 (AWS S3 lake) — requires explicit operator approval per CLAUDE.md AWS backtesting protocol
