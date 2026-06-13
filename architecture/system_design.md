@@ -1,6 +1,6 @@
 # QuantEmbrace - System Design
 
-_Last updated: 2026-05-30 — ADR-022 live-readiness audit applied: `symbol-status-index` GSI added to orders table (PositionValidator dirty-read fix), `sessions` DynamoDB table provisioned in Terraform (ZerodhaTokenManager), `RISK_MAX_SIGNAL_AGE_SECONDS=30` / `RISK_PROFILE` / `UNIVERSE_MODE` injected into EC2 userdata, `check_asg_health.py` created (replaced stale ECS script), per-symbol asyncio lock in DailyLossValidator. Pre-live runbook at `docs/live-readiness/pre-live-runbook.md`. Prior: ADR-021 staleness monitor split; ADR-020 paper readiness sweep; ADR-019 universe model._
+_Last updated: 2026-06-14 — ADR-028 cross-strategy netting protection (direction-conflict gate, exit-policy guard, Section 16 netting monitor); ADR-029 MIS resilience (60s polling loop, CRITICAL log on cancellation); ADR-030 Week-1 entry-economics rebuild (universal viability gate, ORB v2, VWAP v2, 15/day global budget, 3 strategy retirements, quality-gate name-mismatch fix); ADR-031 alpha_engine shadow-forecasting layer committed (advisory-only, paper-session integrated); Week-2 completions: intraday_trend_15m warm-up replay via DynamoDB state persistence, NiftyRegimeGate wired into ORB + trend_15m, NIFTY 50 candle subscription active, gross-vs-net cost attribution in session report. Backtesting data lake Phase 1 (local Parquet, Oct 2019–Dec 2025) in progress. Current live gate: 0/5 valid quality-gate sessions (Sessions 16–17 did not pass strategy performance gates). Prior: ADR-022 live-readiness audit; ADR-021 staleness monitor split; ADR-020 paper readiness sweep; ADR-019 universe model._
 
 ---
 
@@ -13,7 +13,11 @@ QuantEmbrace is a production-grade algorithmic trading platform operating across
 
 The system is built in Python, deployed on **AWS EC2** (ARM64 Auto Scaling Groups), and follows a strict 6-layer architecture where every trade must pass through a centralized Risk Layer before reaching any broker.
 
-**Current phase:** Phase 6 (AI/ML Signal Enrichment) is **complete**. The ai_engine service now enriches every signal with a market regime label (HMM, 4 states: trending/ranging/volatile/crash/unknown) and a quality score (GBT, 0.0–1.0) before the risk_engine validates it. The enriched signal flow is `signals.pending → ai_engine (aiengine-v1) → signals.enriched → risk_engine (risk-v1)`. An `EnrichmentWatchdog` monitors aiengine-v1 lag and automatically falls back to the direct `signals.pending → risk_engine` path when ai_engine is lagging. All enrichment uses graceful degradation — signals always flow through even if ML fails. Phase 3 (strategy decoupling), Phase 4 (distributed risk layer), and Phase 5 (feature store) are complete prerequisites.
+**Current phase:** Paper trading is the active mode. Phases 3–8 and the monitoring agent (Phases 1–5) are complete. The Week-1 entry-economics rebuild (ADR-030) is the most recent production change: universal viability gate, ORB v2 + VWAP v2 strategies, 15/day global entry budget, 3 strategies retired. Week-2 items are complete: intraday_trend_15m warm-up replay via DynamoDB state persistence, `NiftyRegimeGate` wired into ORB and trend_15m, NIFTY 50 candle subscription active, gross-vs-net P&L attribution in session reports. The `alpha_engine` shadow-forecasting layer (ADR-031) is committed, paper-session integrated, and advisory-only — it does not affect the live signal path.
+
+**Live gate status:** 0/5 valid quality-gate sessions. Sessions 10–11 ran on a stale Docker image (quality gates inactive). Sessions 12–15 ran with quality gates silently disabled (name-mismatch bug, fixed ADR-030). Session 16 (2026-06-11): 0 trades — VWAP geometrically capped at median R:R 1.05, ORB blind due to late 10:19 IST start. Session 17 (2026-06-12): PF 0.47, net −₹238.44 — trailing exits validated but performance gate not met. Live trading remains BLOCKED.
+
+**Enrichment path:** `signals.pending → ai_engine (aiengine-v1) → signals.enriched → risk_engine (risk-v1)`. `EnrichmentWatchdog` monitors aiengine-v1 lag and falls back to `signals.pending → risk_engine` when ai_engine is lagging. All enrichment degrades gracefully. Phases 3–6 are complete prerequisites.
 
 ---
 
@@ -337,13 +341,13 @@ A restarted strategy engine replaying the same candle/tick produces the same sig
 
 Signals carry `expires_at = signal_time + 30s`. The risk engine rejects expired signals to prevent stale execution after queue backlogs.
 
-### Pluggable Strategies (Week-1 entry-economics rebuild, ADR-030 — 2026-06-10)
+### Pluggable Strategies (Week-1 entry-economics rebuild ADR-030 2026-06-10 + Week-2 completions 2026-06-13)
 
 | Strategy | Interface | Interval | Status | Daily signal budget |
 |---|---|---|---|---|
-| `ORBStrategy` (orb_v2) | CANDLE | 1min (stops from internal 5m aggregation) | Active (paper) | 6 |
-| `VWAPReversionStrategy` (vwap_rev_v2) | CANDLE | 1min | Active (paper) | 6 |
-| `IntradayTrend15mStrategy` | CANDLE | 15min | Active (paper) — cannot fire until 15m warm-up replay lands (needs 52×15m bars; buffers reset nightly) | 8 |
+| `ORBStrategy` (orb_v2) | CANDLE | 1min (stops from internal 5m aggregation) | Active (paper) — requires pre-09:15 IST start for opening-range to form | 6 |
+| `VWAPReversionStrategy` (vwap_rev_v2) | CANDLE | 1min | Active (paper) — structurally capped ~1:1 R:R by VWAP band geometry (confirmed Session 16); primary edge from trend_15m | 6 |
+| `IntradayTrend15mStrategy` | CANDLE | 15min | Active (paper) — **warm-up replay complete (Week-2 2026-06-13)**: `initialize()`/`get_state()` persist OHLCV deques across sessions via `{prefix}-strategy-state` DynamoDB; daily counters reset on new IST day | 8 |
 | `MomentumStrategy` | TICK | — | **RETIRED** (interface bug: signal logic in `on_bar`, never called on tick path; merged into trend_15m) | — |
 | `Scalp1mStrategy` | CANDLE | 1min | **RETIRED** (own viability gate rejects 100% of signals — 1m scalping cannot clear the 0.20% round-trip cost) | — |
 | `PreCloseMomentumStrategy` | CANDLE | 5min | **RETIRED** (fire window 14:45–15:10 sits inside the 14:45 entry block; ≤13-min hold fails the cost floor) | — |
@@ -351,6 +355,8 @@ Signals carry `expires_at = signal_time + 30s`. The risk engine rejects expired 
 All strategies import `Signal`, `Direction` from `shared.models.signal` (not from any service-local re-export). All start with `paper_trade=True` in DynamoDB strategy-config until 5-day paper validation passes. Retirements are config-level (`enabled=false` seeded by `scripts/setup_local_tables.py`) — code remains for the backtest lab.
 
 **Universal viability gate** (`strategy_engine/strategies/_viability.py`, ADR-030): no strategy may emit a signal whose stop distance is < 0.40% of entry or whose profit target is < 2.5× the 0.20% round-trip cost baseline (slippage + spread + Indian statutory charges). Extracted from scalp_1m's hardened filter; wired into ORB and VWAP signal construction. See `docs/strategy/retail-quant-investment-committee-report-2026-06-10.md` Standing Rules R1/R2.
+
+**NIFTY regime gate** (`strategy_engine/strategies/nifty_regime_gate.py`, Week-2 2026-06-13): longs approved only when NIFTY 50 is trading above day-VWAP; shorts only below. Wired into ORB and trend_15m. Fails-open when no NIFTY 50 candle data. Auto-resets at IST day boundary. NIFTY 50 candle subscription active in data_ingestion at startup (commit f1dfc8c). Gate is now effective in real sessions (no longer fails-open).
 
 **Entry budgets** (risk_engine): `max_trades_per_symbol_per_day=1` and a book-wide `max_trades_per_day=15` (`GLOBAL_DAILY_ENTRY_LIMIT_REACHED`), both enforced by `SymbolTradeCountValidator` from `paper_optimization.yaml`. Exits are always exempt. The `PaperQualityGateValidator` threshold lookup is prefix-tolerant as of ADR-030 (`nse_vwap_reversion` matches the `vwap_reversion` YAML key) — note Sessions 12–15 ran with these filters silently disabled by the name mismatch.
 
@@ -394,6 +400,20 @@ DynamoDB conditional write (`attribute_not_exists(order_id)`) prevents duplicate
 ### Kill Switch Listener
 
 A dedicated `asyncio.Task` consumes the `kill.switch` topic (high-watermark: `auto.offset.reset=latest`). On receipt of a `KILL_SWITCH_ACTIVE` event, the execution engine cancels all open orders and halts all new order placement immediately, without waiting for the main processing loop.
+
+### Cross-Strategy Netting Protection (ADR-028 — 2026-06-05)
+
+Prevents opposing signals from two strategies from netting against each other and bypassing TEE exit management. Two guards in `OrderManager`:
+
+1. **`check_direction_conflict(symbol, direction)`** — before accepting any entry, reads the current position. If an open position exists in the opposite direction, rejects with `DIRECTION_CONFLICT_EXISTING_POSITION`. Paper mode: fails-open on position-store outage (warn + allow). Live mode: fails-closed.
+
+2. **`attach_exit_policy(entry_signal_id)`** — if an active exit policy from a different `entry_signal_id` already owns the position, blocks the overwrite and returns `False`. TEE callers (no `entry_signal_id`) bypass the guard.
+
+End-of-session reconciliation checks (`check_competing_entry_unwind`, `check_audit_chain`) detect any position reduced by a competing entry. Section 16 in the monitoring report surfaces all netting protection counters — `gate_pass = FAIL` if any must-be-zero counter is non-zero.
+
+### MIS Square-Off Resilience (ADR-029 — 2026-06-08)
+
+`MISSquareOffManager.run()` uses a **60-second polling loop** (wall clock re-checked every tick via `_seconds_until_ist(_CLOSE_TIME)`) instead of a single long `asyncio.sleep()`. The polling loop makes MIS robust to kill-switch activation, event-loop stalls, or task interruption in the 15:00–15:05 IST window. Task cancellation logs CRITICAL in `service.py` `_on_task_done` — no silent disappearance.
 
 ---
 
@@ -551,6 +571,61 @@ Every component in the enrichment pipeline degrades independently. The pipeline 
 |---|---|---|
 | `{prefix}-regime-log` | ai_engine (write) | HMM regime state per market/symbol per session; TTL 30d; advisory/analytics |
 | `{prefix}-strategy-recommendations` | ai_engine (write) | Per-strategy/date recommendations from enrichment; TTL 30d; advisory |
+
+---
+
+## Alpha Engine — Shadow Alpha-Forecasting Layer (ADR-031, Advisory Only)
+
+**Status:** Committed and paper-session integrated (2026-06-13). **NOT in the live signal path.**
+
+The `alpha_engine` is a shadow advisory service that observes trading activity and forecasts expected alpha — it never generates signals, places orders, or mutates risk state.
+
+### What It Does
+
+```
+candle-cache (DynamoDB poll)
+    → shadow copies of ORB v2 / VWAP v2 / IntradayTrend15m
+    → AlphaForecast per horizon (15 / 30 / 60 min)
+    → CostModel (NSE statutory cost stack: STT, txn, GST, stamp, SEBI, margin)
+    → cross-sectional ranking
+    → persist all forecasts to {prefix}-alpha-forecasts
+    → publish eligible forecasts (≥50bps net edge) to alpha.opportunities Kafka topic
+    → label matured forecasts every 5min
+    → EOD rollup at 15:35 IST
+```
+
+### Governance Invariants (Non-Negotiable)
+
+- **`AlphaShadowPublisher` allowlist = `frozenset({"alpha.opportunities"})`** — hard-coded; cannot publish to `signals.*` or `orders.*`.
+- Kill switch pauses forecast output (no store/publish) but does not stop alpha_engine.
+- A human approves all production changes; alpha_engine may recommend, **never promote**.
+- Consistent with CLAUDE.md: "GenAI can explain. GenAI cannot trade."
+
+### Key Packages (`services/alpha_engine/`)
+
+| Package | Purpose |
+|---|---|
+| `cost/` | NSE statutory cost model for net-of-cost alpha computation |
+| `gates/kill_switch_gate.py` | Advisory kill-switch gate (read-only) |
+| `labeling/` | Trade labeling — entry/exit tagging, realized outcome computation |
+| `models/` | `alpha_model.py`, `registry.py`, `strategy_alpha_adapter.py` |
+| `publishers/alpha_shadow_publisher.py` | Publishes to `alpha.opportunities` only |
+| `ranking/` | Alpha ranking and score aggregation |
+| `research/` | Replay, correlation, attribution utilities |
+| `store/` | Alpha score persistence (DynamoDB + S3) |
+| `service.py` | Service entrypoint — started in docker-compose paper session stack |
+
+### Per-Model Accuracy Tracking (2026-06-13)
+
+`ModelAccuracy` dataclass and `AlphaMetrics.by_model` aggregate per-model label accuracy. `paper_session_report.py` renders a per-model accuracy table in the Alpha section. 82/82 tests passing.
+
+### Kafka Topic
+
+`alpha.opportunities` — not yet created in MSK; local docker-compose creates it at startup. Consumer (→ self-improvement assistant) is PLANNED.
+
+### New DynamoDB Table
+
+`{prefix}-alpha-forecasts` — forecast storage; TTL; created by docker-compose setup. Not in Terraform yet (Phase 9 item).
 
 ### New CloudWatch Alarms (Phase 6 — `QuantEmbrace/AIEngine` namespace)
 

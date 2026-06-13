@@ -207,55 +207,55 @@ Only orb_15m traded (6 signals, 5 fills). vwap_reversion: 0 candidates passed R:
 
 ## 3-Session Aggregate Comparison
 
-*Populated after all 3 sessions complete.*
+*Completed — Sessions 1 (2026-06-05), 2 (2026-06-10), 3 (2026-06-12)*
 
 | Metric | Old TEE (2026-06-04 baseline) | New TEE avg (Sessions 1–3) | Δ | Better? |
 |---|---|---|---|---|
-| Total trades per session | 92 | | | |
-| Net P&L per session | +₹2,790 | | | |
-| TP rate | 67.4% | | | |
-| Trailing activations | 0 | | | |
-| Partial bookings | 0 | | | |
-| Breakeven shifts | 0 | | | |
-| MIS square-off count | 30 | | | |
-| profit_capture_ratio | ~0.72 | | | |
-| Max drawdown | unknown | | | |
+| Total trades per session (exits) | 92 | 86 avg (158 / 92 / 5) | −7% | Neutral (session 3 ADR-030 gating, far fewer entries) |
+| Net P&L per session | +₹2,790 | −₹4,848 avg | ❌ | P&L reflects strategy quality not TEE — pre-ADR-030 cost drag |
+| TP rate | 67.4% | 48.1% / 31.5% / 66.7% TEE | Mixed | Session 3 (66.7%) best by TEE; lower earlier due to tight stops |
+| Trailing activations | 0 | **5 total** (1+2+2) | +5 | ✅ New behaviour |
+| Partial bookings | 0 | **0** across all sessions | 0 | ❌ L12 unmet — R-ladder partial levels never triggered |
+| Breakeven shifts | 0 | 0 | 0 | Neutral |
+| MIS square-off count | 30 | 10 avg (26/2/2) | −20 avg | ✅ Better (less positions stranded) |
+| profit_capture_ratio | ~0.72 | **unknown** (MFE not tracked) | ? | L2 cannot be assessed |
+| Max drawdown | unknown | **unknown** (not tracked) | ? | L4 cannot be assessed |
 
 ---
 
 ## Acceptance Criteria Final Assessment
 
-*Populated after 3 sessions.*
+*Completed 2026-06-12*
 
 | Criterion | Required | Achieved | Pass? |
 |---|---|---|---|
-| L1: ≥ 3 clean sessions | ≥ 3 | | ☐ |
-| L2: profit_capture_ratio ≥ 0.72 | ≥ 0.72 | | ☐ |
-| L3: MIS square-off ≤ 30 | ≤ 30 | | ☐ |
-| L4: max_drawdown < 1.5× old | < 1.5× | | ☐ |
-| L5: zero duplicate exits | 0 | | ☐ |
-| L6: zero unmanaged positions | 0 | | ☐ |
-| L7: zero cap-blocked exits | 0 | | ☐ |
-| L8: zero live broker calls | 0 | | ☐ |
-| L9: monitoring fields visible | present | | ☐ |
-| L10: scalp_1m fixed TP/SL only | confirmed | | ☐ |
-| L11: trailing activations > 0 | > 0 | | ☐ |
-| L12: partial bookings > 0 | > 0 | | ☐ |
+| L1: ≥ 3 clean exit-engine sessions | ≥ 3 | 3 sessions with zero TEE safety violations | ✅ PASS |
+| L2: profit_capture_ratio ≥ 0.72 | ≥ 0.72 | Unknown — MFE not yet tracked | ❌ CANNOT ASSESS |
+| L3: MIS square-off ≤ 30 per session | ≤ 30 | 26, 2, 2 | ✅ PASS |
+| L4: max_drawdown < 1.5× old | < 1.5× | Unknown — intraday drawdown not tracked | ❌ CANNOT ASSESS |
+| L5: zero duplicate exits | 0 | 0 in all 3 sessions | ✅ PASS |
+| L6: zero unmanaged positions | 0 | 0 in all 3 sessions | ✅ PASS |
+| L7: zero cap-blocked exits | 0 | 0 in all 3 sessions | ✅ PASS |
+| L8: zero live broker calls | 0 | 0 in all 3 sessions | ✅ PASS |
+| L9: monitoring fields visible | present | Present from Session 2 onward | ✅ PASS |
+| L10: scalp_1m fixed TP/SL only | confirmed | scalp_1m retired (enabled=false) — N/A | ✅ N/A |
+| L11: trailing activations > 0 | > 0 | 5 total (1+2+2) | ✅ PASS |
+| L12: partial bookings > 0 | > 0 | 0 across all 3 sessions | ❌ FAIL — R-ladder partial levels never triggered; requires longer hold times (trend_15m) |
 
 ---
 
 ## Final Decision
 
-**Current:** IN PROGRESS — awaiting 3 paper sessions
+**Current:** PAPER_ONLY_NEEDS_MORE_DATA
 
-**Decision options:**
-- `APPROVED_FOR_PAPER_ONLY` — continue paper, not ready for live
-- `APPROVED_FOR_STAGE1_LIVE` — all L1–L12 pass, proceed to pre-live-runbook.md
-- `PAPER_ONLY_NEEDS_MORE_DATA` — some criteria not yet met, run more sessions
-- `REJECTED_REVERT` — duplicate exit / live call / major drawdown increase → revert to fixed TP/SL
+**Reasoning:** L5–L11 and L1/L3 pass cleanly. The TEE exit engine is operationally sound — no duplicate exits, no unmanaged positions, no live broker calls, trailing ratchet validated. However:
+- **L2 (profit_capture_ratio)** cannot be assessed — MFE tracking not yet instrumented.
+- **L4 (max_drawdown)** cannot be assessed — intraday drawdown tracking not yet instrumented.
+- **L12 (partial bookings > 0)** is unmet — trades under the previous TP/SL geometry (0.16–0.36% targets) close before the partial booking level triggers. This requires trend_15m longer-hold trades to observe, which became possible after Week-2 warm-up replay (2026-06-13).
 
-**Final decision:** ___________  
-**Date:** ___________  
+**Next action:** Run Sessions 4+ with trend_15m active (post-warm-up replay) and add MFE/drawdown instrumentation to LiveCounters. When L2/L12 can be assessed, re-run final decision.
+
+**Date:** 2026-06-14
 **Authorized by:** ___________
 
 ---

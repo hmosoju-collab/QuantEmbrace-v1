@@ -1289,13 +1289,19 @@ not committed. Sessions 10–17 ran with this fix on disk but not in git HEAD.
 
 | # | Session | Date | S4 MIS | Result | Notes |
 |---|---|---|---|---|---|
-| 1/5 | Session 16 | TBD | — | — | First valid quality-gate session (ADR-030) |
-| 2/5 | Session 17 | TBD | — | — | |
-| 3/5 | Session 18 | TBD | — | — | |
-| 4/5 | Session 19 | TBD | — | — | |
-| 5/5 | Session 20 | TBD | — | — | |
+| —  | Session 16 | 2026-06-11 | N/A | ❌ NOT COUNTED | 0 trades — VWAP geometrically capped (median R:R 1.05, max 1.48, ALL 184 signals rejected); ORB blind (late 10:19 IST start, opening range never formed). Not a strategy failure — structural test constraints. |
+| —  | Session 17 | 2026-06-12 | PASS | ❌ NOT COUNTED | 5 fills, PF 0.47, net −₹238.44. Trailing exits validated (2/2 ratchet held: ADANIPORTS +₹107.92, M&M +₹107.05). Negative expectancy + Bug 5 (kill-switch 11 false fires) + Bug 6 (MIS NAV corruption ₹932k). Bugs do not count toward gate. |
+| 1/5 | Session 18 | TBD | — | — | First session with Bug 5 + Bug 6 fixes applied |
+| 2/5 | Session 19 | TBD | — | — | |
+| 3/5 | Session 20 | TBD | — | — | |
+| 4/5 | Session 21 | TBD | — | — | |
+| 5/5 | Session 22 | TBD | — | — | |
 
 **Live gate BLOCKED** until all 5 sessions show S4 PASS + strategy performance gates (PF ≥ 1.2, expectancy > 0).
+
+**Pre-Session 18 blockers:**
+- [ ] **Bug 5 fix**: `consumer_lag_monitor` (auto_triggers.py monitor 4) fires on signal silence (normal under ADR-030 gating) — gate on candle/feed staleness or disable in paper. `producer_heartbeat_monitor` 60s threshold too tight for LocalStack (64s blip fired). data_ingestion heartbeat-writer task needs FIX-8-style watchdog. Alpaca connector crash-loop on placeholder creds — disable when creds are placeholders.
+- [ ] **Bug 6 fix**: MIS paper-close path (`_place_mis_close_order` → `apply_fill_to_position`) corrupts NAV#CURRENT — writes seed − close_notional instead of ledger-correct update. Fix: use the same NAV ledger path as TEE exits.
 
 ### Required before Session 16
 
