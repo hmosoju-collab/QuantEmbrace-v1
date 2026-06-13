@@ -506,7 +506,11 @@ def generate_report(session_date: date, n_days: int, env: str) -> int:
 
     try:
         import boto3
-        dynamo = boto3.client("dynamodb", region_name=aws_region)
+        _endpoint = os.environ.get("AWS_ENDPOINT_URL") or os.environ.get("LOCALSTACK_ENDPOINT_URL")
+        _dynamo_kwargs: dict = {"region_name": aws_region}
+        if _endpoint:
+            _dynamo_kwargs["endpoint_url"] = _endpoint
+        dynamo = boto3.client("dynamodb", **_dynamo_kwargs)
     except ImportError:
         print(f"{_RED}boto3 not installed — cannot fetch DynamoDB data{_RESET}")
         dynamo = None

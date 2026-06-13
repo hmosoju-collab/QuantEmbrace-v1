@@ -121,10 +121,10 @@ class EntryBlockReader:
                 TableName=self._table,
                 Key={"PK": {"S": ENTRY_BLOCK_PK}, "SK": {"S": ENTRY_BLOCK_SK}},
                 ProjectionExpression=(
-                    "blocked, #st, reason, source, action_id, "
+                    "blocked, #st, reason, #src, action_id, "
                     "idempotency_key, created_at, schema_version"
                 ),
-                ExpressionAttributeNames={"#st": "status"},
+                ExpressionAttributeNames={"#st": "status", "#src": "source"},
             )
             item = response.get("Item")
             if not item:
@@ -159,6 +159,8 @@ class EntryBlockReader:
                     "entry_block_reader.read_failed error_type=%s — fail open (paper mode)",
                     error_type,
                 )
+                # Advance cache TTL so repeated DynamoDB errors don't flood logs.
+                self._cached_at = now
                 return EntryBlockState.fail_open()
 
     def invalidate(self) -> None:

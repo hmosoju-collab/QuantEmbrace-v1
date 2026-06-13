@@ -39,6 +39,7 @@ class MismatchType(str, Enum):
     QTY_DIRECTION    = "QTY_DIRECTION"
     ZERO_QTY_OPEN    = "ZERO_QTY_OPEN"
     FLAT_WITH_STOP   = "FLAT_WITH_STOP"
+    ENTRY_UNWOUND_BY_COMPETING_ENTRY = "ENTRY_UNWOUND_BY_COMPETING_ENTRY"  # NEW
 
 
 @dataclass
@@ -140,6 +141,221 @@ class PositionReconciliationService:
             clean=report.clean,
         )
         return report
+
+    async def check_competing_entry_unwind(
+        self,
+        orders_table: str,
+    ) -> list[PositionMismatch]:
+        """
+        End-of-session gate: detect positions where a competing ENTRY order
+        reduced or closed an existing position instead of an explicit EXIT.
+
+        For each symbol, collect all FILLED orders. If the net signed quantity
+        from ENTRY-side fills differs from what explicit EXIT fills account for,
+        flag ENTRY_UNWOUND_BY_COMPETING_ENTRY.
+
+        An order is classified as ENTRY if it has a strategy signal_id (not
+        prefixed with EXIT-). An order is classified as EXIT if its signal_id
+        starts with EXIT-.
+
+        Returns a list of PositionMismatch with type
+        ENTRY_UNWOUND_BY_COMPETING_ENTRY for each affected symbol.
+        """
+        mismatches: list[PositionMismatch] = []
+
+        try:
+            # Scan all FILLED orders
+            response = await asyncio.to_thread(
+                self._dynamo.scan,
+                TableName=orders_table,
+                FilterExpression="order_status = :filled AND SK = :meta",
+                ExpressionAttributeValues={
+                    ":filled": {"S": "FILLED"},
+                    ":meta": {"S": "META"},
+                },
+                ProjectionExpression=(
+                    "symbol, side, quantity, signal_id, filled_quantity"
+                ),
+            )
+            items = response.get("Items", [])
+
+            # Group by symbol
+            from collections import defaultdict  # noqa: PLC0415
+            by_symbol: dict[str, list[dict]] = defaultdict(list)
+            for item in items:
+                sym = item.get("symbol", {}).get("S", "")
+                if sym:
+                    by_symbol[sym].append(item)
+
+            for symbol, orders in by_symbol.items():
+                entry_buys = 0.0
+                entry_sells = 0.0
+                exit_buys = 0.0
+                exit_sells = 0.0
+
+                for order in orders:
+                    sig = order.get("signal_id", {}).get("S", "")
+                    side_str = order.get("side", {}).get("S", "")
+                    qty = float(order.get("filled_quantity", {}).get("N") or
+                                order.get("quantity", {}).get("N") or "0")
+                    is_exit = sig.startswith("EXIT-")
+
+                    if is_exit:
+                        if side_str == "BUY":
+                            exit_buys += qty
+                        else:
+                            exit_sells += qty
+                    else:
+                        if side_str == "BUY":
+                            entry_buys += qty
+                        else:
+                            entry_sells += qty
+
+                # If there are both ENTRY buys and ENTRY sells for the same
+                # symbol, a competing entry reduced the position.
+                if entry_buys > 0 and entry_sells > 0:
+                    net_entry = entry_buys - entry_sells
+                    mismatches.append(PositionMismatch(
+                        symbol=symbol,
+                        mismatch_type=MismatchType.ENTRY_UNWOUND_BY_COMPETING_ENTRY,
+                        detail=(
+                            f"Both ENTRY buys={entry_buys:.0f} and ENTRY sells={entry_sells:.0f} "
+                            f"exist for {symbol}. Net entry qty={net_entry:.0f}. "
+                            f"Exit buys={exit_buys:.0f} exit sells={exit_sells:.0f}. "
+                            "A competing entry signal reduced the position without an explicit "
+                            "exit order — this is RECON_ENTRY_UNWOUND_BY_COMPETING_ENTRY."
+                        ),
+                    ))
+                    if self._mode == "paper":
+                        logger.warning(
+                            "reconciliation.entry_unwound_by_competing_entry",
+                            symbol=symbol,
+                            entry_buys=entry_buys,
+                            entry_sells=entry_sells,
+                            exit_buys=exit_buys,
+                            exit_sells=exit_sells,
+                        )
+                    else:
+                        logger.critical(
+                            "reconciliation.entry_unwound_by_competing_entry_LIVE",
+                            symbol=symbol,
+                            entry_buys=entry_buys,
+                            entry_sells=entry_sells,
+                            action_required="Manual position audit required before next session.",
+                        )
+
+        except Exception:
+            logger.exception("reconciliation.check_competing_entry_unwind.error")
+
+        return mismatches
+
+    async def check_audit_chain(
+        self,
+        orders_table: str,
+        positions_table: Optional[str] = None,
+    ) -> list[PositionMismatch]:
+        """
+        End-of-session invariant: for every FILLED ENTRY order, the chain
+
+            signal_id → order_id → filled_quantity > 0 → position exists
+
+        must be unbroken. A break means an entry fill did not produce or update
+        a position record — the trade is unaccounted for in P&L and risk state.
+
+        An order is classified as ENTRY if its signal_id does NOT start with
+        "EXIT-" (TEE exit orders use that prefix).
+
+        Returns a list of PositionMismatch with type AUDIT_CHAIN_BROKEN for
+        each entry order whose position record is missing or has quantity=0.
+        """
+        positions_table = positions_table or self._positions_table
+        mismatches: list[PositionMismatch] = []
+
+        try:
+            # Fetch all FILLED entry orders
+            response = await asyncio.to_thread(
+                self._dynamo.scan,
+                TableName=orders_table,
+                FilterExpression="order_status = :filled AND SK = :meta",
+                ExpressionAttributeValues={
+                    ":filled": {"S": "FILLED"},
+                    ":meta": {"S": "META"},
+                },
+                ProjectionExpression=(
+                    "order_id, signal_id, symbol, side, filled_quantity"
+                ),
+            )
+            entry_orders = [
+                item for item in response.get("Items", [])
+                if not item.get("signal_id", {}).get("S", "").startswith("EXIT-")
+            ]
+
+            # Collect symbols that have FILLED entry orders
+            symbols_with_entries: set[str] = {
+                item.get("symbol", {}).get("S", "")
+                for item in entry_orders
+                if item.get("symbol", {}).get("S", "")
+            }
+
+            if not symbols_with_entries:
+                return mismatches
+
+            # Scan positions for those symbols
+            pos_response = await asyncio.to_thread(
+                self._dynamo.scan,
+                TableName=positions_table,
+                ProjectionExpression="symbol, quantity",
+            )
+            position_qty_by_symbol: dict[str, float] = {}
+            for item in pos_response.get("Items", []):
+                sym = item.get("symbol", {}).get("S", "")
+                qty = float(item.get("quantity", {}).get("N") or "0")
+                if sym:
+                    position_qty_by_symbol[sym] = qty
+
+            # Check each entry order's symbol has a non-zero position
+            already_flagged: set[str] = set()
+            for order in entry_orders:
+                signal_id = order.get("signal_id", {}).get("S", "?")
+                order_id = order.get("order_id", {}).get("S", "?")
+                symbol = order.get("symbol", {}).get("S", "")
+                fill_qty = float(order.get("filled_quantity", {}).get("N") or "0")
+
+                if not symbol or symbol in already_flagged:
+                    continue
+
+                # A filled entry order (fill_qty > 0) must leave a trace in
+                # positions. Zero or missing position qty for that symbol
+                # indicates the audit chain is broken.
+                pos_qty = position_qty_by_symbol.get(symbol)
+                if fill_qty > 0 and (pos_qty is None or abs(pos_qty) < 1e-9):
+                    already_flagged.add(symbol)
+                    detail = (
+                        f"AUDIT_CHAIN_BROKEN: FILLED ENTRY order {order_id} "
+                        f"(signal={signal_id}) filled {fill_qty:.0f} shares of "
+                        f"{symbol}, but position record shows qty="
+                        f"{'MISSING' if pos_qty is None else f'{pos_qty:.0f}'}. "
+                        "The signal→order→fill→position chain is broken."
+                    )
+                    mismatches.append(PositionMismatch(
+                        symbol=symbol,
+                        mismatch_type=MismatchType.ENTRY_UNWOUND_BY_COMPETING_ENTRY,
+                        detail=detail,
+                    ))
+                    if self._mode == "paper":
+                        logger.warning("reconciliation.audit_chain_broken", symbol=symbol,
+                                       order_id=order_id, signal_id=signal_id,
+                                       fill_qty=fill_qty, position_qty=pos_qty)
+                    else:
+                        logger.critical("reconciliation.audit_chain_broken_LIVE", symbol=symbol,
+                                        order_id=order_id, signal_id=signal_id,
+                                        fill_qty=fill_qty, position_qty=pos_qty,
+                                        action_required="Manual position audit required.")
+
+        except Exception:
+            logger.exception("reconciliation.check_audit_chain.error")
+
+        return mismatches
 
     # ── DynamoDB scan ─────────────────────────────────────────────────────────
 

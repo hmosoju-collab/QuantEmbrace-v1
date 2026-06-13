@@ -931,6 +931,92 @@ class OrderManager:
         """Alias for get_open_orders — used by position_monitor."""
         return await self.get_open_orders()
 
+    async def check_direction_conflict(
+        self,
+        symbol: str,
+        new_side: "OrderSide",
+        *,
+        fail_open: bool = True,
+    ) -> tuple[bool, str, float]:
+        """
+        Check whether an existing open position conflicts with a new entry direction.
+
+        Reads the positions table for the given symbol. Returns a conflict if an
+        open position exists in the OPPOSITE direction to new_side:
+            existing LONG + new SELL → conflict
+            existing SHORT + new BUY → conflict
+
+        Args:
+            symbol:    Trading symbol.
+            new_side:  The direction of the proposed new entry order.
+            fail_open: How to behave when the position store is unavailable.
+                       True  (paper) — allow the order through; log a warning.
+                       False (live)  — treat unavailability as a conflict and
+                                       reject the entry with reason
+                                       POSITION_STORE_UNAVAILABLE. Because the
+                                       system cannot know whether a conflicting
+                                       position exists, live mode must fail-closed
+                                       to avoid undetected netting.
+
+        Returns:
+            (conflict: bool, existing_direction: str, existing_qty: float)
+            conflict=True means the new entry must be rejected.
+            When fail_open=False and the store is unavailable, returns
+            (True, "POSITION_STORE_UNAVAILABLE", 0.0).
+        """
+        store_unavailable_result = (
+            (False, "FLAT", 0.0) if fail_open
+            else (True, "POSITION_STORE_UNAVAILABLE", 0.0)
+        )
+
+        if self._dynamo is None:
+            if not fail_open:
+                logger.critical(
+                    "check_direction_conflict.no_dynamo_live_fail_closed symbol=%s — "
+                    "rejecting entry because position store is None in live mode",
+                    symbol,
+                )
+            return store_unavailable_result
+
+        from shared.risk_state import position_key  # noqa: PLC0415
+
+        key = position_key(symbol)
+        try:
+            resp = await asyncio.to_thread(
+                self._dynamo.get_item,
+                TableName=self._positions_table,
+                Key=key,
+                ProjectionExpression="quantity, direction",
+            )
+            item = resp.get("Item") or {}
+            raw_qty = item.get("quantity", {}).get("N") or "0"
+            qty = float(raw_qty)
+            direction = item.get("direction", {}).get("S", "FLAT")
+
+            if abs(qty) < 1e-9 or direction == "FLAT":
+                return False, "FLAT", 0.0
+
+            conflict = (
+                (direction == "LONG" and new_side == OrderSide.SELL)
+                or (direction == "SHORT" and new_side == OrderSide.BUY)
+            )
+            return conflict, direction, qty
+        except Exception:
+            if fail_open:
+                logger.exception(
+                    "check_direction_conflict.error_fail_open symbol=%s — "
+                    "allowing entry (paper fail-open)",
+                    symbol,
+                )
+            else:
+                logger.critical(
+                    "check_direction_conflict.error_fail_closed symbol=%s — "
+                    "rejecting entry because position store raised in live mode",
+                    symbol,
+                    exc_info=True,
+                )
+            return store_unavailable_result
+
     async def get_orders_by_status(self, status_value: str) -> list[StoredOrder]:
         """
         Retrieve all orders matching a single status value via the status-index GSI.
@@ -1250,6 +1336,7 @@ class OrderManager:
         stop_price: Optional[float],
         take_profit: Optional[float] = None,
         policy_id: Optional[str] = None,
+        entry_signal_id: Optional[str] = None,
     ) -> bool:
         """
         Attach an exit policy to an open position immediately after entry fill.
@@ -1292,6 +1379,46 @@ class OrderManager:
                 ),
             )
             # Still attach what we have — TEE will alert on every cycle.
+
+        # Guard: do not overwrite an active exit policy that belongs to a
+        # different entry signal. If another strategy's entry is actively
+        # managing this position, overwriting its stop/TP would orphan that
+        # entry's risk management.
+        if entry_signal_id is not None and self._dynamo is not None:
+            from shared.risk_state import position_key as _pos_key  # noqa: PLC0415
+            try:
+                existing_resp = await asyncio.to_thread(
+                    self._dynamo.get_item,
+                    TableName=self._positions_table,
+                    Key=_pos_key(symbol),
+                    ProjectionExpression="exit_policy_id, quantity",
+                )
+                existing_item = existing_resp.get("Item") or {}
+                existing_pid = existing_item.get("exit_policy_id", {}).get("S", "")
+                existing_qty = float(
+                    existing_item.get("quantity", {}).get("N") or "0"
+                )
+                if existing_pid and abs(existing_qty) > 1e-9:
+                    existing_signal = existing_pid.removeprefix("POLICY-")
+                    if existing_signal and existing_signal != entry_signal_id:
+                        logger.warning(
+                            "attach_exit_policy.overwrite_blocked",
+                            symbol=symbol,
+                            existing_policy_id=existing_pid,
+                            new_entry_signal_id=entry_signal_id,
+                            reason="EXIT_POLICY_OVERWRITE_BLOCKED",
+                            detail=(
+                                "Existing exit policy belongs to a different "
+                                "entry signal — overwrite rejected to preserve "
+                                "the original position's risk management."
+                            ),
+                        )
+                        return False
+            except Exception:
+                logger.exception(
+                    "attach_exit_policy.overwrite_check_failed symbol=%s", symbol
+                )
+                # Fail-open: proceed with attach if check fails
 
         pid = policy_id or f"POLICY-{symbol}-{utc_iso()}"
         key = position_key(symbol)

@@ -151,49 +151,57 @@ Only vwap_reversion and orb_15m produced fills (momentum/trend_15m/preclose stru
 
 ---
 
+> **2026-06-11 (Session 16) — N/A for TEE validation, slot NOT consumed.** First valid post-ADR-030 session ended with 0 entries: the universal viability gate rejected all 184 VWAP candidates (median R:R 1.05 vs 1.5 strategy floor), ORB was structurally blind (10:19 IST service start missed the 09:15–09:30 opening-range window), and trend_15m warm-up replay is still pending. TEE/ExitOrderRouter/MIS exit paths were never exercised on a real position (MIS fired → `no_positions`). L12 re-evaluation deferred again — no trades ran the Week-1 wider stops. Archive: `session-archives/2026-06-11/`. Session 3 below remains open for the next session that actually trades.
+
 ## Session 3
 
-**Date:** ___________  
-**Session archive:** `session-archives/YYYY-MM-DD/`
+**Date:** 2026-06-12 (Session 17 — first valid full-lifecycle session: ADR-030 gates active, NAV 5× bug fixed pre-open, correct ₹10L sizing)  
+**Session archive:** `session-archives/2026-06-12/`
+
+Only orb_15m traded (6 signals, 5 fills). vwap_reversion: 0 candidates passed R:R gate; trend_15m warm-up pending; others retired.
 
 ### 18 Tracked Metrics
 
 | # | Metric | vwap_reversion | momentum | orb | trend_15m | preclose | scalp_1m | ALL |
 |---|---|---|---|---|---|---|---|---|
-| 1 | Total trades | | | | | | | |
-| 2 | Net P&L (₹) | | | | | | | |
-| 3 | Win rate (%) | | | | | | | |
-| 4 | Avg winner (₹) | | | | | | | |
-| 5 | Avg loser (₹) | | | | | | | |
-| 6 | Profit factor | | | | | | | |
+| 1 | Total trades | 0 | — | 5 | 0 | — | — | 5 (3 TEE exits + 2 MIS) |
+| 2 | Net P&L (₹) | — | — | -238.44 | — | — | — | **-238.44** |
+| 3 | Win rate (%) | — | — | 66.7% (2/3 TEE exits) | — | — | — | 66.7% TEE / 40% all-closed |
+| 4 | Avg winner (₹) | — | — | +107.49 | — | — | — | +107.49 |
+| 5 | Avg loser (₹) | — | — | -453.40 | — | — | — | -453.40 |
+| 6 | Profit factor | — | — | 0.47 | — | — | — | 0.47 |
 | 7 | Max drawdown (₹) | | | | | | | |
 | 8 | MFE avg (est.) | | | | | | | |
 | 9 | MAE avg (est.) | | | | | | | |
 | 10 | profit_capture_ratio | | | | | | | |
 | 11 | Breakeven shift count | | | | | | | |
 | 12 | Partial booking count | | | | | | | |
-| 13 | Trailing activation count | | | | | | | |
-| 14 | Trailing stop hit count | | | | | | | |
+| 13 | Trailing activation count | — | — | 2 | — | — | — | **2 (first ever observed)** |
+| 14 | Trailing stop hit count | — | — | 2 | — | — | — | **2 — ratchet held both times (ADANIPORTS +107.92, M&M +107.05)** |
 | 15 | Max hold exit count | | | | | | | |
 | 16 | Hard time exit count | | | | | | | |
-| 17 | MIS square-off count | | | | | | | |
+| 17 | MIS square-off count | — | — | 2 | — | — | — | 2 (perfect timing: 15:05:00.001 → 15:05:11 all closed) |
 | 18 | Trades old TEE would exit earlier | | | | | | | |
 
 ### Safety Gate Checks (Session 3)
 
 | Gate | Required | Actual | Pass? |
 |---|---|---|---|
-| Duplicate exits | 0 | | ☐ |
-| Unmanaged positions at close | 0 | | ☐ |
-| Daily cap blocked exits | 0 | | ☐ |
-| Live broker calls | 0 | | ☐ |
-| tee_trailing_activations_r visible | present | | ☐ |
-| tee_partial_bookings visible | present | | ☐ |
-| scalp_1m using fixed TP/SL | confirmed | | ☐ |
+| Duplicate exits | 0 | 0 (3 router idempotency successes, 0 dupes) | ✅ PASS |
+| Unmanaged positions at close | 0 | 0 (all 5 FLAT by 15:05:11; recon clean) | ✅ PASS |
+| Daily cap blocked exits | 0 | 0 (daily_cap_reached=false) | ✅ PASS |
+| Live broker calls | 0 | 0 (router_live_attempts=0 all session) | ✅ PASS |
+| tee_trailing_activations_r visible | present | present (=2) | ✅ PASS |
+| tee_partial_bookings visible | present | present (=0 — never triggered) | ✅ PASS |
+| scalp_1m using fixed TP/SL | confirmed | scalp_1m retired (enabled=false) — N/A | — N/A |
 
-**Session 3 verdict:** ☐ CLEAN &nbsp; ☐ ISSUES (describe below)
+**Session 3 verdict:** ☒ CLEAN (exit-engine scope) — see notes for out-of-scope incidents
 
 **Notes:**
+- First session with ADR-030 gates active AND correct ₹10L sizing (NAV 5× bug found pre-open and fixed — stale QE_PORTFOLIO_VALUE=5000000; sessions recorded as Sessions 1–2 above ran 5× over-permitted after first fill).
+- TEE exit quality: trailing ratchet held on both SHORT exits (stop only tightened; both locked profit on the bounce: ADANIPORTS +107.92, M&M +107.05). SL exit correct side/qty (BAJFINANCE −453.40). MIS perfect timing: 15:05:00.001 → all closed 15:05:11.
+- L11 (trailing activations > 0) now satisfied across Sessions 1–3 (1+2+2). L12 (partial bookings > 0) still UNMET — R-ladder partial levels never reached; re-evaluate after trend_15m warm-up lands (longer holds).
+- Out-of-scope incidents (not exit-engine): 11 kill-switch false fires (consumer_lag signal-silence trigger incompatible with ADR-030 low-frequency regime + producer_heartbeat writer-task death 13:10) — exits proven kill-switch-exempt 3×. Bug 6: MIS paper-close corrupted NAV#CURRENT (seed−close_notional); TEE exit path writes NAV correctly.
 
 ---
 

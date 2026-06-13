@@ -174,13 +174,24 @@ container_logs:
   # ── WARNING: degraded-but-continuing conditions ──────────────────────────────
   warning_patterns:
     - '"level": "ERROR"'           # any service-level ERROR log
-    - "Traceback"                  # unhandled exception (broad — includes non-critical like CloudWatch)
+    - "Traceback"                  # unhandled exception (broad — see exclude_patterns below)
     - "Failed to persist"          # S3 / DynamoDB persistence failure (non-fatal)
     - "signal_age_rejected"        # signals older than RISK_MAX_SIGNAL_AGE_SECONDS
     - "universe_rejected"          # order rejected by UniverseOrderValidator
     - "idempotency_skipped"        # duplicate signal detected — suppressed
-    - "CloudWatch metric flush"    # metrics pipeline degraded (expected in local dev)
     - "stale_ltp"                  # LTP not updated within max_age threshold
+    # NOTE: "CloudWatch metric flush" intentionally omitted — CloudWatch is unavailable
+    # in local dev and the failure is expected. Logs already emit at WARNING level inside
+    # the service; no need to double-count here.
+
+  # ── Suppression: lookahead context that silences a matched warning/Traceback line ─
+  # When a line matches a warning pattern, the next ``exclude_lookahead`` lines are
+  # scanned. If any contains an exclude_pattern, the hit is suppressed (not counted).
+  # Primary use: suppress "Traceback" headers from known-noisy library sources.
+  exclude_patterns:
+    - "site-packages/alpaca"             # Alpaca WS reconnection loop — no credentials in NSE paper mode
+    - "shared/metrics/cloudwatch_metrics"  # CloudWatch flush failure — no real CW in local dev
+  exclude_lookahead: 8                   # lines of context to check after the matched line
 
 # ── Notification policy (Slack only in Phase 1) ───────────────────────────────
 notifications:

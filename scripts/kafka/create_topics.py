@@ -146,6 +146,15 @@ _PRIMARY_TOPICS: list[TopicDef] = [
         key_field="trace_id",
         purpose="Full audit trail: every signal decision, risk decision, order event",
     ),
+    TopicDef(
+        name="alpha.opportunities",
+        partitions=2,
+        retention_ms=86_400_000,        # 24h
+        short_retention_ms=3_600_000,   # 1h for dev
+        key_field="instrument_id",
+        purpose="[ADR-031] Alpha Engine shadow forecasts (advisory). Published by "
+                "alpha_engine; NOT consumed by the trading path. Never authorizes a trade.",
+    ),
 ]
 
 

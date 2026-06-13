@@ -174,7 +174,16 @@ class MISSquareOffManager:
                 deadline_time_ist=_DEADLINE_TIME_STR,
                 seconds_until_close=round(wait_secs),
             )
-            await asyncio.sleep(wait_secs)
+            # Poll in short intervals instead of one long sleep. A single
+            # asyncio.sleep(~17000s) is silently dropped if the task is
+            # cancelled or the event loop stalls — both of which leave
+            # positions open overnight. Wall-clock is re-checked every tick
+            # so the task self-corrects regardless of why a cycle fires early.
+            while self._running:
+                remaining = _seconds_until_ist(_CLOSE_TIME)
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(60.0, remaining))
 
             if not self._running:
                 break

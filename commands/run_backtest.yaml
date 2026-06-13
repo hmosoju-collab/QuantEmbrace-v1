@@ -10,7 +10,9 @@ parameters:
     required: true
     description: Name of a registered strategy in the strategy engine.
     validation:
-      must_exist_in: services/strategy_engine/registry.py
+      # Backtest strategy registry (Phase AWS-BT-5). Was services/strategy_engine/registry.py
+      # (never existed — Phase 0 finding). Adapters reuse the production strategy classes.
+      must_exist_in: services/backtesting/strategy_adapter.py
 
   - name: start_date
     type: date
@@ -90,7 +92,8 @@ steps:
       Run the strategy against historical data with the specified parameters.
       Simulate order execution with the chosen slippage and commission models.
       Track all signals, trades, and portfolio state at each timestep.
-    engine: scripts/backtest/run.py
+    # Was scripts/backtest/run.py (did not exist — Phase 0 finding).
+    engine: scripts/backtest/run_backtest.py
 
   - name: compute_metrics
     action: calculate

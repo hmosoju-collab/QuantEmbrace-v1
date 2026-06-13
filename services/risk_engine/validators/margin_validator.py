@@ -85,6 +85,7 @@ class MarginValidator:
         risk_state_table: Optional[str] = None,
         margin_buffer_pct: float = _DEFAULT_MARGIN_BUFFER_PCT,
         settings: Optional[AppSettings] = None,
+        risk_profile: Optional[str] = None,
     ) -> None:
         """
         Args:
@@ -93,7 +94,11 @@ class MarginValidator:
             risk_state_table: DynamoDB table name for risk state.
             margin_buffer_pct: Fraction of order value to keep as buffer.
             settings: Application settings (fallback config source).
+            risk_profile: "paper" or "live" — controls fail-open vs fail-closed
+                behaviour when a margin snapshot is unavailable.  Defaults to
+                reading RISK_PROFILE from the environment (paper if not set).
         """
+        import os as _os  # noqa: PLC0415 — local import to avoid module-level dep
         self._limits = limits
         self._settings = settings or get_settings()
         self._dynamo = dynamo_client
@@ -101,6 +106,10 @@ class MarginValidator:
             risk_state_table or self._settings.aws.dynamodb_table_risk_state
         )
         self._margin_buffer_pct = margin_buffer_pct
+        # Resolve risk_profile: explicit arg > env var > "paper" default
+        self._risk_profile = (
+            risk_profile or _os.environ.get("RISK_PROFILE", "paper")
+        ).lower()
 
         # In-process margin snapshot cache keyed by market ("NSE" | "US")
         self._cache: dict[str, _MarginSnapshot] = {}
@@ -122,17 +131,42 @@ class MarginValidator:
             snapshot = await self._get_margin_snapshot(market)
 
             if snapshot is None:
-                logger.warning(
-                    "No margin snapshot available for %s — rejecting live signal %s",
-                    market,
-                    signal.signal_id,
-                )
-                return risk_data_unavailable_result(
-                    signal=signal,
-                    validator_name=self.VALIDATOR_NAME,
-                    reason="Margin data unavailable; margin check cannot run",
-                    details={"market": market, "margin_data_available": False},
-                )
+                # Determine paper vs live mode from signal field first, then
+                # fall back to the configured risk_profile.
+                is_paper = getattr(signal, "paper_trade", None)
+                if is_paper is None:
+                    is_paper = self._risk_profile == "paper"
+
+                if is_paper:
+                    # Paper mode: fail-open — allow the signal and log clearly so
+                    # the operator knows the margin check was skipped (not failed).
+                    logger.warning(
+                        "Margin snapshot unavailable for %s; allowing paper signal "
+                        "(live entries would be blocked)",
+                        market,
+                    )
+                    return RiskValidationResult(
+                        approved=True,
+                        validator_name=self.VALIDATOR_NAME,
+                        reason=(
+                            "PAPER_WARN_MARGIN_UNAVAILABLE: margin snapshot not found for "
+                            f"{market}; paper signal allowed (live would be blocked)"
+                        ),
+                        details={"market": market, "margin_data_available": False, "paper_trade": True},
+                    )
+                else:
+                    # Live mode: fail-closed — reject and log with the correct message.
+                    logger.warning(
+                        "Margin snapshot unavailable for %s; rejecting live entry signal %s",
+                        market,
+                        signal.signal_id,
+                    )
+                    return RiskValidationResult(
+                        approved=False,
+                        validator_name=self.VALIDATOR_NAME,
+                        reason=f"MARGIN_SNAPSHOT_UNAVAILABLE: margin data missing for {market}",
+                        details={"market": market, "margin_data_available": False, "paper_trade": False},
+                    )
 
             # Total available capital = cash + collateral
             total_available = snapshot.available_cash + snapshot.collateral_value

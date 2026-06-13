@@ -654,6 +654,73 @@ class StrategyConfig(BaseSettings):
         return intervals or ["minute"]
 
 
+class AlphaEngineConfig(BaseSettings):
+    """Alpha Engine (ADR-031) runtime config — shadow mode, advisory only.
+
+    All ``ALPHA_*`` env vars. Defaults are safe for a paper session: forecasts
+    are generated and persisted, but only those clearing the 50 bps net-edge
+    floor are published to the ``alpha.opportunities`` shadow topic.
+    """
+
+    model_config = {"env_prefix": "ALPHA_"}
+
+    enabled: bool = Field(default=True, description="Master on/off for the Alpha Engine.")
+    publish_enabled: bool = Field(
+        default=True,
+        description="If False, run as a dry-run: forecasts are stored but nothing "
+        "is published to alpha.opportunities. Never publishes to signals.* regardless.",
+    )
+    top_n: int = Field(default=10, description="Max opportunities published per cycle.")
+    min_net_edge_bps: float = Field(
+        default=50.0,
+        description="Publication floor (ADR-031 rev 2): only net_edge_bps >= this is "
+        "published. All forecasts are stored regardless for edge-band research.",
+    )
+    research_edge_bands: Annotated[list[float], NoDecode] = Field(
+        default_factory=lambda: [20.0, 30.0, 40.0, 50.0],
+        description="Net-edge thresholds the offline edge-band study evaluates.",
+    )
+    rank_interval_seconds: float = Field(default=60.0)
+    forecast_ttl_seconds: int = Field(default=180)
+    horizons_minutes: Annotated[list[int], NoDecode] = Field(
+        default_factory=lambda: [15, 30, 60],
+        description="Forecast horizons emitted per trigger (multi-horizon, ADR-031 #1).",
+    )
+    labeler_interval_seconds: float = Field(default=300.0)
+    drift_baseline_sessions: int = Field(default=20)
+    health_psi_watchlist: float = Field(default=0.25)
+    health_degraded_sessions: int = Field(default=20)
+    health_failed_sessions: int = Field(default=10)
+    stats_dsr_threshold: float = Field(default=0.95)
+    stats_pbo_threshold: float = Field(default=0.20)
+    stats_alpha: float = Field(default=0.05)
+    max_forecasts_per_model_per_day: int = Field(default=150)
+    models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "alpha_orb_v2",
+            "alpha_vwap_rev_v2",
+            "alpha_trend_15m",
+        ],
+        description="Alpha model ids to load (champion+challenger resolved from registry).",
+    )
+    model_version: str = Field(
+        default="",
+        description="Override model_version stamp. Empty -> the engine uses the "
+        "build date (UTC) at startup so every forecast is versioned (ADR-031 #2).",
+    )
+
+    @field_validator("research_edge_bands", "horizons_minutes", "models", mode="before")
+    @classmethod
+    def _parse_csv_or_json_list(cls, value: object) -> object:
+        """Accept comma-separated values in addition to JSON arrays."""
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.startswith("["):
+                return list(json.loads(raw))
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+
 class AppSettings(BaseSettings):
     """
     Master application settings aggregating all configuration sections.
@@ -694,6 +761,10 @@ class AppSettings(BaseSettings):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
+    alpha: AlphaEngineConfig = Field(
+        default_factory=AlphaEngineConfig,
+        description="Alpha Engine (ADR-031) shadow-mode config. ALPHA_* env vars.",
+    )
     zerodha_rate_limit: ZerodhaRateLimitConfig = Field(
         default_factory=ZerodhaRateLimitConfig,
         description=(

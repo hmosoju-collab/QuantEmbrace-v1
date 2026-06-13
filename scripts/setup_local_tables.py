@@ -227,6 +227,36 @@ def _create_dynamodb_tables() -> None:
         ttl_attribute="expires_at",
     )
 
+    # ── Alpha Engine (ADR-031) — shadow-mode research tables ──────────────────
+    # alpha-forecasts: every forecast (published or suppressed) + later labels.
+    #   PK=DATE#{trade_date}#{market}, SK={decision_ts_iso}#{forecast_id}
+    _create_table(
+        dynamodb,
+        name=f"{prefix}-alpha-forecasts",
+        key_schema=pk_sk_key,
+        attributes=pk_sk_attrs,
+        ttl_attribute="ttl",
+    )
+
+    # alpha-performance: daily rollups per model@version x horizon (IC, hit-rate,
+    #   calibration, drift, health). PK=PERF#{model_id}#{model_version}, SK={date}#H{h}
+    _create_table(
+        dynamodb,
+        name=f"{prefix}-alpha-performance",
+        key_schema=pk_sk_key,
+        attributes=pk_sk_attrs,
+        ttl_attribute="ttl",
+    )
+
+    # alpha-registry: institutional memory — lifecycle, lineage, stats,
+    #   champion/challenger. No TTL. PK=MODEL#{model_id}, SK=META | VERSION#{version}
+    _create_table(
+        dynamodb,
+        name=f"{prefix}-alpha-registry",
+        key_schema=pk_sk_key,
+        attributes=pk_sk_attrs,
+    )
+
 
 def _create_bucket(s3: Any, bucket_name: str, region: str) -> None:
     bucket = s3.Bucket(bucket_name)

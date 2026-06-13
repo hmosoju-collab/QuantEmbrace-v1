@@ -198,7 +198,7 @@ class PositionValidator:
             )
             item = response.get("Item")
             if item:
-                return int(item.get("quantity", {}).get("N", "0"))
+                return int(float(item.get("quantity", {}).get("N", "0")))
             return 0
 
         except Exception:
@@ -235,7 +235,7 @@ class PositionValidator:
                     ProjectionExpression="quantity, order_status",
                 )
                 for item in response.get("Items", []):
-                    qty = int(item.get("quantity", {}).get("N", "0"))
+                    qty = int(float(item.get("quantity", {}).get("N", "0")))
                     total_pending += qty
 
             if total_pending > 0:

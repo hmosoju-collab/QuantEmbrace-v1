@@ -20,6 +20,9 @@ CANONICAL_SIGNALS_ENRICHED_TOPIC = "signals.enriched"  # Phase 6 — ai_engine p
 CANONICAL_SIGNALS_APPROVED_TOPIC = "signals.approved"
 CANONICAL_ORDER_EVENTS_TOPIC     = "orders.events"
 CANONICAL_KILL_SWITCH_TOPIC      = "risk.kill-switch"
+CANONICAL_ALPHA_OPPORTUNITIES_TOPIC = "alpha.opportunities"  # ADR-031 — alpha_engine (shadow)
+
+ALPHA_SCHEMA_VERSION = "1.0"  # alpha.opportunities event envelope (shadow mode)
 
 
 class EventType(str, Enum):
@@ -36,6 +39,7 @@ class EventType(str, Enum):
     ORDER_CANCELLED = "ORDER_CANCELLED"
     KILL_SWITCH_ACTIVE  = "KILL_SWITCH_ACTIVE"
     KILL_SWITCH_CLEARED = "KILL_SWITCH_CLEARED"
+    ALPHA_OPPORTUNITY   = "ALPHA_OPPORTUNITY"   # ADR-031 — alpha_engine shadow stream (v1.0)
 
 
 @dataclass(frozen=True)
@@ -144,6 +148,38 @@ KILL_SWITCH_REQUIRED_FIELDS = BASE_REQUIRED_FIELDS | frozenset(
     }
 )
 
+# ADR-031 — alpha.opportunities (shadow mode, advisory). Carries a forecast +
+# cost economics + ranking context. ``shadow_mode`` MUST be present and true so
+# any downstream consumer can hard-assert this stream never authorizes a trade.
+ALPHA_OPPORTUNITY_REQUIRED_FIELDS = BASE_REQUIRED_FIELDS | frozenset(
+    {
+        "forecast_id",
+        "cycle_id",
+        "rank",
+        "score",
+        "model_id",
+        "model_version",
+        "alpha_family",
+        "symbol",
+        "instrument_id",
+        "market",
+        "universe",
+        "timeframe",
+        "direction",
+        "horizon_minutes",
+        "forecast_return_bps",
+        "net_edge_bps",
+        "edge_band",
+        "confidence",
+        "top_features",
+        "conflict_group_id",
+        "decision_price",
+        "decision_ts",
+        "expires_at",
+        "shadow_mode",
+    }
+)
+
 EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     EventType.SIGNAL_PENDING.value:  SIGNAL_REQUIRED_FIELDS,
     EventType.SIGNAL_ENRICHED.value: SIGNAL_ENRICHED_REQUIRED_FIELDS,   # Phase 6
@@ -156,6 +192,7 @@ EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     EventType.ORDER_CANCELLED.value: ORDER_REQUIRED_FIELDS,
     EventType.KILL_SWITCH_ACTIVE.value: KILL_SWITCH_REQUIRED_FIELDS,
     EventType.KILL_SWITCH_CLEARED.value: KILL_SWITCH_REQUIRED_FIELDS,
+    EventType.ALPHA_OPPORTUNITY.value: ALPHA_OPPORTUNITY_REQUIRED_FIELDS,  # ADR-031
 }
 
 
@@ -172,12 +209,13 @@ def validate_event(event: dict[str, Any], expected_type: str | EventType) -> lis
     expected = expected_type.value if isinstance(expected_type, EventType) else expected_type
     errors: list[str] = []
 
-    # SIGNAL_ENRICHED uses schema v4.0; all others use v3.0
-    expected_sv = (
-        ENRICHED_SCHEMA_VERSION
-        if expected == EventType.SIGNAL_ENRICHED.value
-        else SCHEMA_VERSION
-    )
+    # SIGNAL_ENRICHED uses schema v4.0; ALPHA_OPPORTUNITY uses v1.0; all others v3.0
+    if expected == EventType.SIGNAL_ENRICHED.value:
+        expected_sv = ENRICHED_SCHEMA_VERSION
+    elif expected == EventType.ALPHA_OPPORTUNITY.value:
+        expected_sv = ALPHA_SCHEMA_VERSION
+    else:
+        expected_sv = SCHEMA_VERSION
     if event.get("schema_version") != expected_sv:
         errors.append(
             f"schema_version must be {expected_sv!r}, got {event.get('schema_version')!r}"

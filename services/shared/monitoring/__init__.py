@@ -14,6 +14,11 @@ from .monitoring_status import (
     StrategyStatusRow,
     TEEStatus,
 )
+from .strategy_performance import (
+    ConfidenceBandMetrics,
+    RRBandMetrics,
+    StrategyPerformanceStatus,
+)
 
 __all__ = [
     "LiveCounters",
@@ -29,6 +34,9 @@ __all__ = [
     "RiskCapStatus",
     "RouterStatus",
     "ServiceHealthRow",
+    "ConfidenceBandMetrics",
+    "RRBandMetrics",
+    "StrategyPerformanceStatus",
     "StrategyStatusRow",
     "TEEStatus",
 ]

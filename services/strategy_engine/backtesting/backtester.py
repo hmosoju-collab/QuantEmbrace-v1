@@ -167,19 +167,51 @@ class BacktestResult:
 @dataclass(frozen=True)
 class IndianCostModel:
     """
-    Conservative NSE equity intraday cost model.
+    Segment-aware NSE equity statutory cost model (single source of truth).
 
-    Percent fields are actual percentages, not fractions. The defaults model
-    common Indian equity intraday charges: STT on sell side, exchange charges,
-    SEBI turnover fee, stamp duty on buy side, and GST on brokerage/exchange/SEBI.
+    Percent fields are actual percentages, not fractions. Defaults model NSE
+    equity **intraday (MIS)**: STT on the sell side only, exchange transaction
+    charge, SEBI turnover fee, stamp duty on the buy side, and GST on
+    (brokerage + exchange + SEBI). Use ``IndianCostModel.delivery()`` for
+    positional/CNC economics (STT on both legs, higher stamp). The
+    ``cost_model_version`` is recorded on every run.
+
+    Rate sources (verified 2026-06): exchange txn = NSE cash 0.00297%
+    (Rs 2.97/lakh, revised 1 Oct 2024 per the SEBI true-to-label circular —
+    was 0.00345%); STT intraday 0.025% sell / delivery 0.1% both legs; stamp
+    intraday 0.003% buy / delivery 0.015% buy; SEBI Rs 10/crore; GST 18%.
     """
 
     enabled: bool = True
     stt_sell_pct: float = 0.025
-    exchange_txn_pct: float = 0.00345
+    stt_buy_pct: float = 0.0            # 0 for intraday; 0.1 for delivery (STT both legs)
+    exchange_txn_pct: float = 0.00297   # NSE cash, revised 1 Oct 2024 (was 0.00345)
     sebi_turnover_pct: float = 0.0001
     stamp_buy_pct: float = 0.003
     gst_pct: float = 18.0
+    cost_model_version: str = "in-eq-intraday-2024.10"
+
+    @classmethod
+    def intraday(cls) -> "IndianCostModel":
+        """NSE equity intraday (MIS) — the corrected default profile."""
+        return cls()
+
+    @classmethod
+    def delivery(cls) -> "IndianCostModel":
+        """NSE equity delivery (CNC) — STT on both legs, higher stamp.
+
+        Pair with ``brokerage_pct = 0`` (equity delivery brokerage is Rs 0 at
+        discount brokers). DP/demat charge (~Rs 16 per scrip on the sell leg) is
+        a flat fee not modelled here — a documented minor omission, immaterial
+        next to the STT change.
+        """
+        return cls(
+            stt_sell_pct=0.1,
+            stt_buy_pct=0.1,
+            exchange_txn_pct=0.00297,
+            stamp_buy_pct=0.015,
+            cost_model_version="in-eq-delivery-2024.10",
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -570,7 +602,11 @@ class Backtester:
 
         exchange = trade_value * (model.exchange_txn_pct / 100.0)
         sebi = trade_value * (model.sebi_turnover_pct / 100.0)
-        stt = trade_value * (model.stt_sell_pct / 100.0) if side == Direction.SELL else 0.0
+        stt = (
+            trade_value * (model.stt_sell_pct / 100.0)
+            if side == Direction.SELL
+            else trade_value * (model.stt_buy_pct / 100.0)
+        )
         stamp = trade_value * (model.stamp_buy_pct / 100.0) if side == Direction.BUY else 0.0
         gst = (brokerage + exchange + sebi) * (model.gst_pct / 100.0)
         return brokerage + exchange + sebi + stt + stamp + gst

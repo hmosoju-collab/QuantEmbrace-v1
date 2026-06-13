@@ -336,6 +336,32 @@ monday:
 	@echo "$(BOLD)$(CYAN)[6/6] Verifying kill switch is clear...$(RESET)"
 	@$(MAKE) --no-print-directory kill-switch-status
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SESSION 12 — QUALITY-GATE VALIDATED STARTUP
+# ══════════════════════════════════════════════════════════════════════════════
+# Use start-paper-session instead of monday to guarantee a rebuilt risk_engine
+# image with active quality gates. Sessions run without this are NOT valid
+# quality-gate performance tests.
+
+.PHONY: rebuild-risk-engine
+rebuild-risk-engine:
+	docker-compose build risk_engine
+	@echo "risk_engine image rebuilt."
+
+.PHONY: validate-session12
+validate-session12:
+	python scripts/validate_session12_runtime.py --prefix quantembrace-development --endpoint http://localhost:4566
+
+.PHONY: start-paper-session
+start-paper-session: rebuild-risk-engine validate-session12
+	docker-compose down -v
+	docker-compose up -d localstack redpanda
+	sleep 5
+	docker-compose run --rm setup
+	python scripts/deploy/paper_preflight_check.py
+	python scripts/zerodha_login.py
+	docker-compose up -d
+
 	@# ── Done ──────────────────────────────────────────────────────────────
 	@echo ""
 	@echo "$(BOLD)$(GREEN)╔══════════════════════════════════════════════════════════════╗$(RESET)"

@@ -9,9 +9,27 @@
 
 ---
 
+## Session Validity Notice (2026-06-05)
+
+Sessions 10 and 11 ran on a stale Docker image — quality-gate validators were inactive.
+**Session 12 (image rebuilt 2026-06-05) is the first valid quality-gate test.**
+Do NOT count Sessions 10 or 11 toward the 5-session gate requirement.
+
+---
+
+## Pre-Session Validation Checklist (mandatory from Session 12+)
+
+Run these checks before every paper session:
+
+- [ ] `scripts/validate_session12_runtime.py` passes (all checks PASS, exit code 0)
+- [ ] Startup logs show `QUALITY_GATES_CONFIG_LOADED` block in risk_engine container
+- [ ] §17 shows `Gate active: true` after first signal volume (confirms image is current)
+
+---
+
 ## Instructions
 
-Run this checklist for **5 consecutive complete paper sessions** before proceeding to the live gate.  
+Run this checklist for **5 consecutive complete valid paper sessions** (Session 12+) before proceeding to the live gate.  
 A session = one full trading day (09:15–15:30 IST for NSE). Mark each item after each session.  
 Any unchecked item after 5 sessions = live mode remains blocked.
 
@@ -27,8 +45,16 @@ Any unchecked item after 5 sessions = live mode remains blocked.
 | 4 | 2026-05-22 | Hari | ☐ | 0 fills — candle stream writing broken (LocalStack schema) |
 | 5 | 2026-05-25 | Hari | ☐ | 0 fills — monitoring-only session |
 | 6 | 2026-05-26 | Hari | ☐ | 0 fills — readiness review session; all 6 execution gaps fixed |
-| 7 (next) | TBD | Hari | ☐ | **FIRST SESSION with all fixes applied** — requires `docker-compose down -v && setup` |
-| 8 | TBD | Hari | ☐ | |
+| 7 | 2026-05-28 | Hari | ☐ | First session with all ADR-020 fixes |
+| 8 | 2026-05-29 | Hari | ☐ | |
+| 9 | 2026-05-30 | Hari | ☐ | MIS stranded 30 positions (HIGH-004) |
+| 10 | 2026-06-03 | Hari | ☐ | **INVALID** — stale Docker image, quality gates inactive |
+| 11 | 2026-06-04 | Hari | ☐ | **INVALID** — stale Docker image, quality gates inactive |
+| 12 | 2026-06-08 | Hari | ☐ | First valid QG session (image rebuilt 2026-06-05). S1–S3 PASS, S5–S7 PASS. **S4 FAIL** — MIS task silently cancelled by kill switch at 15:00:38 IST (HIGH-004); 6 positions unmanaged. HIGH-004 fixed post-session. 67 fills, P&L ₹-2,817, QG pass-through 67.1%, PF 0.300. Does NOT count toward 5-session gate. |
+| 13 | 2026-06-09 | Hari | ☑ | **HIGH-004 VALIDATED** — MIS fired 15:05 IST, all 3 positions closed before deadline (`mis_square_off.all_positions_closed` confirmed). 88 fills, Realized P&L ₹-3,648, QG pass-through 31%, PF TBD. S1–S3 PASS, **S4 PASS** (HIGH-004 fix confirmed), S5–S7 PASS. ~~Session 1 of 5 toward live gate~~ **retroactively INVALID per ADR-030** (quality gates silently disabled by YAML name mismatch). Infra incidents: 3× kill switch (S3 bucket missing → LocalStack CPU cascade; root cause fixed mid-session). |
+| 15 | 2026-06-10 | Hari | ☐ | **INVALID** — last session on pre-ADR-030 code (quality gates disabled by name mismatch). 94 entries, P&L ₹-8,617, PF 0.29 (see TEE tracker Session 2). Does NOT count. |
+| 16 | 2026-06-11 | Hari | ☐ | **First valid post-ADR-030 session — 0 trades, ₹0 P&L.** Full image rebuild; `validate_session12` 9/9 PASS (fixture R:R 1.25→1.5 fixed). Viability gate rejected all 184 VWAP candidates (median R:R 1.05, max 1.48 vs strategy floor 1.5 — geometric ~1:1 cap, see memory/session16_rr_distribution_findings); ORB structurally blind (10:19 IST start missed the 09:15–09:30 OR window); trend_15m warm-up pending. S1 PASS · S2/S3/S5 N/A (0 fills) · S4 PASS w/ note (MIS fired 15:09 vs 15:05 sched, `no_positions`, no MIS kill switch) · S6 PASS (recon clean) · S7 PASS (0 live calls). **P1 incident:** kill switch auto-fired 15:19 IST (`producer_heartbeat_monitor`, NSE WS heartbeat 260s stale; Zerodha WS flapping code=1006 ~every 5 min all afternoon). Does NOT count toward 5-session gate (0 trades + infra P1). Dual R:R floor bug found: strategy 1.5 vs risk-gate 1.4 — needs ADR. |
+| 17 | 2026-06-12 | Hari | ☐ | **First full-lifecycle session at correct size.** Pre-09:15 start → ORB first fair test: 93/96 ranges confirmed, 6 signals, 5 approved/filled (₹23k–49k each = 2.3–4.9% of ₹10L NAV — **NAV 5× bug found pre-open & fixed**: stale `QE_PORTFOLIO_VALUE=5000000` in .env rewrote NAV to ₹50L on first fill; sessions 12/13/15 retroactively ran 5× over-permitted). Exits: BAJFINANCE SL −453.40, ADANIPORTS TRAIL +107.92, M&M TRAIL +107.05 (**first trailing exits ever — ratchet held both times**), APOLLOHOSP+SIEMENS MIS ~₹0. **Day realized −₹238.44** (PF 0.47). S1 PASS · S2 PASS (all fills got policies ≤5s) · S3 PASS incl. S3.4/S3.5 trailing · **S4 PASS — MIS perfect: 15:05:00.001 start → 15:05:11 all_positions_closed** · S5 PASS (3 idempotency successes, 0 dupes) · S6 PASS · S7 PASS (0 live calls). **Incidents:** 11 kill-switch false fires (8× consumer_lag signal-silence ~every 900s — trigger incompatible with ADR-030 low-frequency; 2+1× producer_heartbeat incl. real heartbeat-writer task death 13:10, data path verified healthy) — 10 operator-authorized attended clears, then ride-to-close from 13:45. Session report shows "kill switch 0" (counter gap) and "READY" (infra-only — strategy gates FAIL: expectancy < 0). **Bug 6 found:** MIS paper-close corrupts NAV (writes seed−close_notional = 932,682.39; true 999,761.56; TEE path writes correctly). **Counts toward gate: NO** (kill-switch incident cluster + negative expectancy), but infra lifecycle = first clean end-to-end proof. |
 
 ---
 

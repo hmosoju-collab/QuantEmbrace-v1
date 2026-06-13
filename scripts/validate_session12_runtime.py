@@ -355,13 +355,13 @@ def run_checks(prefix: str, endpoint: str) -> list[tuple[str, bool]]:
             take_profit=2519.0,
             symbol="VALTEST_L",
         )
-        # entry=2500, stop=2450 → risk=50; tp=2562.5 → reward=62.5 → R:R=1.25 (above 1.20)
+        # entry=2500, stop=2450 → risk=50; tp=2575.0 → reward=75 → R:R=1.5 (above ADR-030 vwap_reversion floor 1.40)
         high_injected = _inject_synthetic_signal(
             _RISK_CONTAINER,
             signal_id=high_signal_id,
             confidence=_HIGH_QUALITY_CONFIDENCE,
             stop_loss=2450.0,
-            take_profit=2562.5,
+            take_profit=2575.0,
             symbol="VALTEST_H",
         )
 
@@ -384,7 +384,7 @@ def run_checks(prefix: str, endpoint: str) -> list[tuple[str, bool]]:
         results.append((label, passed))
 
         # Check approval of high-quality signal
-        label = "Synthetic high-quality signal approved (confidence=0.91, R:R=1.25)"
+        label = "Synthetic high-quality signal approved (confidence=0.91, R:R=1.5)"
         if high_injected:
             logs = _get_container_logs(_RISK_CONTAINER, tail=300)
             passed = high_signal_id in logs and "APPROVED" in logs
@@ -397,7 +397,7 @@ def run_checks(prefix: str, endpoint: str) -> list[tuple[str, bool]]:
             False,
         ))
         results.append((
-            "Synthetic high-quality signal approved (confidence=0.91, R:R=1.25)",
+            "Synthetic high-quality signal approved (confidence=0.91, R:R=1.5)",
             False,
         ))
 

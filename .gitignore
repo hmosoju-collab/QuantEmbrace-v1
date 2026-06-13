@@ -19,3 +19,9 @@ htmlcov/
 
 # Paper trading session archives (contain fill data / DynamoDB dumps)
 session-archives/
+
+# Generated backtesting lab artifacts
+reports/backtests/
+reports/data-quality/
+reports/ingest-selftest/
+reports/model-datasets/

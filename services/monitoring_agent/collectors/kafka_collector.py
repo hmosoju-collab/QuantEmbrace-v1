@@ -225,19 +225,55 @@ class KafkaCollector(Collector):
                         info["partitions"] = len(lag["partitions"])
                         info["partition_detail"] = lag["partitions"]
                     else:
-                        # No committed offsets yet — consumer may be running but topics are empty.
-                        # Probe group membership so we don't false-alarm before first message.
-                        try:
-                            gd_futures = admin.describe_consumer_groups([grp.group_id])
-                            gd = gd_futures[grp.group_id].result(timeout=self._timeout)
-                            state_name = getattr(getattr(gd, "state", None), "name", "Unknown")
-                            member_count = len(getattr(gd, "members", []))
-                            if state_name in {"Stable", "PreparingRebalance", "CompletingRebalance"} and member_count > 0:
-                                info["found"] = True
-                                info["group_state"] = state_name
-                                info["member_count"] = member_count
-                        except Exception:  # noqa: BLE001
-                            pass  # stay found=False; original liveness behavior
+                        # No committed offsets. Two legitimate explanations:
+                        # (a) topics are genuinely empty — consumer is running, nothing to commit yet.
+                        # (b) consumer is dead and has never committed.
+                        #
+                        # Step 1: probe high-watermarks for configured topics.
+                        # If every partition has high watermark = 0, no messages have ever been
+                        # produced, so no committed offset is expected → healthy startup.
+                        if grp.topics:
+                            tps: list[tuple[str, int]] = []
+                            for t in grp.topics:
+                                t_meta = (getattr(metadata, "topics", {}) or {}).get(t)
+                                for pid in sorted(
+                                    (getattr(t_meta, "partitions", {}) or {}).keys()
+                                ):
+                                    tps.append((t, pid))
+                            if tps:
+                                hw = self._watermarks(consumer, tps, TopicPartition)
+                                # Require at least one valid read and ALL valid reads at 0.
+                                topics_empty = (
+                                    hw
+                                    and any(v >= 0 for v in hw.values())
+                                    and all(v == 0 for v in hw.values() if v >= 0)
+                                )
+                                if topics_empty:
+                                    info["found"] = True
+                                    info["topics_empty"] = True
+
+                        # Step 2: if watermark check didn't resolve it, probe membership.
+                        # confluent_kafka enum .name returns "STABLE" (upper); Kafka protocol
+                        # may use "Stable" — normalize both forms.
+                        if not info.get("found"):
+                            try:
+                                gd_futures = admin.describe_consumer_groups([grp.group_id])
+                                gd = gd_futures[grp.group_id].result(timeout=self._timeout)
+                                raw_state = getattr(gd, "state", None)
+                                state_key = (
+                                    str(getattr(raw_state, "name", "") or "")
+                                    .upper().replace(" ", "_")
+                                )
+                                member_count = len(getattr(gd, "members", []))
+                                if (
+                                    state_key in {"STABLE", "PREPARING_REBALANCE", "COMPLETING_REBALANCE"}
+                                    and member_count > 0
+                                ):
+                                    info["found"] = True
+                                    info["group_state"] = str(raw_state)
+                                    info["member_count"] = member_count
+                            except Exception:  # noqa: BLE001
+                                pass
                 except Exception as exc:  # noqa: BLE001
                     info["error"] = repr(exc)
                 findings["groups"][grp.group_id] = info

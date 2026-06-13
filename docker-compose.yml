@@ -32,6 +32,7 @@
 #   execution_engine: http://localhost:8084/health
 #   ai_engine      : http://localhost:8085/health
 #   monitoring_agent: http://localhost:8086/health  (read-only observer, Phase 1)
+#   alpha_engine   : http://localhost:8087/health  (ADR-031 shadow mode, advisory)
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -267,8 +268,15 @@ services:
       # Signal age limit — matches risk_limits_production.yaml max_signal_age_seconds: 30.
       # Default in code is 5.0s which rejects candle-based signals that take >5s to process.
       RISK_MAX_SIGNAL_AGE_SECONDS: "30"
+      # Raised from 300s — candle strategies have natural signal gaps >5min during quiet markets.
+      RISK_DATA_FEED_STALE_SECONDS: "900"
       LOG_LEVEL: INFO
       QE_HEALTH_CHECK_PORT: "8083"
+    volumes:
+      # Bind-mount paper_optimization.yaml so quality gate thresholds are live-editable
+      # without a Docker rebuild. The file is not committed (untracked) — this mount
+      # ensures the running container always sees the current on-disk version.
+      - ./services/strategy_engine/config/paper_optimization.yaml:/app/services/strategy_engine/config/paper_optimization.yaml:ro
     ports:
       - "8083:8083"
     healthcheck:
@@ -359,6 +367,37 @@ services:
       - "8085:8085"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8085/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Alpha Engine (ADR-031 — SHADOW MODE, advisory only) ──────────────────────
+  # Generates + ranks alpha forecasts and persists research artifacts. Publishes
+  # ONLY to alpha.opportunities; NEVER to signals.* / orders.*. No broker SDK, no
+  # risk checks, no positions, no kill-switch writes. Pauses output on kill switch.
+  alpha_engine:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: infra/deployment/Dockerfile
+      args:
+        SERVICE_NAME: alpha_engine
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_USE_IAM: "false"
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DYNAMODB_TABLE_PREFIX: quantembrace-development
+      QE_ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      QE_HEALTH_CHECK_PORT: "8087"
+    ports:
+      - "8087:8087"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8087/health')\""]
       interval: 30s
       timeout: 5s
       retries: 3

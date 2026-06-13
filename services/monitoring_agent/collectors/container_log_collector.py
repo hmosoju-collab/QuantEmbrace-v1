@@ -45,6 +45,8 @@ _DEFAULTS: dict[str, Any] = {
     "blocker_patterns": [],
     "critical_patterns": [],
     "warning_patterns": [],
+    "exclude_patterns": [],      # lines whose lookahead context matches are suppressed
+    "exclude_lookahead": 8,      # how many lines forward to check for an exclude_pattern
     "max_lines_per_container": 2000,
     "sample_lines": 3,
 }
@@ -72,13 +74,31 @@ def _cfg(rules: Any) -> dict[str, Any]:
     return merged
 
 
-def _scan(text: str, patterns: list[str]) -> tuple[int, list[str]]:
-    """Count lines matching any pattern; return (count, sample_lines)."""
+def _scan(
+    text: str,
+    patterns: list[str],
+    exclude_patterns: list[str] = (),
+    lookahead: int = 8,
+) -> tuple[int, list[str]]:
+    """Count lines matching any pattern; return (count, sample_lines).
+
+    When exclude_patterns is set, a matched line is suppressed if any of the
+    next ``lookahead`` lines contain an exclude_pattern substring. This handles
+    multi-line tracebacks whose root cause appears on a later line (e.g. a
+    ``Traceback`` header followed by a known-noisy library path).
+    """
+    lines = text.splitlines()
+    n = len(lines)
     count = 0
     samples: list[str] = []
-    for line in text.splitlines():
+    for i, line in enumerate(lines):
         for pat in patterns:
             if pat in line:
+                if exclude_patterns:
+                    end = min(n, i + 1 + lookahead)
+                    context_window = lines[i + 1 : end]
+                    if any(ep in ctx for ctx in context_window for ep in exclude_patterns):
+                        break  # suppressed: lookahead matched an exclude_pattern
                 count += 1
                 samples.append(line.strip()[:200])
                 break
@@ -105,6 +125,8 @@ class ContainerLogCollector(Collector):
         blocker_pats: list[str] = cfg["blocker_patterns"]
         critical_pats: list[str] = cfg["critical_patterns"]
         warning_pats: list[str] = cfg["warning_patterns"]
+        exclude_pats: list[str] = cfg["exclude_patterns"]
+        exclude_la: int = int(cfg.get("exclude_lookahead", 8))
         max_lines: int = int(cfg["max_lines_per_container"])
         sample_cap: int = int(cfg["sample_lines"])
 
@@ -143,9 +165,9 @@ class ContainerLogCollector(Collector):
                 per_container.append({"name": name, "status": "unreadable", "error": str(exc)[:120]})
                 continue
 
-            b_count, b_samples = _scan(text, blocker_pats)
-            c_count, c_samples = _scan(text, critical_pats)
-            w_count, w_samples = _scan(text, warning_pats)
+            b_count, b_samples = _scan(text, blocker_pats, exclude_pats, exclude_la)
+            c_count, c_samples = _scan(text, critical_pats, exclude_pats, exclude_la)
+            w_count, w_samples = _scan(text, warning_pats, exclude_pats, exclude_la)
 
             entry: dict[str, Any] = {
                 "name": name,

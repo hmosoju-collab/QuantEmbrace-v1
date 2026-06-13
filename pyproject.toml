@@ -32,7 +32,7 @@ ignore = [
 "botocore.client.SQS" = { msg = "SQS client is forbidden. All messaging goes through Kafka MSK Serverless — see ARCHITECTURE.md." }
 
 [tool.ruff.lint.isort]
-known-first-party = ["shared", "data_ingestion", "strategy_engine", "risk_engine", "execution_engine", "ai_engine"]
+known-first-party = ["shared", "data_ingestion", "strategy_engine", "risk_engine", "execution_engine", "ai_engine", "alpha_engine"]
 force-sort-within-sections = true
 
 [tool.ruff.lint.per-file-ignores]

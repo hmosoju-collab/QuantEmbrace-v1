@@ -73,6 +73,67 @@ _metrics = get_metrics_client(namespace="QuantEmbrace/Trading")
 _PLACEMENT_PAUSE_THRESHOLD_FAILURES: int = 3
 _PLACEMENT_PAUSE_BACKOFF_SECONDS:    float = 30.0
 
+_IST_OFFSET = 5 * 3600 + 30 * 60  # seconds offset from UTC
+_ORDER_TIME_BUCKET_BOUNDARIES = [
+    (9 * 60 + 15,  9 * 60 + 30,  "09:15-09:30"),
+    (9 * 60 + 30,  10 * 60,      "09:30-10:00"),
+    (10 * 60,      11 * 60,      "10:00-11:00"),
+    (11 * 60,      13 * 60,      "11:00-13:00"),
+    (13 * 60,      15 * 60,      "13:00-15:00"),
+]
+
+
+def _order_time_bucket(dt: datetime) -> str:
+    """Map a UTC datetime to an IST time-bucket label for order analytics."""
+    from datetime import timezone as _tz, timedelta as _td
+    _IST = _tz(_td(hours=5, minutes=30))
+    ist = dt.astimezone(_IST) if dt.tzinfo else dt.replace(tzinfo=_tz.utc).astimezone(_IST)
+    minute = ist.hour * 60 + ist.minute
+    for start, end, label in _ORDER_TIME_BUCKET_BOUNDARIES:
+        if start <= minute < end:
+            return label
+    return "other"
+
+
+def _build_paper_order_metadata(approved: "ApprovedSignalEvent", cfg: object) -> dict:
+    """Build the metadata dict for a paper order, including analytics fields."""
+    entry = approved.price_at_signal
+    stop = approved.stop_loss
+    tp = approved.take_profit
+
+    expected_reward: Optional[float] = None
+    expected_risk: Optional[float] = None
+    reward_risk_ratio: Optional[float] = None
+
+    if stop is not None and tp is not None and entry > 0:
+        is_buy = approved.direction.upper() == "BUY"
+        if is_buy:
+            expected_reward = tp - entry
+            expected_risk = entry - stop
+        else:
+            expected_reward = entry - tp
+            expected_risk = stop - entry
+        if expected_risk is not None and expected_risk > 0 and expected_reward is not None and expected_reward > 0:
+            reward_risk_ratio = expected_reward / expected_risk
+
+    return {
+        "take_profit": tp,
+        "paper_trade": True,
+        "paper_slippage_bps": getattr(cfg, "paper_slippage_bps", 5.0),
+        "paper_spread_bps": getattr(cfg, "paper_spread_bps", 10.0),
+        "paper_market_open_gap_bps": getattr(cfg, "paper_market_open_gap_bps", 0.0),
+        # Analytics fields — written to orders table for confidence-band analysis
+        "confidence_score": approved.confidence,
+        "reward_risk_ratio": reward_risk_ratio,
+        "entry_price": entry,
+        "stop_price": stop,
+        "take_profit_price": tp,
+        "expected_reward": expected_reward,
+        "expected_risk": expected_risk,
+        "time_bucket": _order_time_bucket(datetime.now(timezone.utc)),
+        "strategy_id": approved.strategy_id,
+    }
+
 
 class ExecutionService:
     """Main execution engine service.
@@ -620,6 +681,12 @@ class ExecutionService:
         # rather than silently disappearing until the gather propagates the exception.
         def _on_task_done(task: asyncio.Task) -> None:
             if task.cancelled():
+                if task.get_name() == "execution-mis-square-off":
+                    logger.critical(
+                        "execution_engine.mis_task_cancelled — MIS square-off task was "
+                        "cancelled before market close. Open positions may not be squared "
+                        "off. Restart execution_engine immediately.",
+                    )
                 return
             exc = task.exception()
             if exc is not None:
@@ -2020,6 +2087,41 @@ class ExecutionService:
         side = OrderSide(approved.direction.upper())
         market = Market(approved.market.upper())
 
+        # Direction conflict guard (paper and live paths both protected).
+        # Paper path re-checks inside _handle_paper_order for the same reason;
+        # the live path check here avoids reaching execute_approved_signal at all.
+        if self._order_manager is not None and not approved.paper_trade:
+            _conflict, _existing_dir, _existing_qty = (
+                await self._order_manager.check_direction_conflict(
+                    symbol=approved.symbol,
+                    new_side=side,
+                    fail_open=False,  # live mode: fail-closed on position store outage
+                )
+            )
+            if _conflict:
+                _reason = (
+                    "POSITION_STORE_UNAVAILABLE"
+                    if _existing_dir == "POSITION_STORE_UNAVAILABLE"
+                    else "DIRECTION_CONFLICT_EXISTING_POSITION"
+                )
+                logger.warning(
+                    "execution_service.direction_conflict_rejected",
+                    signal_id=approved.signal_id,
+                    strategy_id=approved.strategy_id,
+                    symbol=approved.symbol,
+                    new_side=side.value,
+                    existing_direction=_existing_dir,
+                    existing_qty=_existing_qty,
+                    reason=_reason,
+                )
+                self._live_counters.netting_conflicts_seen += 1
+                self._live_counters.netting_conflicts_rejected += 1
+                if _reason == "POSITION_STORE_UNAVAILABLE":
+                    # Correct fail-closed live behavior — entry rejected due to store outage.
+                    # This is expected and allowed. The dangerous counter (allow_through) stays 0.
+                    self._live_counters.netting_store_outage_live_rejected += 1
+                return True
+
         # ── Phase 3: paper_trade routing ──────────────────────────────────────
         if approved.paper_trade:
             try:
@@ -2240,6 +2342,37 @@ class ExecutionService:
                 )
                 return
 
+        # Direction conflict guard: reject entry signals that would net against
+        # an existing open position in the opposite direction. Only explicit TEE
+        # exit orders (which bypass this path entirely) may reduce a position.
+        if self._order_manager is not None:
+            conflict, existing_dir, existing_qty = (
+                await self._order_manager.check_direction_conflict(
+                    symbol=approved.symbol,
+                    new_side=side,
+                    fail_open=True,  # paper mode: warn and allow on position store outage
+                )
+            )
+            if conflict:
+                logger.warning(
+                    "execution_service.direction_conflict_rejected",
+                    signal_id=approved.signal_id,
+                    strategy_id=approved.strategy_id,
+                    symbol=approved.symbol,
+                    new_side=side.value,
+                    existing_direction=existing_dir,
+                    existing_qty=existing_qty,
+                    reason="DIRECTION_CONFLICT_EXISTING_POSITION",
+                    detail=(
+                        "Entry signal rejected — an open position in the opposite "
+                        "direction already exists. Only explicit TEE exit orders "
+                        "may close or reduce this position."
+                    ),
+                )
+                self._live_counters.netting_conflicts_seen += 1
+                self._live_counters.netting_conflicts_rejected += 1
+                return
+
         paper_order_id = f"PAPER-{_uuid.uuid4().hex[:16].upper()}"
         cfg = self._settings.execution
         latency_ms = int(getattr(cfg, "paper_latency_ms", 250))
@@ -2311,13 +2444,7 @@ class ExecutionService:
                     product_type=ProductType(approved.product_type),
                     stop_price=approved.stop_loss,
                     limit_price=approved.price_at_signal,
-                    metadata={
-                        "take_profit": approved.take_profit,
-                        "paper_trade": True,
-                        "paper_slippage_bps": getattr(cfg, "paper_slippage_bps", 5.0),
-                        "paper_spread_bps": getattr(cfg, "paper_spread_bps", 10.0),
-                        "paper_market_open_gap_bps": getattr(cfg, "paper_market_open_gap_bps", 0.0),
-                    },
+                    metadata=_build_paper_order_metadata(approved, cfg),
                     created_at=datetime.now(timezone.utc),
                 )
                 paper_resp = OrderResponse(
@@ -2434,12 +2561,15 @@ class ExecutionService:
             # Exits bypass the signal pipeline — stop_price is carried directly from
             # the risk-approved signal and is never counted against signals_today.
             try:
-                await self._order_manager.attach_exit_policy(
+                policy_attached = await self._order_manager.attach_exit_policy(
                     symbol=approved.symbol,
                     stop_price=approved.stop_loss,
                     take_profit=approved.take_profit,
                     policy_id=f"POLICY-{approved.signal_id}",
+                    entry_signal_id=approved.signal_id,
                 )
+                if not policy_attached:
+                    self._live_counters.netting_policy_overwrite_blocked += 1
             except Exception:
                 logger.exception(
                     "execution_service.paper_attach_exit_policy_error",
