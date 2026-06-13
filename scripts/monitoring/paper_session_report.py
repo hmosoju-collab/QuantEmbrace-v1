@@ -157,6 +157,21 @@ class CircuitBreakerEvents:
 
 
 @dataclass
+class ModelAccuracy:
+    total:       int = 0
+    labeled:     int = 0
+    correct:     int = 0
+    incorrect:   int = 0
+    unlabelable: int = 0
+    pending:     int = 0
+
+    @property
+    def accuracy_pct(self) -> float:
+        denom = self.correct + self.incorrect
+        return 100.0 * self.correct / denom if denom else 0.0
+
+
+@dataclass
 class AlphaMetrics:
     total_forecasts:  int   = 0
     labeled:          int   = 0    # outcome known (LABELED)
@@ -164,6 +179,7 @@ class AlphaMetrics:
     incorrect:        int   = 0    # labeled + hit=False
     unlabelable:      int   = 0    # price didn't move enough to determine outcome
     pending:          int   = 0    # horizon not yet expired
+    by_model:         dict  = field(default_factory=dict)  # model_id → ModelAccuracy
 
     @property
     def accuracy_pct(self) -> float:
@@ -392,24 +408,35 @@ def _fetch_alpha_metrics(
             TableName=table_name,
             KeyConditionExpression="PK = :pk",
             ExpressionAttributeValues={":pk": {"S": pk}},
-            ProjectionExpression="label_status,hit",
+            ProjectionExpression="label_status,hit,model_id",
         )
         for page in pages:
             for item in page.get("Items", []):
                 metrics.total_forecasts += 1
+                model_id = item.get("model_id", {}).get("S", "unknown")
+                if model_id not in metrics.by_model:
+                    metrics.by_model[model_id] = ModelAccuracy()
+                m = metrics.by_model[model_id]
+                m.total += 1
+
                 status = item.get("label_status", {}).get("S", "PENDING")
                 if status == "LABELED":
                     metrics.labeled += 1
+                    m.labeled += 1
                     hit_val = item.get("hit", {})
                     is_hit = hit_val.get("BOOL", False) if isinstance(hit_val, dict) else False
                     if is_hit:
                         metrics.correct += 1
+                        m.correct += 1
                     else:
                         metrics.incorrect += 1
+                        m.incorrect += 1
                 elif status == "UNLABELABLE":
                     metrics.unlabelable += 1
+                    m.unlabelable += 1
                 else:
                     metrics.pending += 1
+                    m.pending += 1
     except Exception:
         pass
     return metrics
@@ -548,6 +575,12 @@ def _render_console(report: SessionReport) -> None:
         print(f"    Incorrect:          {a.incorrect}")
         print(f"  Unlabelable:          {a.unlabelable}  (price didn't move enough)")
         print(f"  Still pending:        {a.pending}  (horizon not expired)")
+        if a.by_model:
+            print(f"  {'Model':<32} {'Total':>6} {'Labeled':>8} {'Acc%':>7} {'Pending':>8}")
+            print(f"  {'-'*65}")
+            for mid, m in sorted(a.by_model.items()):
+                acc_m = f"{m.accuracy_pct:.1f}%" if (m.correct + m.incorrect) > 0 else "—"
+                print(f"  {mid:<32} {m.total:>6} {m.labeled:>8} {acc_m:>7} {m.pending:>8}")
 
     print(f"\n{_CYAN}{_BOLD}Go-Live Readiness Checks{_RESET}")
     for check, verdict in report.readiness_checks.items():
