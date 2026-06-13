@@ -36,7 +36,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import queue
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -102,7 +104,7 @@ def _prime_session(session: requests.Session, verbose: bool = True) -> bool:
     if verbose:
         print("Priming NSE session (bot-shield bypass)...", end=" ", flush=True)
     try:
-        resp = session.get(NSE_HOME, timeout=20, headers=BROWSER_HEADERS)
+        resp = session.get(NSE_HOME, timeout=5, headers=BROWSER_HEADERS)
         resp.raise_for_status()
         if verbose:
             print(f"OK (status={resp.status_code}, cookies={len(session.cookies)})")
@@ -118,7 +120,27 @@ def _build_session() -> requests.Session:
     """Create a requests session with browser-like headers and NSE cookies."""
     s = requests.Session()
     s.headers.update(BROWSER_HEADERS)
-    _prime_session(s)
+    # Run priming in a daemon thread so a hung TLS handshake can't block the main loop.
+    # The daemon thread is abandoned if it exceeds the timeout; the process exits cleanly.
+    result_q: queue.Queue = queue.Queue()
+
+    def _prime_worker():
+        try:
+            ok = _prime_session(s, verbose=False)
+            result_q.put(("ok", ok))
+        except Exception as e:
+            result_q.put(("err", e))
+
+    t = threading.Thread(target=_prime_worker, daemon=True)
+    t.start()
+    try:
+        kind, val = result_q.get(timeout=8)
+        if kind == "ok" and val:
+            print("Priming NSE session (bot-shield bypass)... OK")
+        else:
+            print(f"Priming NSE session (bot-shield bypass)... WARN: {val if kind == 'err' else 'non-200'}")
+    except queue.Empty:
+        print("Priming NSE session (bot-shield bypass)... WARN: timed out — continuing without cookies")
     return s
 
 
