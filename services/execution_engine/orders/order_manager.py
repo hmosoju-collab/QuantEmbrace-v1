@@ -1309,15 +1309,11 @@ class OrderManager:
                 risk_approval_time=risk_approval_time,
             )
 
-            # Best-effort NAV update in risk-state table.
-            # This allows the risk engine's NAV refresh loop to pick up the
-            # latest portfolio value without a full position scan.
-            # We write portfolio_value = opening_capital + realized_pnl_running.
-            # Unrealized P&L is excluded here (refreshed on next positions scan).
+            # Best-effort NAV update so the risk engine's NAV refresh loop can
+            # pick up the latest portfolio value without a full position scan.
+            # Only exit fills (realized_pnl_delta != 0) trigger a write.
             await self._write_nav_snapshot(
-                side=side,
-                filled_quantity=filled_quantity,
-                avg_fill_price=avg_fill_price,
+                realized_pnl_delta=realized_pnl - old_realized,
             )
 
             return True
@@ -1464,55 +1460,39 @@ class OrderManager:
             )
             return False
 
-    async def _write_nav_snapshot(
-        self,
-        side: "OrderSide",
-        filled_quantity: float,
-        avg_fill_price: float,
-    ) -> None:
+    async def _write_nav_snapshot(self, realized_pnl_delta: float) -> None:
         """
-        Atomically update the running portfolio NAV in DynamoDB after a fill.
+        Atomically add this fill's realized P&L to the portfolio NAV in DynamoDB.
 
-        Writes to the risk-state table so the risk engine's NAV refresh loop
-        can read current portfolio value without a full position scan.
+        Uses a realized-pnl-delta ADD rather than a cash-flow accumulator.
+        The risk_engine's loss_validator.record_fill does a put_item (full
+        replace) on the same NAV#CURRENT item — a cash-flow accumulator loses
+        its running total on every such write, causing the corruption observed
+        in Session 17 (Bug 6: nav = seed − close_notional).
 
-        The NAV item stores:
-            portfolio_value  — opening_capital + cumulative realized_pnl
-            last_fill_at     — UTC ISO timestamp of last fill
-            updated_at       — UTC ISO timestamp of this write
+        The ADD is idempotent for entry fills: realized_pnl_delta == 0 on
+        any fill that does not close or reduce a position, so those are skipped.
+        Only exits (TEE stop/TP/trailing, MIS square-off) update the NAV item.
 
-        This is a best-effort write. If it fails, the risk engine continues
-        using its last known NAV value (at most 30s stale) and logs a warning.
+        The DynamoDB expression ``if_not_exists(portfolio_value, :opening_nav)``
+        initialises the field to opening_nav when the item has just been created
+        or was last written by loss_validator (which sets portfolio_value but may
+        not carry forward the same opening_nav reference).
 
         Args:
-            side:            BUY or SELL.
-            filled_quantity: Shares filled.
-            avg_fill_price:  Average fill price.
+            realized_pnl_delta: Change in realized P&L from this fill.
+                                Positive = profitable exit, negative = loss exit.
+                                Zero = entry fill (skipped — no write issued).
         """
         if self._dynamo is None or not self._risk_state_table:
             return
 
+        if abs(realized_pnl_delta) < 1e-9:
+            return  # entry fill — no realized P&L change, skip write
+
         try:
             now = utc_iso()
-            fill_value = filled_quantity * avg_fill_price
-
-            # For a SELL, cash increases. For a BUY, cash decreases. This is a
-            # cash-flow NAV approximation; risk_engine.record_fill writes the
-            # realized-PnL NAV fields used for daily-loss gating.
-            cash_delta = fill_value if side == OrderSide.SELL else -fill_value
-            existing = await asyncio.to_thread(
-                self._dynamo.get_item,
-                TableName=self._risk_state_table,
-                Key=nav_key(),
-            )
-            old_cash = float(
-                (existing.get("Item") or {})
-                .get("realized_cash_flow", {})
-                .get("N", "0")
-            )
-            new_cash = old_cash + cash_delta
             opening_nav = float(getattr(self._settings, "portfolio_value", 1_000_000.0))
-            portfolio_value = opening_nav + new_cash
 
             await asyncio.to_thread(
                 self._dynamo.update_item,
@@ -1520,12 +1500,12 @@ class OrderManager:
                 Key=nav_key(),
                 UpdateExpression=(
                     "SET last_fill_at = :ts, updated_at = :ts, "
-                    "realized_cash_flow = :cash, portfolio_value = :nav"
+                    "portfolio_value = if_not_exists(portfolio_value, :opening_nav) + :delta"
                 ),
                 ExpressionAttributeValues={
                     ":ts": {"S": now},
-                    ":cash": {"N": str(new_cash)},
-                    ":nav": {"N": str(portfolio_value)},
+                    ":opening_nav": {"N": str(opening_nav)},
+                    ":delta": {"N": str(realized_pnl_delta)},
                 },
             )
         except Exception:

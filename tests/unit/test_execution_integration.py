@@ -267,8 +267,8 @@ class FakeDynamoClient:
                 ":sym": "symbol",
                 ":direction": "direction",
                 ":product": "product",
-                ":cash": "realized_cash_flow",
-                ":nav": "portfolio_value",
+                ":cash": "realized_cash_flow",  # legacy — no longer written by _write_nav_snapshot
+                ":nav": "portfolio_value",       # legacy — no longer written by _write_nav_snapshot
             }
             for expr_key, item_key in mapping.items():
                 if expr_key in ExpressionAttributeValues:
@@ -287,9 +287,13 @@ class FakeDynamoClient:
             if ":cost" in ExpressionAttributeValues:
                 item["cost_basis"] = ExpressionAttributeValues[":cost"]
             if ":delta" in ExpressionAttributeValues:
-                current = float(item.get("realized_cash_flow", {}).get("N", "0"))
+                # Simulate: portfolio_value = if_not_exists(portfolio_value, :opening_nav) + :delta
+                opening_nav = float(
+                    ExpressionAttributeValues.get(":opening_nav", {}).get("N", "1000000")
+                )
+                current = float(item.get("portfolio_value", {}).get("N", str(opening_nav)))
                 delta = float(ExpressionAttributeValues[":delta"]["N"])
-                item["realized_cash_flow"] = {"N": str(current + delta)}
+                item["portfolio_value"] = {"N": str(current + delta)}
 
         return {}
 
