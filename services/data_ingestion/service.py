@@ -713,11 +713,17 @@ class DataIngestionService:
                     try:
                         instrument_tokens = await zerodha_broker.get_instrument_tokens(
                             exchange="NSE",
-                            symbols=set(nse_symbols),  # always scoped to our universe
+                            # Include NIFTY 50 index so both ORBStrategy and
+                            # IntradayTrend15mStrategy receive NIFTY bars for
+                            # their NiftyRegimeGate VWAP computation.  The
+                            # strategies skip NIFTY as a tradeable symbol
+                            # (guard: if symbol == nifty_gate.symbol: return).
+                            symbols=set(nse_symbols) | {"NIFTY 50"},
                         )
                         logger.info(
                             "feature_pipeline.tokens_resolved",
                             symbol_count=len(instrument_tokens),
+                            nifty_gate_subscribed="NSE:NIFTY 50" in instrument_tokens,
                         )
                     except Exception:
                         logger.exception(
