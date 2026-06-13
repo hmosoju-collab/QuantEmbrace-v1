@@ -1302,12 +1302,12 @@ not committed. Sessions 10–17 ran with this fix on disk but not in git HEAD.
 - [x] ~~S3 bucket creation in setup~~ — verified 2026-06-10: `_create_s3_buckets()` in `setup_local_tables.py` creates `{prefix}-data` and `{prefix}-logs` (fix landed after Session 13).
 - [x] ~~Rebuild ALL service images~~ — done post-close 2026-06-10: strategy_engine, risk_engine, execution_engine rebuilt and **verified to contain ADR-030 code** (_viability.py, orb_v2, _threshold_for, GLOBAL_DAILY_ENTRY_LIMIT, YAML max_trades_per_day=15).
 
-### Week-2 items (committee roadmap — not started)
+### Week-2 items (committee roadmap)
 
-- [ ] intraday_trend_15m 15m warm-up replay from candle history (strategy cannot fire without it — needs 52×15m bars, buffers reset nightly)
-- [ ] Persist `strategy_id` to positions table at fill time (per-strategy P&L attribution)
-- [ ] NIFTY index regime gate (longs above day-VWAP / shorts below) for trend_15m + ORB
-- [ ] Gross-vs-net cost attribution line in `paper_session_report.py`
+- [x] ~~intraday_trend_15m 15m warm-up replay from candle history~~ — done 2026-06-13 (commit 3139873): `initialize()`/`get_state()` override in `IntradayTrend15mStrategy`; OHLCV deques persist across sessions via `{prefix}-strategy-state` DynamoDB table; daily counters reset on new IST day; 21 tests.
+- [x] ~~Persist `strategy_name` to positions table at fill time~~ — done 2026-06-13 (commit 2623d9a): `order_manager.py` sets `strategy_name` on fill record; execution_engine service propagates.
+- [x] ~~NIFTY index regime gate (longs above day-VWAP / shorts below) for trend_15m + ORB~~ — done 2026-06-13 (commit 3139873): `NiftyRegimeGate` in `nifty_regime_gate.py`; wired into both ORB and trend_15m; fails-open when no NIFTY data; auto-resets at IST day boundary; 26 tests. NIFTY 50 candle subscription activated commit f1dfc8c (data_ingestion now includes `"NIFTY 50"` in instrument_tokens at startup; gate no longer fails-open in real sessions).
+- [x] ~~Gross-vs-net cost attribution line in `paper_session_report.py`~~ — done 2026-06-13 (commit 2623d9a): gross P&L line added alongside net P&L in session report output.
 
 ### HIGH-004 — ✅ FULLY CLOSED (fix validated Session 13, 2026-06-09)
 
@@ -1340,6 +1340,6 @@ to `alpha.opportunities` Kafka topic. Labels matured forecasts every 5min. EOD r
 
 **Remaining PLANNED work (not blocking paper sessions):**
 - [ ] alpha.opportunities consumer → self-improvement assistant integration
-- [ ] Alpha accuracy stats in per-strategy breakdown (requires strategy_id on forecasts)
+- [x] ~~Alpha accuracy stats in per-model breakdown~~ — done 2026-06-13 (commit 78e947b): `ModelAccuracy` dataclass, `by_model` field in `AlphaMetrics`, `_fetch_alpha_metrics` groups by `model_id` from DynamoDB; per-model table rendered in alpha section; 19 tests.
 - [ ] alpha_engine champion-challenger promotion workflow (ADR-031 #9)
 - [ ] AWS Phase 9: model dataset generation from labeled alpha-forecasts

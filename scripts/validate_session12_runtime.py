@@ -47,6 +47,11 @@ _HOST_SYMBOL_COUNT_PATH = _REPO_ROOT / "services/risk_engine/validators/symbol_t
 _HOST_SERVICE_PATH      = _REPO_ROOT / "services/risk_engine/service.py"
 _HOST_YAML_PATH         = _REPO_ROOT / "services/strategy_engine/config/paper_optimization.yaml"
 
+# Week-2 feature paths (ADR-031 follow-up)
+_HOST_NIFTY_GATE_PATH       = _REPO_ROOT / "services/strategy_engine/strategies/nifty_regime_gate.py"
+_HOST_TREND_15M_PATH        = _REPO_ROOT / "services/strategy_engine/strategies/intraday_trend_15m_strategy.py"
+_CONTAINER_STRATEGY_ENGINE  = "quantembrace-ahedgelevelalgotradingsystem-strategy_engine-1"
+
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 # Confidence thresholds used in synthetic signal injection test
@@ -337,7 +342,47 @@ def run_checks(prefix: str, endpoint: str) -> list[tuple[str, bool]]:
     passed = live_enabled_raw in ("", "false", "0", "no")
     results.append((label, passed))
 
-    # ── Checks 8 & 9: Synthetic signal injection ──────────────────────────────
+    # ── Check 8: NIFTY regime gate module exists (Week-2 / ADR-031) ──────────
+    label = "nifty_regime_gate.py exists (NIFTY regime gate deployed)"
+    strategy_engine_running = _check_container_running(_CONTAINER_STRATEGY_ENGINE)
+    if strategy_engine_running:
+        passed = _check_container_file(
+            _CONTAINER_STRATEGY_ENGINE,
+            "/app/services/strategy_engine/strategies/nifty_regime_gate.py",
+        )
+    else:
+        passed = _HOST_NIFTY_GATE_PATH.exists()
+    results.append((label, passed))
+
+    # ── Check 9: trend_15m warm-start hooks wired (Week-2 / ADR-031) ─────────
+    label = "IntradayTrend15mStrategy.initialize() override present (warm-start wired)"
+    warm_start_pattern = "async def initialize"
+    if strategy_engine_running:
+        passed = _grep_container_file(
+            _CONTAINER_STRATEGY_ENGINE,
+            "/app/services/strategy_engine/strategies/intraday_trend_15m_strategy.py",
+            warm_start_pattern,
+        )
+    else:
+        passed = _HOST_TREND_15M_PATH.exists() and _grep_host_file(
+            _HOST_TREND_15M_PATH, warm_start_pattern
+        )
+    results.append((label, passed))
+
+    # ── Check 10: strategy-state DynamoDB table exists (warm-start persistence) ─
+    label = "strategy-state DynamoDB table exists (trend_15m warm-start persistence)"
+    strategy_state_table = f"{prefix}-strategy-state"
+    try:
+        if dynamo is not None:
+            dynamo.describe_table(TableName=strategy_state_table)
+            passed = True
+        else:
+            passed = False
+    except Exception:
+        passed = False
+    results.append((label, passed))
+
+    # ── Checks 11 & 12: Synthetic signal injection ───────────────────────────
     # Only possible when the container is running.
     if container_running:
         low_signal_id  = f"validate-low-{uuid.uuid4().hex[:8]}"
@@ -422,7 +467,7 @@ def main() -> None:
 
     print()
     print("=" * 72)
-    print("  QuantEmbrace — Session 12 Runtime Validation")
+    print("  QuantEmbrace — Pre-Session Runtime Validation (quality gates + Week-2)")
     print(f"  prefix={args.prefix}  endpoint={args.endpoint}")
     print(f"  {datetime.now(_IST).strftime('%Y-%m-%d %H:%M:%S IST')}")
     print("=" * 72)
@@ -441,13 +486,15 @@ def main() -> None:
     print()
     print("=" * 72)
     if all_pass:
-        print("  Session 12 runtime validation: PASS")
-        print("  All quality-gate checks passed. Safe to start paper session.")
+        print("  Pre-session runtime validation: PASS")
+        print("  All checks passed (quality gates + Week-2 features). Safe to start paper session.")
     else:
         failed = sum(1 for _, p in results if not p)
-        print(f"  Session 12 runtime validation: FAIL  ({failed} check(s) failed)")
+        print(f"  Pre-session runtime validation: FAIL  ({failed} check(s) failed)")
         print("  Do NOT start a paper session until all checks pass.")
-        print("  Common fix: docker-compose build risk_engine && docker-compose up -d risk_engine")
+        print("  Common fixes:")
+        print("    docker-compose build risk_engine strategy_engine && docker-compose up -d")
+        print("    python scripts/setup_local_tables.py  # creates strategy-state table")
     print("=" * 72)
     print()
 
