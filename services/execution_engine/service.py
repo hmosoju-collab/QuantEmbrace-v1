@@ -2178,6 +2178,7 @@ class ExecutionService:
                         order_type=OrderType.MARKET.value,
                         market_str=market.value,
                         signal_price=approved.price_at_signal,
+                        strategy_name=approved.strategy_id or None,
                     )
                 await self._kafka_order_publisher.publish_fill(
                     order_id=response.order_id,
@@ -2548,6 +2549,7 @@ class ExecutionService:
                     signal_id=approved.signal_id,
                     risk_decision_id=approved.risk_decision_id,
                     market_str=approved.market,
+                    strategy_name=approved.strategy_id or None,
                 )
             except Exception:
                 logger.exception(

@@ -1135,6 +1135,7 @@ class OrderManager:
         tick_time: Optional[str] = None,
         signal_time: Optional[str] = None,
         risk_approval_time: Optional[str] = None,
+        strategy_name: Optional[str] = None,
     ) -> bool:
         """
         Atomically update the positions table to reflect a confirmed fill.
@@ -1261,6 +1262,9 @@ class OrderManager:
                     "product = :product, "
                     "updated_at = :ts"
                 )
+                if strategy_name:
+                    _set_clause += ", strategy_name = :strategy_name"
+                    expr_values[":strategy_name"] = {"S": strategy_name}
                 if direction != "FLAT":
                     _set_clause += " REMOVE exit_order_id, exit_trigger, exit_state"
 

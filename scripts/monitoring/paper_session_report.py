@@ -122,14 +122,17 @@ class RejectionBreakdown:
 
 @dataclass
 class ExecutionMetrics:
-    total_orders:       int   = 0
-    filled:             int   = 0
-    partially_filled:   int   = 0
-    rejected:           int   = 0
-    cancelled:          int   = 0
-    avg_slippage_pct:   float = 0.0
-    max_slippage_pct:   float = 0.0
-    avg_fill_latency_ms:float = 0.0
+    total_orders:           int   = 0
+    filled:                 int   = 0
+    partially_filled:       int   = 0
+    rejected:               int   = 0
+    cancelled:              int   = 0
+    avg_slippage_pct:       float = 0.0
+    max_slippage_pct:       float = 0.0
+    avg_fill_latency_ms:    float = 0.0
+    # Gross-vs-net cost attribution (India Cost Mandate: 20bps round-trip)
+    total_fill_notional:    float = 0.0   # ∑ fill_price × qty for filled orders
+    estimated_costs_inr:    float = 0.0   # total_fill_notional × 20bps
 
 
 @dataclass
@@ -287,8 +290,14 @@ def _fetch_execution_metrics(
                     slip = float(item.get("slippage_pct", {}).get("N", "0"))
                     if slip:
                         slippages.append(slip)
+                    fill_price = float(item.get("avg_fill_price", {}).get("N", "0") or "0")
+                    fill_qty = float(item.get("filled_quantity", {}).get("N", "0") or "0")
+                    exec_m.total_fill_notional += fill_price * fill_qty
                 elif status in ("PARTIALLY_FILLED", "PAPER_PARTIAL"):
                     exec_m.partially_filled += 1
+                    fill_price = float(item.get("avg_fill_price", {}).get("N", "0") or "0")
+                    fill_qty = float(item.get("filled_quantity", {}).get("N", "0") or "0")
+                    exec_m.total_fill_notional += fill_price * fill_qty
                 elif status in ("REJECTED", "PAPER_REJECTED"):
                     exec_m.rejected += 1
                     reject_reason = item.get("reject_reason", {}).get("S", "other")
@@ -309,6 +318,8 @@ def _fetch_execution_metrics(
         if slippages:
             exec_m.avg_slippage_pct = sum(slippages) / len(slippages)
             exec_m.max_slippage_pct = max(slippages)
+        # 20bps round-trip cost per India Cost Mandate (STT + txn + GST + stamp + SEBI)
+        exec_m.estimated_costs_inr = exec_m.total_fill_notional * 0.002
 
     except Exception:
         pass
@@ -498,6 +509,14 @@ def _render_console(report: SessionReport) -> None:
     print(f"  Filled:          {e.filled}")
     print(f"  Avg slippage:    {e.avg_slippage_pct:.3f}%")
     print(f"  Max slippage:    {e.max_slippage_pct:.3f}%")
+
+    print(f"\n{_CYAN}{_BOLD}Cost Attribution (India Cost Mandate — 20bps round-trip){_RESET}")
+    if e.total_fill_notional > 0:
+        print(f"  Fill notional:        ₹{e.total_fill_notional:,.0f}")
+        print(f"  Est. transaction costs: ₹{e.estimated_costs_inr:,.0f}  (20bps on notional)")
+        print(f"  Strategy must clear:    {20:.0f}bps/trade to break even vs. costs")
+    else:
+        print(f"  No fills recorded — cost attribution unavailable.")
 
     print(f"\n{_CYAN}{_BOLD}Circuit Breaker Events{_RESET}")
     cb = report.circuit_breakers

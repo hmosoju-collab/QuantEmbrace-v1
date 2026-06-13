@@ -201,7 +201,8 @@ class AlpacaBroker(BrokerClient):
 
             # Verify credentials and log account state
             account = await asyncio.to_thread(self._client.get_account)
-            if account.status.value not in ("ACTIVE", "active"):
+            _status_str = account.status.value if hasattr(account.status, "value") else str(account.status)
+            if _status_str not in ("ACTIVE", "active"):
                 raise BrokerAPIError(
                     "Alpaca",
                     f"Account is not active (status={account.status})",
@@ -606,7 +607,8 @@ class AlpacaBroker(BrokerClient):
         Returns:
             An alpaca-py order request model ready for ``client.submit_order()``.
         """
-        side = AlpacaSide.BUY if order.side.value == "BUY" else AlpacaSide.SELL
+        _side_str = order.side.value if hasattr(order.side, "value") else str(order.side)
+        side = AlpacaSide.BUY if _side_str == "BUY" else AlpacaSide.SELL
         tif = _map_time_in_force(order.time_in_force)
 
         common: dict[str, Any] = {
@@ -636,7 +638,8 @@ class AlpacaBroker(BrokerClient):
             )
         # Default to market for unknown types
         logger.warning(
-            "Unknown order type %s — defaulting to MARKET", ot.value
+            "Unknown order type %s — defaulting to MARKET",
+            ot.value if hasattr(ot, "value") else ot,
         )
         return MarketOrderRequest(**common)
 
