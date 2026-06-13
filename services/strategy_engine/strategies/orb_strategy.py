@@ -49,6 +49,7 @@ from strategy_engine.strategies._math import atr_wilder
 from strategy_engine.strategies._position_sizer import size_position
 from strategy_engine.strategies._viability import check_signal_viability
 from strategy_engine.strategies.base_strategy import Bar, BaseStrategy
+from strategy_engine.strategies.nifty_regime_gate import NiftyRegimeGate
 
 logger = get_logger(__name__, service_name="strategy_engine")
 
@@ -98,8 +99,13 @@ class ORBStrategy(BaseStrategy):
         max_signals_per_day: int = 6,
         nav: float = 1_000_000.0,
         paper_trade: bool = True,
+        enable_nifty_gate: bool = True,
+        nifty_symbol: str = "NIFTY 50",
     ) -> None:
         super().__init__(name=name, symbols=symbols or [], market=market)
+        self._nifty_gate: NiftyRegimeGate | None = (
+            NiftyRegimeGate(nifty_symbol) if enable_nifty_gate else None
+        )
         self._or_end_minutes      = or_end_minutes
         self._min_or_range_mult   = min_or_range_atr_mult
         self._min_or_range_pct    = min_or_range_pct
@@ -150,7 +156,12 @@ class ORBStrategy(BaseStrategy):
 
     async def on_bar(self, bar: Bar) -> None:
         """Process a 1m confirmed candle."""
+        if self._nifty_gate is not None:
+            self._nifty_gate.on_bar(bar)
         symbol = bar.symbol
+        # Skip the NIFTY index itself — it is not a tradeable equity instrument
+        if self._nifty_gate is not None and symbol == self._nifty_gate.symbol:
+            return
         self._ensure_buffers(symbol)
 
         # Append to rolling history
@@ -245,27 +256,29 @@ class ORBStrategy(BaseStrategy):
 
         # BUY breakout: close above OR high + buffer (a 1-tick poke is not a breakout)
         if bar.close > or_high + buffer and "BUY" not in fired:
-            signal = self._build_signal(
-                bar=bar, direction=Direction.BUY,
-                or_high=or_high, or_low=or_low, vol_ratio=vol_ratio,
-            )
-            if signal is not None:
-                self._pending_signal = signal
-                self._signals_today += 1
-                fired.add("BUY")
-                self._signal_fired[symbol] = fired
+            if self._nifty_gate is None or self._nifty_gate.is_allowed(Direction.BUY):
+                signal = self._build_signal(
+                    bar=bar, direction=Direction.BUY,
+                    or_high=or_high, or_low=or_low, vol_ratio=vol_ratio,
+                )
+                if signal is not None:
+                    self._pending_signal = signal
+                    self._signals_today += 1
+                    fired.add("BUY")
+                    self._signal_fired[symbol] = fired
 
         # SELL breakdown: close below OR low - buffer
         elif bar.close < or_low - buffer and "SELL" not in fired:
-            signal = self._build_signal(
-                bar=bar, direction=Direction.SELL,
-                or_high=or_high, or_low=or_low, vol_ratio=vol_ratio,
-            )
-            if signal is not None:
-                self._pending_signal = signal
-                self._signals_today += 1
-                fired.add("SELL")
-                self._signal_fired[symbol] = fired
+            if self._nifty_gate is None or self._nifty_gate.is_allowed(Direction.SELL):
+                signal = self._build_signal(
+                    bar=bar, direction=Direction.SELL,
+                    or_high=or_high, or_low=or_low, vol_ratio=vol_ratio,
+                )
+                if signal is not None:
+                    self._pending_signal = signal
+                    self._signals_today += 1
+                    fired.add("SELL")
+                    self._signal_fired[symbol] = fired
 
     async def generate_signal(self) -> Optional[Signal]:
         signal = self._pending_signal

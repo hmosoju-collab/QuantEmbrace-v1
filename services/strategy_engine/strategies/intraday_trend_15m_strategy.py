@@ -35,6 +35,7 @@ from shared.models.signal import Direction, Signal
 from strategy_engine.strategies._math import adx, atr_wilder, ema_series
 from strategy_engine.strategies._position_sizer import size_position
 from strategy_engine.strategies.base_strategy import Bar, BaseStrategy
+from strategy_engine.strategies.nifty_regime_gate import NiftyRegimeGate
 
 logger = get_logger(__name__, service_name="strategy_engine")
 
@@ -42,12 +43,19 @@ _IST_NORMAL_START = 9 * 60 + 30    # 09:30 IST
 _IST_NORMAL_END   = 14 * 60 + 15   # 14:15 IST (30m buffer before pre-close)
 
 
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
 def _ist_min(dt: datetime) -> int:
     if dt.tzinfo is not None:
-        ist = dt.astimezone(timezone.utc) + timedelta(hours=5, minutes=30)
+        ist = dt.astimezone(timezone.utc) + _IST_OFFSET
     else:
-        ist = dt + timedelta(hours=5, minutes=30)
+        ist = dt + _IST_OFFSET
     return ist.hour * 60 + ist.minute
+
+
+def _today_ist() -> str:
+    return (datetime.now(timezone.utc) + _IST_OFFSET).strftime("%Y-%m-%d")
 
 
 class IntradayTrend15mStrategy(BaseStrategy):
@@ -93,8 +101,13 @@ class IntradayTrend15mStrategy(BaseStrategy):
         min_confidence: float = 0.65,
         nav: float = 1_000_000.0,
         paper_trade: bool = True,
+        enable_nifty_gate: bool = True,
+        nifty_symbol: str = "NIFTY 50",
     ) -> None:
         super().__init__(name=name, symbols=symbols or [], market=market)
+        self._nifty_gate: NiftyRegimeGate | None = (
+            NiftyRegimeGate(nifty_symbol) if enable_nifty_gate else None
+        )
         self._fast        = fast_ema
         self._slow        = slow_ema
         self._trend       = trend_ema
@@ -120,11 +133,72 @@ class IntradayTrend15mStrategy(BaseStrategy):
 
     # ── BaseStrategy interface ────────────────────────────────────────────────
 
+    async def initialize(self, saved_state: Optional["StrategyState"] = None) -> None:  # type: ignore[override]
+        """Restore OHLCV buffers from saved state for cross-session warm-start.
+
+        Buffers (closes/highs/lows) are kept across days so EMA/ADX can signal
+        immediately on session open instead of waiting 13 hours to rebuild.
+        Daily-scoped counters (signal_fired_today, bar_count) are reset when the
+        saved date differs from today (overnight restart).
+        """
+        from strategy_engine.strategies.base_strategy import StrategyState  # avoid circular at module level
+        await super().initialize(saved_state)
+        if saved_state is None or not saved_state.custom_state:
+            return
+
+        cs = saved_state.custom_state
+        today_ist = _today_ist()
+
+        for symbol, closes in (cs.get("closes") or {}).items():
+            self._ensure(symbol)
+            self._closes[symbol] = deque(list(closes)[-self._buf:], maxlen=self._buf)
+        for symbol, highs in (cs.get("highs") or {}).items():
+            self._ensure(symbol)
+            self._highs[symbol] = deque(list(highs)[-self._buf:], maxlen=self._buf)
+        for symbol, lows in (cs.get("lows") or {}).items():
+            self._ensure(symbol)
+            self._lows[symbol] = deque(list(lows)[-self._buf:], maxlen=self._buf)
+        for symbol, val in (cs.get("prev_fast_above") or {}).items():
+            self._prev_fast_above[symbol] = val
+
+        same_day = cs.get("saved_date") == today_ist
+        if same_day:
+            for symbol, dirs in (cs.get("signal_fired_today") or {}).items():
+                self._signal_fired_today[symbol] = set(dirs)
+            for symbol, count in (cs.get("bar_counts") or {}).items():
+                self._bar_count[symbol] = int(count)
+
+        buf_depth = max((len(v) for v in self._closes.values()), default=0)
+        logger.info(
+            "trend_15m.warm_start_restored",
+            symbols=len(self._closes),
+            buf_depth=buf_depth,
+            same_day=same_day,
+        )
+
+    def get_state(self) -> "StrategyState":
+        """Serialize OHLCV buffers into StrategyState for shutdown persistence."""
+        self._state.custom_state = {
+            "saved_date": _today_ist(),
+            "closes": {sym: list(dq) for sym, dq in self._closes.items()},
+            "highs": {sym: list(dq) for sym, dq in self._highs.items()},
+            "lows": {sym: list(dq) for sym, dq in self._lows.items()},
+            "prev_fast_above": dict(self._prev_fast_above),
+            "signal_fired_today": {sym: list(dirs) for sym, dirs in self._signal_fired_today.items()},
+            "bar_counts": dict(self._bar_count),
+        }
+        return self._state
+
     async def on_tick(self, symbol: str, price: float, volume: int, timestamp: datetime) -> None:
         pass
 
     async def on_bar(self, bar: Bar) -> None:
+        if self._nifty_gate is not None:
+            self._nifty_gate.on_bar(bar)
         symbol = bar.symbol
+        # Skip NIFTY index itself — not a tradeable equity instrument
+        if self._nifty_gate is not None and symbol == self._nifty_gate.symbol:
+            return
         self._ensure(symbol)
 
         self._closes[symbol].append(bar.close)
@@ -206,6 +280,11 @@ class IntradayTrend15mStrategy(BaseStrategy):
         confidence = min(1.0, 0.2 + conf_ema + conf_adx)
 
         if confidence < self._min_conf:
+            self._prev_fast_above[symbol] = fast_above_now
+            return
+
+        # NIFTY regime gate: BUY only above NIFTY VWAP; SELL only below it.
+        if self._nifty_gate is not None and not self._nifty_gate.is_allowed(direction):
             self._prev_fast_above[symbol] = fast_above_now
             return
 
