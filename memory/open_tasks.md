@@ -1249,17 +1249,20 @@ Until every box is checked from a real host run: **NO GO.**
 
 ---
 
-## Cross-Strategy Netting Protection — RESOLVED 2026-06-05
+## Cross-Strategy Netting Protection — COMMITTED 2026-06-13 (was in working tree since 2026-06-05)
 
 **ADR-028** · Triggered by: Session 10 (2026-06-05) UNIONBANK paper trade anomaly
+**Note**: Code was written 2026-06-05 but never committed until checkpoint commit `011ef9a`
+on 2026-06-13. The previous "RESOLVED 2026-06-05" date referred to when it was coded,
+not committed. Sessions 10–17 ran with this fix on disk but not in git HEAD.
 
 | Blocker | Status |
 |---|---|
-| Bug: competing entry signals net against open positions | ✅ FIXED — `check_direction_conflict` in `order_manager.py` |
-| Bug: `attach_exit_policy` overwrites active policy from different signal | ✅ FIXED — `entry_signal_id` guard in `order_manager.py` |
-| Live: fail-open on position-store outage | ✅ FIXED — `fail_open=False` in live path |
-| Reconciliation: no detection of entry-unwound-by-competing-entry | ✅ FIXED — `check_competing_entry_unwind` + `check_audit_chain` |
-| Monitoring: no visibility into netting protection state | ✅ FIXED — Section 16 in `paper_trading_monitor.py` |
+| Bug: competing entry signals net against open positions | ✅ COMMITTED — `check_direction_conflict` in `order_manager.py` (commit `011ef9a`) |
+| Bug: `attach_exit_policy` overwrites active policy from different signal | ✅ COMMITTED — `entry_signal_id` guard in `order_manager.py` (commit `011ef9a`) |
+| Live: fail-open on position-store outage | ✅ COMMITTED — `fail_open=False` in live path |
+| Reconciliation: no detection of entry-unwound-by-competing-entry | ✅ COMMITTED — `check_competing_entry_unwind` + `check_audit_chain` |
+| Monitoring: no visibility into netting protection state | ✅ COMMITTED — Section 16 in `paper_trading_monitor.py` |
 | Tests | ✅ 20 tests in `tests/unit/test_cross_strategy_netting.py` |
 
 ### Live Promotion Path for This Class: CONDITIONALLY UNBLOCKED

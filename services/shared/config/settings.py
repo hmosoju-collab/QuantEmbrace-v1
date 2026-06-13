@@ -292,13 +292,23 @@ class RiskConfig(BaseSettings):
         ),
     )
     data_feed_stale_seconds: float = Field(
-        default=300.0,
+        default=7200.0,
         description=(
-            "Seconds of silence on any market's signal feed before the data-staleness "
-            "auto-trigger fires. Candle strategies only emit signals when conditions "
-            "are met (e.g. VWAP crossing bands), so gaps of 2–3 minutes are normal "
-            "during quiet markets. Set env RISK_DATA_FEED_STALE_SECONDS to override. "
-            "Use 60 for tick-based strategies; 300 for candle strategies."
+            "Seconds of silence on any market's signal feed before the consumer-lag "
+            "auto-trigger fires. Under ADR-030's entry budget (≤15/day), risk_engine "
+            "can receive no signals for the entire afternoon after budget exhaustion — "
+            "normal, not a fault. Default 7200s (2hr). Real WebSocket deaths are "
+            "caught by producer_heartbeat_stale_seconds (much tighter). "
+            "Set env RISK_DATA_FEED_STALE_SECONDS to override."
+        ),
+    )
+    producer_heartbeat_stale_seconds: float = Field(
+        default=120.0,
+        description=(
+            "Seconds before data_ingestion's DynamoDB heartbeat key is considered stale. "
+            "data_ingestion writes the key every 10s; a dead WebSocket stops writes. "
+            "Default 120s tolerates LocalStack DynamoDB read latency spikes. "
+            "Set env RISK_PRODUCER_HEARTBEAT_STALE_SECONDS to override."
         ),
     )
     kafka_lag_halt_threshold_messages: int = Field(

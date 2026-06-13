@@ -1755,3 +1755,68 @@ auto-memory `strategy_pnl_root_causes_2026_06_10`).
 - `services/shared/monitoring/monitoring_status.py` — ENTRY_BLOCK read fixes
 - `scripts/monitoring/paper_trading_monitor.py` — latest-prices table name
 - `tests/unit/test_week1_entry_economics.py` — 33 tests (new file)
+
+---
+
+## ADR-031: alpha_engine — Shadow Alpha-Forecasting Layer (Untracked WIP, Secured 2026-06-13)
+
+**Date**: 2026-06-13 (secured in checkpoint commit `011ef9a`; original coding date unknown)
+**Status**: Committed but INACTIVE — not wired into live signal path, not validated
+
+### Context
+
+During the 2026-06-13 WIP checkpoint audit, a fully untracked service `services/alpha_engine/`
+was discovered on disk — never committed since its creation. It predates Sessions 16 & 17
+and was one `git checkout` away from being permanently lost. It was committed in checkpoint
+`011ef9a` as-is, without modification.
+
+### What It Is
+
+A shadow/advisory alpha-forecasting service that sits **outside** the live signal path.
+It is meant to run as an observer: label trades with realized outcomes, score strategies,
+and rank alpha sources. It does NOT generate signals, does NOT place orders, and has no
+connection to execution_engine or risk_engine.
+
+**Packages committed** (`services/alpha_engine/`):
+- `cost/` — NSE statutory cost model (STT, txn, GST, stamp, SEBI, margin) for alpha net-of-cost computation
+- `gates/kill_switch_gate.py` — advisory kill-switch gate (read-only; does not activate)
+- `labeling/` — trade labeling (entry/exit tagging, realized outcome computation)
+- `models/` — `alpha_model.py`, `registry.py`, `strategy_alpha_adapter.py` — model abstraction and strategy adapter
+- `publishers/alpha_shadow_publisher.py` — publishes alpha scores to a shadow Kafka topic (not created yet)
+- `ranking/` — alpha ranking and score aggregation
+- `research/` — research utilities (replay, correlation, attribution)
+- `store/` — alpha score persistence (DynamoDB + S3)
+- `universe/` — universe-level alpha scoring
+- `service.py` — service entrypoint (not in docker-compose; never started)
+
+**Also committed**:
+- `scripts/alpha/alpha_registry.py` — registry of alpha models for replay
+- `scripts/alpha/run_alpha_replay.py` — batch replay driver
+- `services/shared/models/alpha.py` — shared `AlphaScore` dataclass
+
+**Tests**: 11 test files in `tests/unit/test_alpha_*.py` + `tests/integration/test_alpha_shadow_flow.py`
+
+### Decisions
+
+1. **Not wired into live/paper path** — `alpha_engine` is never started by docker-compose and
+   has no Kafka consumer group registered against any production topic. Trading behavior is unchanged.
+
+2. **Not validated** — no paper session has been run with alpha_engine active. Score quality
+   and reliability are unknown. Do not use for trading decisions until validated.
+
+3. **No ADR yet for its design** — this ADR records its existence only. A full design ADR
+   is needed before any integration work begins.
+
+4. **Governance invariant applies** — consistent with CLAUDE.md: "GenAI can explain.
+   GenAI cannot trade." alpha_engine may produce recommendations; it must never change
+   trading behavior directly.
+
+5. **Coupling note** — `shared/models/__init__.py` imports `shared.models.alpha`; this means
+   all services transitively import the `AlphaScore` dataclass. This is a latent coupling that
+   should be cleaned up when alpha_engine is properly designed.
+
+### When To Pick Up
+
+- After ≥5 valid quality-gate paper sessions confirm ORB v2 / VWAP v2 edge
+- As a Week-3+ item, with its own design review and ADR
+- Must remain advisory-only: no output may flow into `signals.pending` or `signals.approved`

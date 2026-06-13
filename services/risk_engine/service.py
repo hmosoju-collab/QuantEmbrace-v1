@@ -217,7 +217,9 @@ class RiskEngineService:
             settings=self._settings,
             broker_timeout_secs=float("inf") if _is_paper else 30.0,
             consumer_lag_stale_secs=_consumer_lag_secs,
-            producer_heartbeat_stale_secs=60.0,
+            producer_heartbeat_stale_secs=getattr(
+                self._settings.risk, "producer_heartbeat_stale_seconds", 120.0
+            ),
             dynamo_client=self._dynamo,
             prices_table=getattr(self._settings.aws, "dynamodb_table_prices", None),
         )

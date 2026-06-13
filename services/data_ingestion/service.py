@@ -122,6 +122,7 @@ class DataIngestionService:
         # 10s so risk_engine's producer_heartbeat_monitor can detect a dead WebSocket
         # independently of Kafka consumer lag.
         self._producer_heartbeat_task: Optional[asyncio.Task[None]] = None
+        self._producer_heartbeat_watchdog_task: Optional[asyncio.Task[None]] = None
         # Health/readiness server — ASG target group polls :8080/health (liveness)
         # and :8080/ready (readiness) before marking instance InService.
         self._health_server = HealthServer(
@@ -227,13 +228,25 @@ class DataIngestionService:
             access_token=_zerodha_access_token,
             on_tick=self._tick_processor.process_tick,
         )
-        alpaca = AlpacaConnector(
-            api_key=self._settings.alpaca.api_key.get_secret_value(),
-            api_secret=self._settings.alpaca.api_secret.get_secret_value(),
-            base_url=self._settings.alpaca.data_url,
-            on_tick=self._tick_processor.process_tick,
+        _alpaca_key = self._settings.alpaca.api_key.get_secret_value()
+        _alpaca_placeholder = any(
+            marker in _alpaca_key.lower()
+            for marker in ("placeholder", "your_", "dummy", "fake", "changeme", "test_key")
         )
-        self._connectors = [zerodha, alpaca]
+        if _alpaca_placeholder:
+            logger.info(
+                "data_ingestion.alpaca_disabled — placeholder credentials detected; "
+                "Alpaca WebSocket will not be started (NSE paper mode)"
+            )
+            self._connectors = [zerodha]
+        else:
+            alpaca = AlpacaConnector(
+                api_key=_alpaca_key,
+                api_secret=self._settings.alpaca.api_secret.get_secret_value(),
+                base_url=self._settings.alpaca.data_url,
+                on_tick=self._tick_processor.process_tick,
+            )
+            self._connectors = [zerodha, alpaca]
 
         # ── 6. Register OS signal handlers for EC2 instance termination ───────
         loop = asyncio.get_running_loop()
@@ -270,6 +283,10 @@ class DataIngestionService:
         self._producer_heartbeat_task = asyncio.create_task(
             self._producer_heartbeat_loop(),
             name="data-ingestion-producer-heartbeat",
+        )
+        self._producer_heartbeat_watchdog_task = asyncio.create_task(
+            self._producer_heartbeat_watchdog(),
+            name="data-ingestion-producer-heartbeat-watchdog",
         )
 
         # ── 10. Register health checks and mark service ready ─────────────────
@@ -322,6 +339,14 @@ class DataIngestionService:
         # Signal load balancer / ASG to stop routing to this instance
         # before disconnecting — gives in-flight requests time to drain.
         self._health_server.set_ready(False)
+
+        # Stop heartbeat watchdog before the heartbeat task itself
+        if self._producer_heartbeat_watchdog_task is not None:
+            self._producer_heartbeat_watchdog_task.cancel()
+            try:
+                await self._producer_heartbeat_watchdog_task
+            except asyncio.CancelledError:
+                pass
 
         # Stop producer heartbeat writer — no more DynamoDB writes after shutdown
         if self._producer_heartbeat_task is not None:
@@ -519,6 +544,44 @@ class DataIngestionService:
                 logger.warning("producer_heartbeat_loop.write_failed — will retry", exc_info=True)
 
         logger.info("producer_heartbeat_loop.stopped market=%s", _MARKET)
+
+    async def _producer_heartbeat_watchdog(self) -> None:
+        """
+        Restart _producer_heartbeat_task if it dies unexpectedly.
+
+        Session 17 (2026-06-12): the heartbeat writer died silently at 13:10 IST.
+        Without a watchdog, risk_engine's producer_heartbeat_monitor eventually
+        fires a spurious kill switch because the DynamoDB key stops refreshing
+        even though the WebSocket is still alive.
+        """
+        _POLL = 30.0
+        while self._running:
+            try:
+                await asyncio.sleep(_POLL)
+                if not self._running:
+                    break
+                task = self._producer_heartbeat_task
+                if task is not None and task.done():
+                    exc = task.exception() if not task.cancelled() else None
+                    if exc:
+                        logger.error(
+                            "producer_heartbeat_watchdog.task_died_with_exception — restarting",
+                            exc_info=exc,
+                        )
+                    else:
+                        logger.warning(
+                            "producer_heartbeat_watchdog.task_ended_early — restarting"
+                        )
+                    self._producer_heartbeat_task = asyncio.create_task(
+                        self._producer_heartbeat_loop(),
+                        name="data-ingestion-producer-heartbeat",
+                    )
+                    logger.info("producer_heartbeat_watchdog.restarted")
+            except asyncio.CancelledError:
+                logger.debug("producer_heartbeat_watchdog.cancelled")
+                return
+            except Exception:
+                logger.exception("producer_heartbeat_watchdog.error — continuing")
 
     async def _setup_feature_pipeline(self) -> None:
         """

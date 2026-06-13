@@ -268,8 +268,12 @@ services:
       # Signal age limit — matches risk_limits_production.yaml max_signal_age_seconds: 30.
       # Default in code is 5.0s which rejects candle-based signals that take >5s to process.
       RISK_MAX_SIGNAL_AGE_SECONDS: "30"
-      # Raised from 300s — candle strategies have natural signal gaps >5min during quiet markets.
-      RISK_DATA_FEED_STALE_SECONDS: "900"
+      # Raised to 7200s (2hr): under ADR-030 budget exhaustion (≤15 entries/day),
+      # risk_engine can see zero signals for the entire afternoon — normal, not a fault.
+      # producer_heartbeat_monitor (Bug5b fix, 180s) now handles real WebSocket deaths.
+      RISK_DATA_FEED_STALE_SECONDS: "7200"
+      # Bug 5b: give LocalStack's DynamoDB read extra headroom vs the 60s default.
+      RISK_PRODUCER_HEARTBEAT_STALE_SECONDS: "180"
       LOG_LEVEL: INFO
       QE_HEALTH_CHECK_PORT: "8083"
     volumes:
