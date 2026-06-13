@@ -39,6 +39,10 @@ services:
     host: ai_engine
     port: 8085
     critical: false           # EnrichmentWatchdog falls back to risk-v1 if ai_engine lags
+  - name: alpha_engine
+    host: alpha_engine
+    port: 8087
+    critical: false           # advisory only — never touches signals.*/orders.*; pauses on kill switch
 
 # ── Kafka consumer groups (committed-offset lag, read-only) ───────────────────
 # warn_lag / critical_lag are Phase 2 thresholds. Phase 1 flags only a *missing*
@@ -80,6 +84,7 @@ topics:
   - name: orders.events
   - name: risk.kill-switch
   - name: ops.audit
+  - name: alpha.opportunities
 
 # ── DynamoDB tables (DescribeTable reachability, read-only) ───────────────────
 # `suffix` is appended to DYNAMODB_TABLE_PREFIX. Critical = capital/risk path.
@@ -109,6 +114,12 @@ dynamodb_tables:
     critical: false
   - suffix: strategy-state
     critical: false
+  - suffix: alpha-forecasts      # shadow forecast storage (advisory, ADR-031)
+    critical: false
+  - suffix: alpha-registry       # model champion/challenger registry
+    critical: false
+  - suffix: alpha-performance    # EOD rollup store
+    critical: false
 
 # ── Broker heartbeat (INFERRED from latest-prices freshness — no broker API) ──
 broker:
@@ -129,6 +140,7 @@ docker:
     - risk_engine
     - execution_engine
     - ai_engine
+    - alpha_engine
     - redpanda
     - localstack
   restart_warn: 1              # Phase 2: WARNING at/above this many restarts
@@ -157,6 +169,7 @@ container_logs:
     - risk_engine
     - execution_engine
     - ai_engine
+    - alpha_engine
 
   # ── BLOCKER: halt-level events — alert immediately ──────────────────────────
   blocker_patterns:

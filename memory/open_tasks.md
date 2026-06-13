@@ -1313,3 +1313,33 @@ not committed. Sessions 10–17 ran with this fix on disk but not in git HEAD.
 
 Fix: 60-second polling loop in `MISSquareOffManager.run()` + CRITICAL log on task cancellation.
 Evidence: `mis_square_off.all_positions_closed` at 15:05:13 IST — 3 positions closed before deadline.
+
+---
+
+## Alpha Engine (ADR-031) — ✅ PAPER-SESSION-INTEGRATED (2026-06-13)
+
+The alpha_engine shadow-forecast layer is now fully wired for paper sessions.
+
+**Status:** committed, 82/82 tests passing, started by `docker-compose up -d` (paper session stack).
+
+**What it does:** Polls candle-cache DynamoDB → drives shadow copies of ORB v2 / VWAP v2 / trend_15m
+→ fans out AlphaForecast per horizon (15/30/60m) → costs via CostModel → ranks cross-sectionally
+→ persists ALL forecasts to `{prefix}-alpha-forecasts` → publishes eligible (≥50bps net edge)
+to `alpha.opportunities` Kafka topic. Labels matured forecasts every 5min. EOD rollup at 15:35 IST.
+
+**Paper session integration completed 2026-06-13:**
+- `services/monitoring_agent/rules.yaml`: alpha_engine service health (non-critical), `alpha.opportunities` topic existence, alpha DynamoDB tables, Docker container watch, log scan
+- `scripts/monitoring/paper_session_report.py`: Alpha section showing forecast counts, label status, accuracy (gracefully shows "not running" when alpha not present)
+
+**ADVISORY ONLY — governance constraints (ADR-031 #4):**
+- Never publishes to `signals.*` / `orders.*`
+- Never places broker orders or reads risk-state for trading decisions
+- `AlphaShadowPublisher` allowlist = `frozenset({"alpha.opportunities"})` — hard-coded
+- Kill switch pauses forecast output (no store/publish) but does not stop alpha_engine
+- A human approves all production changes; alpha_engine may recommend, never promote
+
+**Remaining PLANNED work (not blocking paper sessions):**
+- [ ] alpha.opportunities consumer → self-improvement assistant integration
+- [ ] Alpha accuracy stats in per-strategy breakdown (requires strategy_id on forecasts)
+- [ ] alpha_engine champion-challenger promotion workflow (ADR-031 #9)
+- [ ] AWS Phase 9: model dataset generation from labeled alpha-forecasts

@@ -154,6 +154,21 @@ class CircuitBreakerEvents:
 
 
 @dataclass
+class AlphaMetrics:
+    total_forecasts:  int   = 0
+    labeled:          int   = 0    # outcome known (LABELED)
+    correct:          int   = 0    # labeled + hit=True
+    incorrect:        int   = 0    # labeled + hit=False
+    unlabelable:      int   = 0    # price didn't move enough to determine outcome
+    pending:          int   = 0    # horizon not yet expired
+
+    @property
+    def accuracy_pct(self) -> float:
+        denom = self.correct + self.incorrect
+        return 100.0 * self.correct / denom if denom else 0.0
+
+
+@dataclass
 class SessionReport:
     report_date:         str
     environment:         str
@@ -165,6 +180,7 @@ class SessionReport:
     execution:           ExecutionMetrics
     strategies:          list[StrategyMetrics]
     circuit_breakers:    CircuitBreakerEvents
+    alpha:               AlphaMetrics
     readiness_checks:    dict[str, str]   # metric_name → PASS|WARN|FAIL
     readiness_verdict:   str              # READY|NOT_READY|BORDERLINE
     notes:               list[str]
@@ -343,6 +359,51 @@ def _fetch_circuit_breaker_events(
     return events
 
 
+def _fetch_alpha_metrics(
+    dynamo,
+    table_prefix: str,
+    session_date: date,
+) -> AlphaMetrics:
+    """
+    Query {prefix}-alpha-forecasts for the session date (NSE market).
+
+    Schema: PK = DATE#{trade_date}#NSE, SK = {decision_ts_iso}#{forecast_id}.
+    label_status: PENDING | LABELED | UNLABELABLE
+    hit: True (correct) | False (incorrect) — present only when label_status=LABELED.
+    Returns zeroed AlphaMetrics if alpha_engine was not running or table is empty.
+    """
+    metrics = AlphaMetrics()
+    try:
+        table_name = f"{table_prefix}-alpha-forecasts"
+        pk = f"DATE#{session_date.isoformat()}#NSE"
+        paginator = dynamo.get_paginator("query")
+        pages = paginator.paginate(
+            TableName=table_name,
+            KeyConditionExpression="PK = :pk",
+            ExpressionAttributeValues={":pk": {"S": pk}},
+            ProjectionExpression="label_status,hit",
+        )
+        for page in pages:
+            for item in page.get("Items", []):
+                metrics.total_forecasts += 1
+                status = item.get("label_status", {}).get("S", "PENDING")
+                if status == "LABELED":
+                    metrics.labeled += 1
+                    hit_val = item.get("hit", {})
+                    is_hit = hit_val.get("BOOL", False) if isinstance(hit_val, dict) else False
+                    if is_hit:
+                        metrics.correct += 1
+                    else:
+                        metrics.incorrect += 1
+                elif status == "UNLABELABLE":
+                    metrics.unlabelable += 1
+                else:
+                    metrics.pending += 1
+    except Exception:
+        pass
+    return metrics
+
+
 # ── Readiness assessment ──────────────────────────────────────────────────────
 
 def _assess_readiness(
@@ -456,6 +517,19 @@ def _render_console(report: SessionReport) -> None:
             dd_str   = f"{st.max_drawdown:.2f}%" if st.max_drawdown != 0 else "—"
             print(f"  {st.name:<20} {st.signals:>7} {st.filled:>6} {pnl_str:>10} {sh_str:>7} {dd_str:>7}")
 
+    print(f"\n{_CYAN}{_BOLD}Alpha Engine (ADR-031 shadow forecasts){_RESET}")
+    a = report.alpha
+    if a.total_forecasts == 0:
+        print(f"  No forecasts recorded — alpha_engine not running or first session.")
+    else:
+        acc_str = f"{a.accuracy_pct:.1f}%" if (a.correct + a.incorrect) > 0 else "pending"
+        print(f"  Forecasts generated:  {a.total_forecasts}")
+        print(f"  Labeled:              {a.labeled}  ({acc_str} accuracy)")
+        print(f"    Correct:            {a.correct}")
+        print(f"    Incorrect:          {a.incorrect}")
+        print(f"  Unlabelable:          {a.unlabelable}  (price didn't move enough)")
+        print(f"  Still pending:        {a.pending}  (horizon not expired)")
+
     print(f"\n{_CYAN}{_BOLD}Go-Live Readiness Checks{_RESET}")
     for check, verdict in report.readiness_checks.items():
         icon = (f"{_GREEN}{PASS}{_RESET}" if verdict == "PASS"
@@ -524,6 +598,7 @@ def generate_report(session_date: date, n_days: int, env: str) -> int:
         exec_m, rej   = _fetch_execution_metrics(dynamo, tbl_prefix, target_date) if dynamo else (ExecutionMetrics(), RejectionBreakdown())
         strategies    = _fetch_strategy_metrics(dynamo, tbl_prefix, target_date)  if dynamo else []
         cb_events     = _fetch_circuit_breaker_events(dynamo, tbl_prefix, target_date) if dynamo else CircuitBreakerEvents()
+        alpha_m       = _fetch_alpha_metrics(dynamo, tbl_prefix, target_date)     if dynamo else AlphaMetrics()
 
         checks, verdict = _assess_readiness(signals, exec_m, rej, cb_events, strategies)
         all_verdicts.append(verdict)
@@ -556,6 +631,7 @@ def generate_report(session_date: date, n_days: int, env: str) -> int:
             execution        = exec_m,
             strategies       = strategies,
             circuit_breakers = cb_events,
+            alpha            = alpha_m,
             readiness_checks = checks,
             readiness_verdict= verdict,
             notes            = notes,
