@@ -24,6 +24,9 @@ session-archives/
 reports/
 archive/
 
+# Backtesting data lake — raw CSVs + Parquet lake (large, not committed)
+backtest-data/
+
 # Office / local planning docs — not source
 *.docx
 *.xlsx
