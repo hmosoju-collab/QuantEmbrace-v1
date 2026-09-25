@@ -3073,3 +3073,25 @@ Bedrock GenAI layer exists in `services/backtesting/genai/`.
   (family count not persisted) must be fixed before P6 hypothesis generation.
 - CI does not run `tests/qe` (F-13), so boundary tests are enforced locally only until a
   separately-approved CI change.
+
+---
+
+## ADR-034 correction note — regime overlay re-measured point-in-time (F-10, 2026-09-25)
+
+**Status:** Recorded · **Source:** `docs/architecture/current-state.md §10a` F-10, commit `c73fa19`.
+
+The ADR-034 addendum's "200d regime overlay HURTS" evidence used a market proxy ranked on
+**total-period** turnover (`regime_series` in `run_delivery_walkforward.py` / `qe/research/wf_v1.py`) —
+look-ahead. Re-measured on the real lake with `qe.research.regime.pit_regime_series` (walk-forward
+session `delivery-wf-20260925T215825Z-f45157455211`, snapshot `ds-e3d57f81dbab9cb8`, engine and v1
+headline numbers reproduced exactly):
+
+- **Delivery book: decision unchanged.** Overlay (PIT) Sharpe 1.20 vs 1.41 without (look-ahead
+  version said 1.17); CAGR 16.5% vs 23.7%; MaxDD −14.2% vs −22.2%; 18 cash months. Overlay stays
+  NOT adopted for the delivery book.
+- **EW benchmark leg: conclusion reverses.** PIT overlay improves the market proxy (Sharpe 0.99 →
+  1.16, MaxDD −25.8% → −17.5%); the look-ahead version showed it hurting (0.94). Any general claim
+  that a 200d trend filter "hurts" on this data was contaminated. This does not reopen the overlay
+  for the delivery book; a market-exposure overlay would need its own pre-registered study.
+- The verbatim v1 function is kept unchanged as a parity anchor and is labelled look-ahead in
+  every walk-forward report; the PIT rows are the evidence.

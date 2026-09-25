@@ -1,5 +1,23 @@
 # Delivery-% Factor — Walk-Forward + Market Regime Overlay
 
+> **Correction (2026-09-25, finding F-10 — `docs/architecture/current-state.md §10a`).** The overlay rows
+> below used a market proxy chosen from **total-period** turnover (look-ahead). Re-measured on the same lake
+> with a point-in-time proxy (`qe.research.regime.pit_regime_series`, walk-forward session
+> `delivery-wf-20260925T215825Z-f45157455211`, snapshot `ds-e3d57f81dbab9cb8`):
+>
+> | Variant | CAGR | Sharpe | MaxDD | cash months |
+> |---|---:|---:|---:|---:|
+> | delivery (no overlay) | 23.7% | 1.41 | −22.2% | 0 |
+> | delivery + overlay, look-ahead (as reported below) | 16.9% | 1.17 | −15.9% | 12 |
+> | **delivery + overlay, point-in-time** | **16.5%** | **1.20** | **−14.2%** | 18 |
+> | benchmark + overlay, look-ahead | 13.3% | 0.94 | −27.1% | 12 |
+> | **benchmark + overlay, point-in-time** | **15.7%** | **1.16** | **−17.5%** | 18 |
+>
+> **The delivery conclusion stands** (overlay still lowers Sharpe 1.41 → 1.20 and costs ~7 pts CAGR; not
+> adopted). **The benchmark leg flips:** point-in-time, the overlay *improves* the EW market proxy
+> (Sharpe 0.99 → 1.16, MaxDD −25.8% → −17.5%) — the look-ahead version wrongly showed it hurting.
+
+
 **Status:** COMPLETE — advisory. Live trading remains BLOCKED.
 **Date:** 2026-07-06
 **Thesis / ADR:** ADR-034 · `docs/strategy/strategy-thesis-redirection-2026-06-15.md`
