@@ -162,6 +162,8 @@ class ModelDatasetBuilder:
     # ── labels ──────────────────────────────────────────────────────────────────
     def add_labels(self, df: pd.DataFrame, *, threshold: float = 0.0) -> pd.DataFrame:
         df = df.copy()
+        if df.empty or "net_pnl" not in df.columns:
+            return df
         df["quality_label"] = (df["net_pnl"].astype(float) > threshold).astype(int)
         return df
 

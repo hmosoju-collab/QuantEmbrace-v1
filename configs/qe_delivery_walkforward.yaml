@@ -1,0 +1,42 @@
+name: delivery-wf
+mode: sim
+study_kind: walk_forward
+start_date: 2020-01-01
+end_date: 2025-06-30
+universe:
+  market: NSE
+  segment: EQ
+  symbols: null
+data:
+  lake_root: backtest-data/lake
+  interval: 1d
+journal_dir: journals
+seed_nav: 1000000.0
+strategy:
+  kind: factor_book
+  factor: delivery
+  top_n: 200
+  k: 20
+  max_weight: 0.08
+  cash_buffer: 0.02
+  rebalance: monthly
+walk_forward:
+  warmup_rows: 252
+  overlay_sma: 200
+  v1_cross_check: true
+experiment:
+  name: delivery-walkforward-legacy-port
+  family: delivery-factor
+  hypothesis: >-
+    Delivery-% top-20 monthly book is positive every OOS calendar year 2021-2025
+    with Sharpe >= 1.0 net of the full NSE delivery cost stack (documents the
+    ADR-034 registered thresholds; legacy-port validation, not a new hypothesis).
+  gates:
+    - name: positive_every_year
+      metric: per_year_positive_frac
+      op: ">="
+      value: 1.0
+    - name: sharpe_min
+      metric: sharpe
+      op: ">="
+      value: 1.0

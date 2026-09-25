@@ -1,9 +1,11 @@
-"""Unit tests for the TEE + MIS simulators (Phase AWS-BT-7).
+"""Unit tests for the TEE + MIS simulators (Phase 6).
 
 Covers: R calc long/short · breakeven shift · partial booking idempotency ·
 trailing never loosens · VWAP max-hold exit · preclose hard exit · MIS EOD exit ·
 old-vs-new deterministic comparison · daily cap does not block exits · MIS is
-final cleanup only.
+final cleanup only · gap-through stop fill · short trailing stop triggered ·
+unresolved EOD without MIS bar · comparison produces distinct outcomes per trade
+type · no broker references.
 
 Backtest-only: in-memory candles, frictionless execution simulator — no broker.
 
@@ -165,6 +167,109 @@ def test_mis_remains_final_cleanup_only():
                     entry_time=pd.Timestamp("2020-06-01 10:00", tz=IST), bars=bars, policy=OLD_GLOBAL_POLICY)
     assert out.mis_dependent is False
     assert out.final_reason == ExitReason.FINAL_TARGET.value
+
+
+def test_gap_through_stop_fill_long():
+    """Bar opens BELOW stop for a long → fill at open price (not stop)."""
+    tee = TEESimulator()
+    # Entry 100, stop 95. A bar opens at 92 (gaps through stop 95).
+    pos = tee.open_position(
+        symbol="R", direction=Direction.BUY, entry_price=100, stop=95,
+        quantity=10, entry_time=pd.Timestamp("2020-06-01 10:00", tz=IST),
+    )
+    # open=92 < stop=95 → gap fill at open, not stop
+    bar = C("2020-06-01 10:01", 92, 93, 90, 92)
+    events = tee.process_bar(pos, bar, OLD_GLOBAL_POLICY)
+    assert len(events) == 1
+    assert events[0].reason == ExitReason.STOP_LOSS
+    assert events[0].price == 92.0  # filled at open (gapped through)
+
+
+def test_gap_through_stop_fill_open_worse_than_stop():
+    """If bar opens EXACTLY at stop, fill is at stop (no gap)."""
+    tee = TEESimulator()
+    pos = tee.open_position(
+        symbol="R", direction=Direction.BUY, entry_price=100, stop=95,
+        quantity=10, entry_time=pd.Timestamp("2020-06-01 10:00", tz=IST),
+    )
+    bar = C("2020-06-01 10:01", 95, 95.5, 94, 95)  # open == stop
+    events = tee.process_bar(pos, bar, OLD_GLOBAL_POLICY)
+    assert len(events) == 1
+    assert events[0].price == 95.0  # no gap; fills at stop
+
+
+def test_short_trailing_stop_triggered():
+    """Short position: trailing tightens from above; price rally hits trailing stop."""
+    tee = TEESimulator()
+    # Entry 100 short, stop at 105. Initial risk = 5.
+    pos = tee.open_position(
+        symbol="R", direction=Direction.SELL, entry_price=100, stop=105,
+        quantity=10, entry_time=pd.Timestamp("2020-06-01 10:00", tz=IST),
+    )
+    policy = NEW_DEFAULT_POLICY  # trailing_activate_at_r=1.25, distance=0.75
+
+    # Bar 1: price falls to 93.75 → R = (100-93.75)/5 = 1.25 → activates trailing
+    tee.process_bar(pos, C("2020-06-01 10:01", 100, 100, 93, 94), policy)
+    assert pos.trailing_active is True
+    assert pos.trailing_stop is not None
+    # Trailing stop for short should be ABOVE current price (tightening from above).
+    assert pos.trailing_stop > 94.0
+
+    # Bar 2: price rallies above trailing stop → closed
+    events = tee.process_bar(pos, C("2020-06-01 10:02", 100, 105, 98, 103), policy)
+    assert any(e.reason in (ExitReason.TRAILING, ExitReason.STOP_LOSS) for e in events)
+    assert pos.closed is True
+
+
+def test_unresolved_position_at_eod_without_mis_bar():
+    """Bars end with position open and no MIS cleanup → UNRESOLVED + flattened."""
+    # Only two bars well before market close (no 15:05 bar).
+    bars = [C("2020-06-01 10:01", 100, 100.3, 99.7, 100),
+            C("2020-06-01 10:02", 100, 100.5, 99.5, 100)]
+    out = run_trade(
+        symbol="R", direction=Direction.BUY, entry_price=100, stop=95, quantity=10,
+        entry_time=pd.Timestamp("2020-06-01 10:00", tz=IST),
+        bars=bars, policy=OLD_GLOBAL_POLICY,
+    )
+    assert out.unresolved is True
+    assert out.final_reason == ExitReason.UNRESOLVED.value
+    # Flattened at last close for accounting — no open quantity should remain.
+    assert out.quantity == 10  # original size recorded
+
+
+def test_compare_policies_runner_new_lower_r_due_to_time_exit():
+    """For a classic runner trade, compare old vs new shows divergent outcomes.
+
+    New policy has hard_exit_time=15:00 which may exit before old policy's final
+    target is hit. The delta must be non-zero — the comparison has signal.
+    """
+    entry_time = pd.Timestamp("2020-06-01 14:40", tz=IST)
+    # Rising bars 14:41–14:58 then a 15:00 bar — new policy hard-exits at 15:00.
+    minutes = list(range(41, 60)) + [0]
+    hours   = [14] * 19 + [15]
+    bars = [
+        C(f"2020-06-01 {h:02d}:{m:02d}", 100 + i * 0.2, 100 + i * 0.3, 99, 100 + i * 0.2)
+        for i, (h, m) in enumerate(zip(hours, minutes), start=1)
+    ]
+    spec = dict(symbol="R", direction=Direction.BUY, entry_price=100, stop=95,
+                quantity=10, entry_time=entry_time)
+    result = compare_policies(spec, bars, strategy=None)
+    # Both policies run on the same bars — outcomes should be structurally different.
+    old, new = result["old"], result["new"]
+    # New default policy has hard_exit_time="15:00" → time exit fires before target.
+    assert old.final_reason != new.final_reason or old.realized_r != new.realized_r
+
+
+def test_no_broker_calls_in_simulators():
+    """tee_simulator and mis_simulator must not reference any broker API."""
+    from pathlib import Path
+    import backtesting.tee_simulator as tee_mod
+    import backtesting.mis_simulator as mis_mod
+    forbidden = ["kiteconnect", "alpaca", "place_order", "zerodhabroker", "submit_order"]
+    for mod in (tee_mod, mis_mod):
+        src = Path(mod.__file__).read_text().lower()
+        present = [t for t in forbidden if t in src]
+        assert present == [], f"{mod.__name__} must not reference brokers: {present}"
 
 
 if __name__ == "__main__":

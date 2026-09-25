@@ -18,10 +18,44 @@ _Last updated: 2026-06-05 | Detail in `architecture/system_design.md`, `docs/`, 
 
 ---
 
-## Paper Trading Start Protocol
+## QuantEmbrace v2 Engine (`qe`) — ADR-037/038
 
-**Trigger:** user says "start paper trading" / "run paper session" / `/start_paper_trading`
+The research + positional-paper path is being rebuilt as a single deterministic engine
+(`qe/`): one process, three clocks (backtest/paper/live), an event journal, and a frozen,
+content-hashed config per run. **Cutover is in progress (M5).** The monthly forward-book
+cadence and positional paper runs now go through `qe`; the v1 Kafka intraday stack is the
+**frozen fallback** until the decommission gate passes.
+
+- Operator surface (one page): `docs/runbooks/qe-operator-runbook.md`
+- Design + milestones: `architecture/re-architecture-2026-07.md`, `memory/decisions.md` (ADR-037/038)
+- Gated teardown of v1 infra (NOT yet executed): `docs/runbooks/v1-decommission-runbook.md`
+
+```bash
+python -m qe study --config configs/qe_delivery_book.yaml        # forward book (monthly)
+python -m qe paper --config configs/qe_delivery_book_paper.yaml  # real-time paper session
+python -m qe kill  status|activate|deactivate                    # in-process kill switch
+python -m qe report --journal journals/<session>.jsonl           # monitoring = journal reader
+```
+
+Invariants unchanged: **paper==sim to ₹0.00** (proven), full NSE cost stack, backtesting
+recommends / a human promotes, live BLOCKED (the live broker is unconstructible without an
+M6 gate token). The v1 factor scripts (`run_delivery_paper_book.py`,
+`replay_delivery_book_forward.py`) remain as fallback + `qe`-test parity anchors — do not
+delete them; see the decommission runbook.
+
+**"Start paper trading" post-cutover (operator decision 2026-07-08):** the trigger means the
+`qe` cadence — lake refresh → `qe study` both books → v1 replay (interim gate-state feeder,
+ADR-040) → `check_forward_gate.py` → `qe paper` both books → `qe report`. The v1 docker-compose
+intraday protocol below is the **frozen fallback only** — run it only when the operator
+explicitly asks for a v1 intraday session (its strategies are retired, ADR-033/034).
+
+---
+
+## Paper Trading Start Protocol (v1 intraday — FROZEN FALLBACK, explicit request only)
+
+**Trigger:** user explicitly asks for a **v1 intraday** paper session / `/start_paper_trading`
 → Execute `.claude/commands/start_paper_trading.md` in full. Never summarise. Run it.
+A bare "start paper trading" means the `qe` cadence above (ADR-038/040), not this protocol.
 
 **Load before touching any service:**
 `architecture/system_design.md` · `memory/decisions.md` · `memory/paper_trading_fixes.md` · `memory/open_tasks.md` · `docs/operations/paper-trading-acceptance-checklist.md`

@@ -1291,7 +1291,7 @@ not committed. Sessions 10–17 ran with this fix on disk but not in git HEAD.
 |---|---|---|---|---|---|
 | —  | Session 16 | 2026-06-11 | N/A | ❌ NOT COUNTED | 0 trades — VWAP geometrically capped (median R:R 1.05, max 1.48, ALL 184 signals rejected); ORB blind (late 10:19 IST start, opening range never formed). Not a strategy failure — structural test constraints. |
 | —  | Session 17 | 2026-06-12 | PASS | ❌ NOT COUNTED | 5 fills, PF 0.47, net −₹238.44. Trailing exits validated (2/2 ratchet held: ADANIPORTS +₹107.92, M&M +₹107.05). Negative expectancy + Bug 5 (kill-switch 11 false fires) + Bug 6 (MIS NAV corruption ₹932k). Bugs do not count toward gate. |
-| 1/5 | Session 18 | TBD | — | — | First session with Bug 5 + Bug 6 fixes applied |
+| 1/5 | Session 18 | 2026-06-15 | PASS | ⏳ PENDING REVIEW | 6 fills, 3 entries + 3 exits (2 SL: DLF/PFC, 1 trailing: CGPOWER). 0 kill-switch fires (Bug 5 fix held). MIS closed all 3. Realized −₹473.27. Go-live verdict: READY. Full verdict pending strategy performance gate eval. |
 | 2/5 | Session 19 | TBD | — | — | |
 | 3/5 | Session 20 | TBD | — | — | |
 | 4/5 | Session 21 | TBD | — | — | |
@@ -1352,26 +1352,334 @@ to `alpha.opportunities` Kafka topic. Labels matured forecasts every 5min. EOD r
 
 ---
 
-## Backtesting Data Lake — Phase 1 Local Download (2026-06-14)
+## ✅ Backtesting Data Lake — Phase 1 Local Download — COMPLETE (2026-06-15)
 
-**Status:** IN PROGRESS. `scripts/backtest/download_bhavcopy.py` committed (eb3d4e7, fc6f34a). Download running in background (PID 73365 as of 2026-06-14 session start).
+**Status:** COMPLETE. Full lake 2016-01-01 → 2026-06-12 verified clean.
 
-**What it does:** Downloads NSE `sec_bhavdata_full_DDMMYYYY.csv` from `nsearchives.nseindia.com` into `backtest-data/raw/bhavcopy/{ingest_date}/` and normalizes to Parquet lake at `backtest-data/lake/ohlcv/market=NSE/segment=EQ/symbol={SYM}/interval=1d/year={YYYY}/part-0.parquet`.
+**Lake stats (verified 2026-06-15):**
+- 22,000 Parquet files · 4,240,893 rows · 3,450 symbols
+- Formats: modern `sec_bhavdata_full` (2019–2026) + legacy `cm` ZIP (2016–2018)
+- Pre-2019 (2016–2018): OHLCV + volume only — **no delivery_pct** (free NSE archives don't include it)
+- 2019–2026: full delivery_qty + delivery_pct
+- Schema: all years consistent (`large_string` for string columns), no merge conflicts
+- `backtest-data/` in `.gitignore` — not committed (~7GB)
 
-**Archive scope:** `nsearchives.nseindia.com` only has `sec_bhavdata_full` format from Oct 2019 onward. Before that returns 404 (different format used pre-2019). Use `--start 2019-10-01`. Current run: 1,632 weekday dates (Oct 2019 → Dec 2025), ~33 min at 1 req/sec.
-
-**Known issues / fixes applied:**
-- NSE home (`www.nseindia.com`) TLS handshake hangs on macOS — priming runs in daemon thread with 8s queue timeout (commit fc6f34a)
-- Must use `PYTHONUNBUFFERED=1` when running with `nohup` (file buffering suppresses all output otherwise)
-- `backtest-data/` added to `.gitignore` (commit eb3d4e7) — ~7GB of CSVs + Parquet not committed
-
-**Launch command:**
+**Refresh command (run monthly or after trading day):**
 ```bash
 nohup env PYTHONUNBUFFERED=1 python scripts/backtest/download_bhavcopy.py \
-  --start 2019-10-01 --end 2025-12-31 --base backtest-data > backtest-data/download.log 2>&1 &
+  --start YYYY-MM-01 --end YYYY-MM-DD --base backtest-data > backtest-data/download.log 2>&1 &
 ```
 
-**Next steps after download completes:**
-- [ ] Verify Parquet lake at `backtest-data/lake/ohlcv/` (check row counts, schema, IST timestamps)
-- [ ] Update `CLAUDE.md` backtesting status from `[PLANNED]` to reflect Phase 1 data lake is available locally
+**Remaining:**
 - [ ] Phase 2 (AWS S3 lake) — requires explicit operator approval per CLAUDE.md AWS backtesting protocol
+
+---
+
+## Backtesting Lab Advisory — COMPLETE (2026-06-14, ADR-032)
+
+Walk-forward validation phases 12–15C are complete. Operator selected Phase 16 = A (continue paper sessions).
+
+**Key findings (advisory, non-authoritative):**
+- `momentum sw=10/lw=50` on NIFTY50 daily data: **PAPER_OPTIMIZATION** (OOS expectancy +₹90/trade, PF 1.52, win consistency 60%)
+- Strategy is regime-sensitive: wins in bull/trending, loses in bear/choppy
+- Parameter is stable: 5/5 folds in 24m IS window select `sw=10/lw=50`
+- Intraday strategies (`vwap_reversion`, `trend_15m`, `orb`, `preclose`) not yet validated — require 1m/5m/15m data
+
+**Files produced:**
+- `scripts/backtest/run_momentum_walk_forward.py` — walk-forward harness with --preset, --lw-max flags
+- `docs/backtesting/aws-phase15b-walk-forward-report.md` — Phase 15B results (15C-F data due to overwrite)
+- `docs/backtesting/aws-phase15c-walk-forward-corrected-report.md` — Phase 15C combined report (authoritative)
+
+**Next backtesting work (requires operator approval to start):**
+- [~] B: Intraday data — **tooling built 2026-06-14** via Zerodha Kite (not GDF — no GDF data/creds + ~3mo depth). See below.
+- [ ] C: Portfolio-level walk-forward with `partition_by='symbol'` for reliable equity curve / Sharpe
+- [ ] D: GenAI analysis (Phase 10) via Bedrock over walk-forward artifacts
+
+### Phase B — Zerodha intraday fetch + backtest (tooling built 2026-06-14, ADR-033)
+
+Evaluates the 4 intraday strategies the daily lake couldn't (orb/vwap_reversion/trend_15m/preclose;
+scalp_1m excluded — Stage-1 disabled). Source = Zerodha Kite `historical_data` (HIGH trust per
+contract §1, but LIMITED ~3yr depth → advisory edge exploration, not authoritative backbone).
+
+**Built + self-tested (12 tests, full backtest suite 188 passing):**
+- `scripts/backtest/fetch_zerodha_intraday.py` — Kite → Parquet lake (`interval=1m|5m|15m`), chunked by per-interval cap, idempotent, manifest (source=zerodha_kite, trust=HIGH). `--self-test` runs offline.
+- `scripts/backtest/run_intraday_backtest.py` — **per-day** backtest (fresh strategy/day = daily reset + MIS EOD flatten; preserves global daily signal budget). Reuses `data_loader.load_candles` + adapters + `Backtester` + `compute_metrics`/`evaluate_gates`. `--self-test` builds synthetic lake + runs pipeline.
+- `services/backtesting/s3_data_catalog.py` — added `zerodha`/`zerodha_kite`/`kite` to HIGH-trust sources (contract §1 alignment; was omitted in code).
+- Procedure doc: `docs/backtesting/zerodha-intraday-fetch-and-backtest.md`.
+
+**DONE 2026-06-14** — fetched + backtested. Operator logged in (token exchanged in-process, never persisted/printed; Docker was down so DynamoDB path bypassed). Fetched 16.1M bars, 46/47 symbols × 1m/5m/15m × 2022-2024 (610 MB lake).
+
+**Phase B verdict (advisory): ALL intraday strategies REJECT or inconclusive.**
+- orb -₹94/trade PF 0.45 REJECT · vwap_reversion -₹174 PF 0.25 REJECT · preclose -₹84 PF 0.05 REJECT
+- trend_15m 0 trades = NO_TRADES (warm-up limited under per-day reset — inconclusive, NOT judged)
+- Report: `docs/backtesting/aws-phaseB-intraday-backtest-report.md`. All three losers fail to clear the NSE cost stack — consistent with the daily-momentum-only thesis.
+
+**Bug found+fixed during the run:** shared `Backtester.run()` multi-symbol EOD flatten marked positions out at the *wrong symbol's* close (`backtester.py:401`) → first run gave impossible >4000% win rates / ₹crore P&L. Fixed + regression-pinned (`test_eod_multi_symbol_uses_own_symbol_price`), 192 backtest tests green. See ADR-033 (decisions.md).
+
+**trend_15m — RESOLVED 2026-06-14 (warm-start mode added).** Runner now has opt-in
+`WARM_START_STRATEGIES={"trend_15m"}`: one persistent instance, buffers accumulate across days,
+`reset_daily()` between days. trend_15m's EMAs warm fully but it STILL fires 0 trades at default
+(ADX≥25 + confidence≥0.65 mutually exclusive on NIFTY50 15m); filters-off it loses (PF 0.30,
+−₹368k). REJECT either way. NIFTY gate disabled for backtest (no index data; fails-open in prod).
+216 backtest tests green. **All 4 evaluable intraday strategies now have a verdict: no edge.**
+
+**Follow-ups (open, not blocking):**
+- [ ] TATAMOTORS tradingsymbol mismatch (46/47 resolved) — backfill on next login.
+- [ ] (optional) Intraday walk-forward / deeper licensed data only if a strategy ever shows edge — none did, so low priority.
+
+Backtesting did fix the Session-16 "ORB blind" problem (full 09:15 opening range present in history) — ORB now trades (2403 trades) but still loses to costs.
+
+---
+
+## Paper Session Gate Tracker (v1 intraday — FROZEN, ADR-037; historical)
+
+> **2026-07-08:** v1 intraday sessions are frozen (strategies retired ADR-033/034; stack is
+> fallback-only per ADR-037/038). "Start paper trading" now means the qe cadence — see the
+> V2 track below and `docs/runbooks/qe-operator-runbook.md`. This tracker is retained as history.
+
+**Status: Session 18 COMPLETE (2026-06-15). 1/5 counting sessions done. Session 19 is next.**
+
+| Bug | Description | Status |
+|---|---|---|
+| Bug 5 | Kill-switch false fires (consumer_lag/heartbeat thresholds), Alpaca placeholder crash-loop | ✅ FIXED — commit `bc54c6b` (2026-06-13) |
+| Bug 6 | MIS NAV corruption ₹932k — computed `seed − close_notional` instead of realized-P&L delta | ✅ FIXED — commit `eb9a14a` (2026-06-13) |
+
+**5-session gate progress:** 0/5 counting sessions complete (Sessions 16–17 were not counted — see decisions.md § 5-Session Live Gate Progress).
+
+**Next valid session = Session 19.** Run `make start-paper-session` or trigger the paper trading start protocol. Remember: rebuild risk_engine image before each session (`docker-compose build risk_engine`).
+
+---
+
+## Strategy Thesis Pivot — Research Gate Tracker (ADR-034 → ADR-036)
+
+**Status: ACCRUE FORWARD, DEPLOY NOTHING (operator decision 2026-06-19).** Delivery edge DECAYED
+(Sharpe 1.60 2020-22 → 0.61 2023-26; weak forward −9.85%); momentum mostly beta; delivery+momentum
+COMBINED book gives NO diversification (legs +0.67 correlated — the forward "decoupling" was a
+1-regime artifact); **none beats the EW benchmark risk-adjusted 2020-26.** Both single-factor paper
+books now run forward as the OOS truth-test vs the **pre-registered Forward Factor Gate**
+(`docs/live-readiness/forward-factor-validation-gate.md`, `scripts/paper/check_forward_gate.py`);
+5/12 mo, eligible ~Dec-2026. Deploy NO capital until a book clears the gate forward → human review.
+Do NOT relax the gate. Live BLOCKED.
+**All research work is advisory-only. No capital, no live/paper signal pipeline.**
+
+### Factor Studies Completed (2026-06-15)
+
+| Study | Result | Files |
+|---|---|---|
+| Cross-sectional factor backtest (2020–2025) | ✅ delivery-% ONLY clears risk-adj (Sharpe 1.40 vs market 0.96/1.09 both sub-periods) | `run_factor_study.py`, `factor-study-report.md` |
+| Walk-forward 5-fold (delivery-%, 2021–2025 OOS) | ✅ 5/5 years positive; 200d overlay REJECTED (hurts) | `run_delivery_walkforward.py`, `delivery-walkforward-report.md` |
+| Factor correlation study | ✅ equity factors HIGHLY correlated (3 pairs >0.70 in sample), blending dilutes; delivery standalone wins | `run_factor_correlations.py`, `factor-correlation-report.md` |
+| H4 delivery-spike event study | ❌ REJECTED — abnormal returns negative (t −2.1→−3.5), delivery info lives in persistent level | `run_delivery_spike.py`, `delivery-spike-report.md` |
+| H5b price-implied PEAD (large-move proxy) | ❌ REJECTED — same anti-predictive pattern as H4 (T+63 abn −1.92%, t −3.98) | `run_pead_study.py`, `pead-study-report.md` |
+
+### Paper Book Forward Track
+
+| Item | Status |
+|---|---|
+| Isolated advisory harness stood up | ✅ `scripts/paper/run_delivery_paper_book.py` (ADR-035) |
+| Inaugural basket (2025-12-31) | ✅ 20 holdings, top-200 universe, full delivery costs |
+| Corporate action filter (`_drop_corp_action_dislocations`) | ✅ catches demerger/split ex-dates (KOTAKBANK case) |
+| Clean monthly forward replay | ✅ `scripts/paper/replay_delivery_book_forward.py` (2026-06-19) — fixed contaminated state (Dec→Jun single jump + same-day re-rebalances); deterministic monthly walk, computes benchmark/alpha; re-run after each Bhavcopy refresh to advance |
+| First OOS read (Dec-2025 → Jun-2026, 5 mo) | ⚠️ book −9.85% vs bench −0.16% = −9.7pts behind; NAV ₹9,01,531; monthly alpha Jan −3.6/Feb +3.3/Mar +1.0/Apr **−8.4**/May −1.9. `delivery-paper-book-forward-report.md` |
+| June-2026 monthly advance | ✅ DONE 2026-07-08 — lake refreshed to 2026-07-07; both books through the 2026-06-30 rebalance on BOTH paths (qe study == v1 replay to the rupee, ADR-040): delivery cum −5.85% vs bench +2.20% (NAV ₹941,470), momentum +4.28% (NAV ₹1,042,811); forward gate 6/12 months, both IN PROGRESS (delivery failing alpha; momentum +5.49% alpha but pos-alpha 50% < 58% after negative June) |
+| Next monthly rebalance | ⏳ End of July 2026 — refresh lake in early August, then run the qe cadence (runbook § monthly) |
+| Meaningful OOS read | ⏳ 12–24 forward months; a handful of months is plumbing/monitoring, not validation |
+| Parallel momentum paper book | ✅ DONE 2026-06-19 — harness now `--factor {delivery,momentum}`; `replay_delivery_book_forward.py --factor momentum`. Forward **+5.43%** vs bench −0.16% (+5.6pts) vs delivery **−9.85%** SAME window → factors **DECOUPLE** (Apr recovery: momentum +20.4 caught / delivery +6.6 lagged). Regime-complementary; n=5 (not validation). `momentum-paper-book-forward-report.md` |
+| delivery+momentum COMBINED book | ❌ TESTED 2026-06-19 → diversification FAILS. Legs +0.67 correlated (forward decoupling was a 1-regime artifact); combo Sharpe 0.86 ~ legs, MaxDD −28.9% worse than delivery −26.4% & ~bench. Both edges decayed (delivery 1.60→0.61). `run_combined_book_study.py`, `combined-book-study-report.md`. Real diversification needs a NON-long-only-equity driver |
+
+### Regime-Expansion Gate (Tier-1 Priority)
+
+| Item | Status |
+|---|---|
+| Pre-2019 bhavcopy URL format (legacy `cm` ZIP) | ✅ `download_bhavcopy.py` updated 2026-06-15 |
+| Pre-2019 OHLCV (2016–2018) | ✅ DONE 2026-06-15 — 739 trading days, 1,104,114 EQ rows, ~1,700 symbols/year |
+| Pre-2019 delivery % | ❌ NOT available in free NSE archives — cm format has no DELIV_QTY/DELIV_PER |
+| IL&FS crisis + 2016 demonetization test for delivery % | ❌ BLOCKED — requires paid data (Refinitiv/Bloomberg/NSE subscription) |
+| Factor study on extended OHLCV (momentum/vol pre-2019) | ✅ DONE 2026-06-15 — momentum Sharpe 0.63 > market 0.59 through IL&FS + demonetization; combo 0.72; delivery 0.38 (artifact of NULL 2016–18) |
+
+### Open Different-Driver Hypotheses
+
+| Hypothesis | Status |
+|---|---|
+| H5a — True PEAD with real earnings calendar | ❌ BLOCKED — NSE API 404, BSE API empty body in automated sessions; requires browser session or paid data |
+| H6 — F&O OI divergence | Not started |
+| H7 — Index inclusion/exclusion event | Not started |
+
+**Regime-expansion gate: COMPLETE (2026-06-15).** Operator decision: accept 2019–2025 boundary for delivery% (COVID + 2022 bear OOS already validated in walk-forward). IL&FS test deferred — requires paid data.
+
+**Next research gate: H6 F&O OI or H7 Index-inclusion** (awaiting operator direction). Or just run Session 18.
+
+---
+
+## 🔬 Options/Vol track — O-1 PASSED (2026-06-19); next = optional Kite re-confirm → O-2 vendor decision
+
+**Priority**: P2 (research; no spend, no live impact) · **Opened + O-1 run**: 2026-06-19
+**O-1 RESULT: PASS** on FREE Yahoo data (^NSEI/^INDIAVIX via yfinance, 2020–25, 1,449 days, 69 cycles):
+mean VRP **+2.34 vp** · VIX>realised **79%** days · +VRP **100%** of years · all 4 gates ✅.
+⚠️ **FAT LEFT TAIL** (worst cycle −₹110k = 11.7× median gross; cum-DD −₹120k — the short-vol steamroller,
+concentrated in the Mar-2020 spike). Report: `docs/backtesting/vol-premium-study-report.md`; full log:
+`docs/backtesting/options-vol-track-spec.md`.
+
+**Kite login gotcha (resolved):** `zerodha_login.py` persists the token to DynamoDB → it fails after a
+successful Kite exchange when LocalStack (localhost:4566) is down, burning the single-use request_token.
+Use the new **`scripts/backtest/kite_fetch_with_token.py --request-token XXXX`** instead — exchanges +
+fetches into the lake + runs the screen in-process, NO DynamoDB. (Login URL uses api_key in `.env`.)
+
+**Kite HIGH-trust re-confirm: DONE 2026-06-19** — lake populated (`segment=INDICES`, NIFTY50+INDIAVIX,
+1,492 daily bars each); screen → mean VRP +2.48 vp, VIX>realised 80% days, all gates PASS (matches Yahoo).
+PASS now stands on broker-grade data.
+
+**O-2 HARNESS BUILT 2026-06-19 (zero spend)** — `scripts/backtest/run_options_vol_backtest.py`:
+OptionsCostModel (₹20/leg flat + STT 0.1% sell + txn 0.035% + GST + stamp), BS pricer, iron condor,
+≤2%-NAV/cycle risk cap, pre-registered O-2 gate. Self-test PASS; synthetic-on-real-NIFTY-path (incl
+Mar-2020) PASS by construction (engine + cost stack + crash cap validated; NOT a real edge).
+
+**O-2 chain source = FREE NSE F&O Bhavcopy (EOD), NOT Zerodha.** Kite can't backfill expired option
+chains (purged tokens). F&O bhavcopy has all NIFTY strikes/expiries 3+ yr, free, same archive as equity
+bhavcopy. EOD suffices for held-to-expiry condor. **Pipeline BUILT + self-tested 2026-06-19 (zero spend):**
+- `scripts/backtest/download_fo_bhavcopy.py` — both NSE formats (legacy + UDiFF), NIFTY options → chain
+  lake `backtest-data/lake/options/underlying=NIFTY/`. Self-test PASS.
+- `run_options_vol_backtest.py --chain backtest-data/lake/options` — `backtest_real`: real condor, held to
+  expiry, NIFTY50-spot settle, 2.5% slippage haircut. Self-test PASS (slippage erodes edge as expected).
+
+**O-2 RAN 2026-06-20 → FAIL.** Lake downloaded (760 td, 2022-06→2025-06, 1.24M NIFTY option rows).
+31 monthly condor cycles (after fixing 2 harness bugs: long-dated-expiry leakage + sub-1-lot drop bias):
+net −₹54k, PF 0.67, expectancy −₹1,740, pos-years 50% → FAIL. **Decomposition = EDGE problem not cost:**
+loses gross −₹35k even at ZERO slippage; win 65% but credit/max-loss 0.25 needs ~81% win to break even;
+losses cluster in directional 2022–23. ATM VRP (O-1) does NOT convert to a profitable OTM condor (put skew
++ directional risk). Report: `docs/backtesting/options-vol-backtest-report.md`.
+
+**RESOLVED 2026-06-20 → SHELVE (pre-declared sweep).** `run_options_vol_sweep.py`: OTM{1-5%}×wing{1,2%}
+= 10 monthly condor configs. **0/10 clear the O-2 gate; only 2/10 gross-positive (barely, <0.5%/yr, negative
+after costs).** Structural FAIL — no retail-affordable static defined-risk structure harvests the NSE VRP
+after skew+directional risk+costs. Only untested lever = intraday active management (needs PAID data — not
+justified when every static structure loses gross). Report: `options-vol-sweep-report.md`.
+
+**OPTIONS/VOL TRACK CLOSED.** Return to STANDING POSTURE: forward factor books accrue monthly vs the
+pre-registered Forward Factor Gate, deploy nothing. Live BLOCKED. Tooling retained + reusable
+(fetch_zerodha_indices / run_vol_premium_study / download_fo_bhavcopy / run_options_vol_backtest / _sweep).
+Don't re-propose static index short-vol without a genuinely new angle + fresh data.
+
+---
+
+## 🧭 NEW PROGRAM: NSE Options & Futures hedge-level strategies (plan)
+
+**Opened**: 2026-06-20 · **Plan**: `docs/strategy/nse-options-futures-strategy-plan.md` · No build yet.
+Operator pivoted to designing options+futures strategies (keep intraday, work forward). Plan reconciles with
+prior findings (cash-intraday dead, static short-vol dead) and tests DIFFERENT return sources where those
+failures don't apply. **Data reality:** futures (intraday Kite + EOD bhavcopy) and EOD/event options are
+free-testable now; intraday options chains are PAID/forward-only (data-blocked).
+Ranked Tier-1 candidates (free, evidence-grounded, account-survivable):
+- **F1 overnight index-futures premium** (grounded in C6 overnight finding; most evidence-backed)
+- **O1 scheduled-event IV-crush** (defined-risk, event-timed; cheap EOD screen first like O-1 VRP)
+- **F2 positional index-futures trend/momentum**
+Tier-2 (thin): F3 futures basis/roll, O2 vol calendars. Tier-3 (deferred): O3 intraday options (paid data).
+Hedging overlay: H1 protective-put/collar, H2 tail hedge (risk layer, not alpha).
+Same discipline: pre-registered gates, full futures cost+margin+gap-tail, defined risk, forward book before
+any pilot. Live BLOCKED. Operator picked **F1 first**.
+
+**F1 SCREEN DONE 2026-06-20 → PASS (with material caveats).** `run_overnight_futures_study.py` (NIFTY50
+spot proxy, 2020-25). Overnight +11.3 bps/night SURVIVES futures costs (~0.023% vs cash 0.22%), net Sharpe
+1.98, **positive all 6 years** — most promising edge yet. BUT naked leveraged form account-inappropriate:
+maxDD −41% (COVID); gap tail scales with index — same −9% COVID gap at today's ~26000 = −35% NAV in ONE
+night (G3 passed only because worst 2020 gaps hit at low index; gate also lacked a max-DD limit).
+**Operator chose F1-full (real futures) first. Pipeline BUILT + self-tested 2026-06-20 (zero spend):**
+`download_fo_futures.py` (index-futures bhavcopy, NIFTY+BANKNIFTY, both NSE formats) + `run_overnight_futures_study.py
+--futures` (`study_futures`: near-month front-contract overnight, basis in prices, **DD-aware 5-gate adds
+G5 maxDD≤25%**). Both self-tests PASS.
+**F1-FULL RAN 2026-06-20 → FAIL; F1 DEAD (naked AND hedged).** Real NIFTY futures (760-day lake, 733 nights):
+overnight only **+3.2 bps/night, Sharpe 0.34, ann +6.1% → FAIL G4**; 2025 negative. Decomposition (same
+window): spot +8.9 bps → futures +3.2 bps = **−5.7 bps lost to basis-decay + non-tradable index "open"**;
+C6 overnight is a real index property but ~2/3 NOT harvestable on the tradable instrument. F1-hedged also
+dead (binding failure is RETURN not tail → a put adds cost, makes it worse). **Lesson: spot/index proxy
+overstated edge ~3.5×; always validate on the real tradable instrument.** Report:
+`docs/backtesting/overnight-futures-study-report.md`.
+
+**OPTIONS/FUTURES PROGRAM EXHAUSTED AT TIER-1 (2026-06-20): F1 DEAD, O1 SHELVE, F2 SHELVE.**
+- F1 overnight futures DEAD (real-futures +3.2bps Sharpe 0.34; ~⅔ non-harvestable).
+- O1 event IV-crush SHELVE (edge over random-day baseline 1.03×; where crush real the move is real).
+- **F2 futures trend SHELVE** (`run_futures_trend_study.py`): drawdown-reduction NOT alpha — long-only trend
+  ann ~12% = buy-hold (no return added), Sharpe 0.54-0.59 vs B&H 0.42, cuts −72% leveraged DD to ~−25% but
+  hinges on dodging ONE crash (2020, n≈1 trend); isolated/threshold-marginal pass. Report:
+  `docs/backtesting/futures-trend-study-report.md`.
+Tier-2 (F3 basis, O2 calendars) low prior; Tier-3 (intraday options) data-blocked. **Return to STANDING
+POSTURE: forward factor books accrue, deploy nothing. Live BLOCKED.** All tooling retained + reusable.
+**CAPSTONE DONE 2026-06-20:** `docs/strategy/research-program-consolidation-2026-06-20.md` — full program
+record (every hypothesis, why each died with numbers, the recurring mechanisms, the reusable toolkit, the
+forward program, and the go-forward stance). The definitive "what's settled and why" reference — don't
+re-chase eliminated edges. Only remaining work = monthly forward-book cadence (→ ~Dec-2026 gate eligibility).
+
+---
+
+## V2 RE-ARCHITECTURE TRACK (ADR-037, approved 2026-07-05)
+
+**Design:** `architecture/re-architecture-2026-07.md`. v1 trading stack is FEATURE-FROZEN (bugfixes only).
+
+| Milestone | Scope | Status |
+|---|---|---|
+| M0 | ADR-037 + freeze + hygiene sweep | ✅ ADR done 2026-07-05 (hygiene sweep pending) |
+| M1 | `qe/` skeleton: frozen hashed config, JSONL journal, snapshot-pinned lake loader, null engine | ✅ DONE 2026-07-05 (18 tests; acceptance run vs real lake, pinned-snapshot rerun verified) |
+| M2 | SimClock engine at parity (first user: forward factor books) | ✅ DONE 2026-07-05 — **EXACT parity, both books**: `qe study` reproduces `replay_delivery_book_forward.py` with max NAV diff ₹0.00 across all 6 rebalances + final MTM, benchmark legs diff 0.0, delivery AND momentum, real lake (snapshot `ds-80b8dad5c52c2870`). New: qe.costs (parity-tested vs v1 IndianCostModel), qe.data.panel, qe.universe, qe.strategy (FactorBookStrategy), qe.portfolio, qe.risk (4-check pipeline), qe.execution (SimBroker), qe.engine.sim, qe.research.study. 30 tests. **Monthly forward-book cadence can now run as `python -m qe study --config configs/qe_delivery_book.yaml` (+ `qe_momentum_book.yaml`)** — v1 scripts retained until M5. Walk-forward parity deliberately moved to M3 (belongs with study declarations). |
+| M3 | Full research-factory port | ✅ DONE 2026-07-06 — **walk-forward as a declared study** (`python -m qe study --config configs/qe_delivery_walkforward.yaml`): engine leg (share-based, actual costs) + **v1 cross-check EXACT** (CAGR 23.7% / Sharpe 1.41 / MaxDD −22.2% / 5/5 years — identical to regenerated `run_delivery_walkforward.py` report at full precision, per-year rows included); engine model confirms verdict at realism (CAGR 20.8% / Sharpe 1.32 / 5/5). New: qe.research.{metrics (v1-exact), wf_v1 (verbatim returns-space port), gates (pre-registered, fail-closed), registry (governance/experiment-registry.jsonl, family test-budget), walkforward}; risk checks max_positions/max_turnover (default-off); 43 tests. **TEE/MIS-as-engine-policies DEFERRED to M4 decision point** — intraday is retired (ADR-033/034); building exit-simulation machinery for retired strategies violates RA-1's own spend-follows-funnel principle; revisit only if a strategy needing intraday exits reaches paper candidacy. |
+| M4 | Real-time paper engine + kill-switch v2 | ✅ DONE 2026-07-06 — **paper==sim EXACT** (paper WallClock sessions driven at each real delivery-book rebalance reproduce sim NAV to ₹0.00, real lake + synthetic; proves RA-1 §2.3 three-clocks invariant AND resume/persistence). New: qe.clock (Sim/WallClock IST), qe.killswitch (ONE in-process state machine + persisted flag, idempotent activate = self-refire class retired), qe.engine.core (shared `execute_rebalance` step — sim refactored onto it, parity preserved), PaperBroker (subclass of SimBroker, type-isolated, no place_order surface) + LiveBroker unconstructible without M6 token, qe.engine.book_store (typed resume state, fail-closed on config-hash drift), qe.engine.paper, qe.reporting.session_report (monitoring = journal reader; retires LiveCounters). CLI: `qe paper`, `qe kill status/activate/deactivate`, `qe report`. 57 tests. Bug fixed en route: same-second journal filename collision (now µs+uuid). **Live dry-run proved fail-closed for real**: latest lake 2026-06-12 vs today → 24d-stale → staleness trigger fired → kill activated → due rebalance BLOCKED. **RA-1 M4 'shadow-diff vs v1 stack' REFRAMED**: the v1 paper stack is the Kafka INTRADAY pipeline trading retired strategies (ADR-033/034); the live experiment (monthly positional factor book) was never in it, so the meaningful invariance is paper==sim (done) — v1 `run_delivery_paper_book.py` parity was already proven in M2. **TEE/MIS DECISION: NOT built** (intraday retired; no factor-book intraday exits to simulate; revisit only if a strategy needing them reaches paper candidacy). |
+| M5 | Cutover (done); decommission (GATED, not executed) | 🔶 CUTOVER DONE 2026-07-06 / TEARDOWN GATED — **qe is now the primary research+paper path**: monthly forward-book cadence + paper via `python -m qe study|paper|kill|report`; one-page operator runbook `docs/runbooks/qe-operator-runbook.md`; CLAUDE.md v2 section added; v1 factor scripts marked SUPERSEDED but retained (fallback + qe-test parity anchors). Paper configs added (qe_delivery_book_paper.yaml, qe_momentum_book_paper.yaml). Repo hygiene: 12 stale .pyc dups removed (.docx left — user's files). **v1 infra teardown NOT executed** — RA-1's decommission gate (N clean v2 paper sessions) is NOT met (0 real sessions; lake stale 2026-06-12), and it needs destructive live-AWS actions + human sign-off. Exact procedure staged in `docs/runbooks/v1-decommission-runbook.md` with the key hazard flagged: IndianCostModel + 3 v1 scripts are qe-test parity anchors — retain or golden-value-convert before `rm`. ADR-038. |
+| M6 | Live readiness — machinery BUILT, live BLOCKED BY CONSTRUCTION | 🔒 BUILT 2026-07-06, LIVE BLOCKED — 'approved M6' = build the apparatus, NOT enable live. New: qe.live_gate (`LiveGateToken` + evidence ceremony: 6 pre-registered fail-closed checks — forward-gate-pass artifact, ≥12 forward months re-verified, ≥3 clean qe paper sessions, config-bound operator approval, kill clear, lake ≤7d; mints ONLY if all pass), LiveBroker double-gated (valid token AND explicit client; no real adapter wired), qe.livecheck.drills (staleness/kill/config-drift, all PASS). CLI `qe live` (refuses w/ ledger) + `qe drill` (PASS). `governance/live-gate/README.md` documents the human evidence artifacts. 71 tests. **VERIFIED: `qe live` → BLOCKED (5/6 fail: no forward-gate record, 5/12 months, 0/3 sessions, no approval, 24d-stale lake); `qe drill` → all PASS.** Live unblocks only on evidence (forward gate ~Dec-2026 + human), never authorization. ADR-039. |
+
+**Standing work continues unchanged:** monthly forward-book cadence (bhavcopy refresh →
+`replay_delivery_book_forward.py` → `check_forward_gate.py`) until M2 absorbs it.
+
+### ADR-040 (2026-07-08) — first real qe cadence run: 3 defects found + fixed
+
+The first post-cutover cadence run surfaced and fixed: (1) paper `due` bug — panel-frontier
+day always looked like a month-end → the first real delivery paper session bought its basket
+mid-month; fixed to sim's complete-month rule (`_pending_rebalances`, executes owed month-ends
+at their own rows; mid-month = MTM-only); buggy book state reverted, journal retained as audit.
+(2) study configs pinned at `end_date: 2026-06-30` → opened to 2027-12-31 (one-time config-hash
+change; qe study now == v1 replay to the rupee incl. the 2026-06-30 rebalance). (3) gate-checker
+reads only v1 state files — v1 replay is the interim feeder (runbook step 2b).
+
+**Decommission-gate progress:** first clean qe paper sessions run 2026-07-08 — delivery 1/≥3,
+momentum 1/≥3 (status OK, due=False, 0 orders, NAV ₹10,00,000 each; first rebalance = July
+month-end, executes when August-proving data lands). **2026-07-15 cadence run: delivery 2/≥3,
+momentum 2/≥3** (both status OK, due=False mid-month, 0 orders, 0 risk rejections, 0 kill
+events) — after an operator-approved one-time rebind of both book states' `config_hash`
+(ADR-042: ADR-041 P4's `assets`/`vol_lookback` schema defaults moved every config hash;
+drift proven benign — studies == v1 replay to the rupee, stripped hash reproduces old
+exactly; backups `*.bak-pre-rebind-20260715`). Lake at 2026-07-14; forward gate 6/12 both
+IN PROGRESS (delivery alpha −9.85%, momentum +5.49%). **Open (P2) from ADR-042:** decide
+schema-evolution-stable hashing or a journaled `qe book rebind` ceremony before the next qe
+schema change; also `download_bhavcopy.py --end` defaults to 2025-12-31 (silently skips 2026
+catch-up on a bare run).
+
+**~~Open (P2)~~ ✅ DONE same day (2026-07-08):** `check_forward_gate.py` ported to read the qe
+study summaries (`reports/qe/<factor>-book-*/summary.json`) as primary source — `--source
+qe|v1|auto` (default auto = qe + cross-check vs v1 state when frontiers match; mismatch is
+reported loudly). Evaluation math + pre-registered thresholds byte-identical for both sources;
+self-test extended (qe-reader parity + shape-drift guard); real-data cross-check → MATCH both
+books. Runbook step 2b is now an optional monthly cross-check, not a dependency. v1 replay
+remains a parity anchor — do not delete.
+
+---
+
+## 🇺🇸 US EQUITIES PIVOT TRACK (ADR-041, approved 2026-07-09)
+
+**Plan-of-record:** `docs/strategy/us-equities-pivot-plan.md`. QC/LEAN = local $0 research
+bench; winning strategies ported into `qe/strategy/`; QuantEmbrace = execution/risk/infra.
+Positional only (wave 1). NSE forward cadence + Dec-2026 gate run unchanged in parallel.
+Every phase writes a report and **stops for human approval**.
+
+| Phase | Scope | Status |
+|---|---|---|
+| P0 | ADR-041 + plan-of-record + operator prerequisites: **Robinhood** primary account + Agentic Trading beta invite (+ optional Gold/Cortex) — ⚠️ requires US residency status, NOT openable from India, operator must confirm eligibility (else revert to Alpaca); W-8BEN/funding; Docker + LEAN CLI install. Alpaca account DEFERRED to P6b | 🔶 Docs DONE 2026-07-09 (incl. Robinhood amendment); operator eligibility check + account/CLI setup pending |
+| P1 | Curated US EOD lake (`market=US, segment=EQ`): 23 ETFs + 75 mega-caps, 2005→2026-07-09, Yahoo (primary, curl_cffi) × Nasdaq API (verifier) cross-validated in RETURNS space (`scripts/backtest/download_us_eod.py`; report `docs/backtesting/us-eod-lake-phase1-report.md`) | ✅ BUILT+VERIFIED 2026-07-10 — 97 promoted (MMC FAIL/excluded), 515,691 rows, snapshot `ds-b9b110ac58d57cae`, qe suite 69/69; **awaiting operator approval → P2** |
+| P2 | Candidate screen: 7 QC-library positional strategies vs **pre-registered 5-gate screen** (`run_us_rotation_study.py`, T+1 exec, 5+10bps, Sharpe-vs-SHY; TR anchors matched slickcharts to 0.01pp) → `docs/strategy/us-qc-candidate-report.md` | 🔶 SCREEN DONE 2026-07-10 — **2/7 PASS: RPLITE 0.86 (shortlisted, clean) + XSMOM 0.86 ⚠️ (conditional — survivorship falsification on QC free cloud required)**; GEM/GTAA5/SECTOR fail (post-publication decay confirmed), AAA/LOWVOL 4/5 (G1, gate NOT relaxed); awaiting operator approval |
+| P2b | LEAN CLI cross-check of RPLITE (`export_lake_to_lean.py` + `run_lean_crosscheck.py`, pre-declared tolerances T1 monthly-RMSE≤20bps / T2 NAV-ratio≤3% / T3 sign-agreement≥95%, zero-cost engine-mechanics-only check) | ✅ **PARITY PASS 2026-07-14** — report `docs/strategy/us-lean-crosscheck-p2b-report.md`. The 2026-07-10 "PARITY FAIL" (T1 RMSE 43.21bps) was root-caused: NOT a strategy/execution bug (vol-calc logic verified identical to 1e-8; whole-share rounding only 0.74bps; a real-but-cosmetic margin/BuyingPower bug fixed in `main.py` — `AccountType.Cash`+`ImmediateSettlementModel` — changed zero fills). **Actual cause: `run_lean_crosscheck.py`'s `compare()` used `resample("D").last()`, which let LEAN's intermittent (~15% of days) 17:00 chart sample silently override the always-present, reliable midnight sample, corrupting day alignment.** Fixed to align on midnight samples only. Re-run: **RMSE 3.4bps, NAV-ratio 0.96%, sign 100%, corr 0.9999 — all 3 gates pass.** RPLITE now cross-validated in two independent engines; ready for P3 pending operator approval. XSMOM survivorship falsification (QC free cloud) still not done — separate, unaffected. |
+| P3 | qe US support: `USEquityCosts` (SEC fee/TAF/slippage, $0 commission), `America/New_York` clock + NYSE calendar, static config-listed universe, SPY benchmark, USD NAV. NSE ₹0.00 parity tests must stay green | ✅ **BUILT 2026-07-14** — report `docs/strategy/us-qe-phase3-report.md`. Added `USEquityCosts`+`cost_model_for_market()` (`qe/costs.py`), `market_tz()` (`qe/clock.py`), fixed `Panel.date_at()` + `month_end_positions`/`rebalance_schedule` to stop force-converting to IST (was mislabeling non-NSE panels — the P1-flagged "+1d" gap), `run_sim()` now dispatches tz+costs by `config.universe.market` (fails closed on an unrecognized market), `buy_hold_benchmark_return()` for SPY (`qe/research/benchmark.py`), currency-aware NAV in `render_session_report()`. Paper/live path (`qe/engine/paper.py`) and v1-cross-check (`qe/research/wf_v1.py`) deliberately untouched — still NSE-only by design (P5/never). 13 new tests `tests/qe/test_us_market.py`; **full qe suite 83/83 green, all pre-existing NSE parity tests unchanged**. Awaiting operator approval → P4. |
+| P4 | Port shortlist to `qe/strategy/`; qe-vs-LEAN parity (pre-declared tolerance); walk-forward OOS; **pre-register US Forward Gate** (mirror of NSE gate, vs SPY) | ✅ **BUILT 2026-07-14 + real historical run** — report `docs/strategy/us-qe-phase4-report.md`. `RiskParityLiteStrategy` ported (`qe/strategy/risk_parity.py`, verbatim from `w_rplite`); **real finding: needed a small 0.5% cash_buffer — the pandas screen is a returns-space model with no solvency concept, qe's real-cash engine rejected every rebalance (100% weight + any cost > 100% cash) until fixed, exactly why FactorBookStrategy already has one**. qe-vs-pandas-screen parity: weight-target matches to 1e-10, zero-cost NAV path 9.85bps RMSE (transitively qe-vs-LEAN via P2b's 3.4bps). **Real historical run over the actual 2006-2026 US lake**: qe engine Sharpe 0.78/CAGR 7.18%/MaxDD −21.3% (vs Phase 2 screen's frictionless 0.86/9.5%/−22.2% — the gap is real costs+buffer+rounding); walk-forward IS 2006-16 (Sharpe 0.72) → OOS 2016-26 (Sharpe 0.82, actually improved, unlike every NSE strategy); **⚠️ mean monthly alpha vs SPY is −0.218%, positive only 41% of months — SPY's own beta was exceptional this window, so the pre-registered Forward Gate (cum_alpha>0, ≥58% pos-alpha) is a genuinely tough bar RPLITE may never clear forward — expected per Phase 2's own framing (diversification+lower-DD, not "beats SPY"), not a reason to relax anything**. US Forward Gate pre-registered `scripts/paper/check_us_forward_gate.py` (identical math/thresholds to NSE's, `--self-test` passes). `configs/qe_us_rplite_book.yaml` ready for P5 (start_date 2026-07-31). 6 new tests, full qe suite 87/87 green. Awaiting operator approval → P5. |
+| P5 | US forward paper book(s): paper==sim to $0.00; fold into monthly cadence; accrue vs gate (calendar-time) | ✅ **BUILT+TESTED 2026-07-14, NOT ACTIVATED** — report `docs/strategy/us-qe-phase5-report.md`. Extended `qe/engine/paper.py` (real-time WallClock engine) for market=US: `_build_strategy` dispatches risk_parity_lite; broker/feed/clock all dispatch by `config.universe.market` (`cost_model_for_market`, `reference_symbol_for_market` — new, NSE=RELIANCE/US=SPY, `WallClock(tz=market_tz(...))`). **Found+fixed a real bug**: `SimClock.today()` hardcoded `.astimezone(IST)` — harmless for NSE (already IST) but a US clock pinned at NYSE close (16:00 ET) converted to 01:30 IST *next day*, mislabeling every US paper session's trading date; fixed to read the clock's own tz. `sim_clock_at()` takes `market=` (default NSE, backward compatible). **paper==sim proven for RPLITE** (`test_us_paper_reproduces_sim_exactly`, to the cent, same M4 discipline as NSE) + a direct regression-guard test for the SimClock bug. `configs/qe_us_rplite_book_paper.yaml` added; operator runbook updated (US book added to cadence + real-time paper sections, clearly marked NOT YET ACTIVATED). Deliberately did NOT run a real paper session — that creates the persisted book-state file marking official inception, which is the actual activation event awaiting operator approval. Full qe suite 89/89 green. Awaiting operator approval → first real session ≥2026-07-31. |
+| P6a | First live surface (much later, gated): **Robinhood Agentic Trading MCP** — qe recommends → human/supervised agent relays into dedicated capital-capped agentic account (Robinhood approval previews + qe kill-switch/whitelist before relay); official MCP only, unofficial wrappers banned | 🔒 BLOCKED by design |
+| P6b | Full automation (later still): ALPACA-FIX enum bug, Alpaca adapter behind `LiveGateToken`, close US universe-validation bypass (`order_validator.py:89-101`), US M6 preconditions; only if P6a proves out | 🔒 BLOCKED by design |
+
+**Standing cautions:** QC "proven" strategies are hypotheses — most should die in validation.
+Free data = LOW trust → quarantine → cross-validate → promote. Extend qe; never revive v1 for
+US (v1 Alpaca code = porting reference only). Live BLOCKED.

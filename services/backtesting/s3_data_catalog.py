@@ -56,6 +56,15 @@ _HIGH_TRUST_SOURCES: frozenset[str] = frozenset(
         "gfdl",
         "vendor",
         "licensed",
+        # Zerodha Kite historical_data: exchange-validated candles from the
+        # operator's own authorized broker feed. Classified HIGH per
+        # aws-data-lake-contract.md §1 (the "gap-fill" tier). NOTE: trust is
+        # about provenance quality, not coverage — Kite intraday depth is
+        # limited (~3 yr, liquid names), so it is a limited-depth intraday
+        # source for edge exploration, never a 15-yr authoritative backbone.
+        "zerodha",
+        "zerodha_kite",
+        "kite",
     }
 )
 

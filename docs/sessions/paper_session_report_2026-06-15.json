@@ -1,0 +1,74 @@
+{
+  "report_date": "2026-06-15",
+  "environment": "development",
+  "generated_at": "2026-06-15T09:50:50.221354+00:00",
+  "session_start": "2026-06-15T09:15:00+05:30",
+  "session_end": "2026-06-15T15:30:00+05:30",
+  "signals": {
+    "total_pending": 6,
+    "total_enriched": 6,
+    "total_degraded": 0,
+    "total_approved": 6,
+    "total_rejected": 0,
+    "total_executed": 0,
+    "total_filled": 0
+  },
+  "rejections": {
+    "kill_switch": 0,
+    "position_limit": 0,
+    "daily_loss": 0,
+    "margin": 0,
+    "signal_age": 0,
+    "spread_gate": 0,
+    "sector_limit": 0,
+    "liquidity": 0,
+    "other": 0
+  },
+  "execution": {
+    "total_orders": 6,
+    "filled": 6,
+    "partially_filled": 0,
+    "rejected": 0,
+    "cancelled": 0,
+    "avg_slippage_pct": 0.0,
+    "max_slippage_pct": 0.0,
+    "avg_fill_latency_ms": 0.0,
+    "total_fill_notional": 197906.8626,
+    "estimated_costs_inr": 395.8137252
+  },
+  "strategies": [],
+  "circuit_breakers": {
+    "kill_switch_activations": 0,
+    "fallback_activations": 0,
+    "fallback_recovery_events": 0,
+    "avg_fallback_duration_sec": 0.0
+  },
+  "alpha": {
+    "total_forecasts": 6,
+    "labeled": 1,
+    "correct": 0,
+    "incorrect": 1,
+    "unlabelable": 5,
+    "pending": 0,
+    "by_model": {
+      "alpha_orb_v2": {
+        "total": 6,
+        "labeled": 1,
+        "correct": 0,
+        "incorrect": 1,
+        "unlabelable": 5,
+        "pending": 0
+      }
+    }
+  },
+  "readiness_checks": {
+    "enrichment_rate": "PASS",
+    "signal_approval_rate": "PASS",
+    "order_fill_rate": "PASS",
+    "avg_slippage": "PASS",
+    "fallback_activations": "PASS",
+    "kill_switch_events": "PASS"
+  },
+  "readiness_verdict": "READY",
+  "notes": []
+}

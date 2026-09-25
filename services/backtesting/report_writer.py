@@ -152,7 +152,7 @@ def _ensure_nonempty(df: pd.DataFrame | None, cols: list[str]) -> pd.DataFrame:
 
 def _build_equity(trades: pd.DataFrame, initial_capital: float) -> pd.DataFrame:
     if trades.empty or "net_pnl" not in trades:
-        return pd.DataFrame({"timestamp": [pd.Timestamp.utcnow()], "equity": [initial_capital]})
+        return pd.DataFrame({"timestamp": [pd.Timestamp.now("UTC")], "equity": [initial_capital]})
     ordered = trades.sort_values("exit_time") if "exit_time" in trades else trades
     return pd.DataFrame({
         "timestamp": pd.to_datetime(ordered["exit_time"]) if "exit_time" in ordered else range(len(ordered)),

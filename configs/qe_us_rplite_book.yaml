@@ -1,0 +1,18 @@
+name: rplite-book
+mode: sim
+start_date: 2026-07-31   # first forward rebalance once Phase 5 activates the book
+end_date: 2028-12-31     # open horizon — sim's complete-month rule never rebalances the final partial month
+universe:
+  market: US
+  segment: EQ
+  symbols: [SPY, TLT, GLD]
+data:
+  lake_root: backtest-data/lake
+  interval: 1d
+journal_dir: journals
+seed_nav: 1000000.0
+strategy:
+  kind: risk_parity_lite
+  assets: [SPY, TLT, GLD]
+  vol_lookback: 63
+  cash_buffer: 0.005

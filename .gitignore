@@ -9,6 +9,7 @@ build/
 .terraform/
 *.tfstate
 *.tfstate.backup
+*.tfplan
 .terraform.lock.hcl
 .pytest_cache/
 .mypy_cache/
@@ -31,3 +32,7 @@ backtest-data/
 *.docx
 *.xlsx
 *.pdf
+journals/
+
+# qe live-gate ephemeral tokens (evidence artifacts ARE committed; tokens are not)
+governance/live-gate/token-*.json

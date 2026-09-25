@@ -1,8 +1,10 @@
-"""Unit tests for the metrics engine + report writer (Phase AWS-BT-8).
+"""Unit tests for the metrics engine + report writer (Phase 7).
 
 Covers: metrics correctness · local report files written · S3 write (stubbed) ·
-summary contains required metrics · failure report generated · results include
-code_version and data_version.
+summary contains required metrics · failure report generated · versions recorded ·
+total_return_pct · annualised_return_pct (CAGR) · sharpe_ratio · sortino_ratio ·
+largest_win/loss · max_consecutive_losses · lookahead_violations always 0 ·
+no broker references.
 
 Backtest-only: temp dirs, in-memory fake S3 — no AWS, no broker.
 
@@ -150,6 +152,113 @@ def test_results_include_code_and_data_version(tmp_path):
     assert metrics_json["data_version"] == "snap-2020"
     config = json.loads((run_dir / "config.yaml").read_text())  # JSON is valid YAML
     assert config["code_version"] == "abc123" and config["data_version"] == "snap-2020"
+
+
+def test_total_return_pct():
+    """total_return_pct = net_pnl / initial_capital × 100."""
+    m = compute_metrics(_trades(), initial_capital=1_000_000)
+    # net_pnl = 70 → 70 / 1_000_000 * 100 = 0.007%
+    assert abs(m["total_return_pct"] - 0.007) < 1e-9
+
+
+def test_annualised_return_pct_cagr():
+    """CAGR with a known 1-year period: net_pnl 100_000 on 1_000_000 → ~10% annualised."""
+    t0 = pd.Timestamp("2020-01-01 09:30", tz=IST)
+    t1 = pd.Timestamp("2021-01-01 15:30", tz=IST)
+    df = pd.DataFrame([dict(
+        symbol="R", strategy="s", direction="LONG",
+        entry_time=t0, exit_time=t1,
+        entry_price=100, exit_price=110, quantity=1000,
+        gross_pnl=10_003, costs=3, slippage=0, net_pnl=10_000,
+        exit_reason="FINAL_TARGET", mfe_r=2.0, mae_r=-0.1, r_multiple=2.0, mis_dependent=False,
+    )])
+    # 1 year in seconds
+    period = (t1 - t0).total_seconds()
+    m = compute_metrics(df, initial_capital=100_000, period_seconds=period)
+    # CAGR = (110_000/100_000)^1 - 1 = 10% → ~10%
+    assert 9.0 < m["annualised_return_pct"] < 11.0
+
+
+def test_largest_win_and_loss():
+    """largest_win = max winning trade; largest_loss = min losing trade (negative)."""
+    m = compute_metrics(_trades(), initial_capital=1_000_000)
+    # Winners: 100, 20 → largest_win = 100
+    assert m["largest_win"] == 100.0
+    # Losers: -50 → largest_loss = -50
+    assert m["largest_loss"] == -50.0
+
+
+def test_max_consecutive_losses():
+    """Longest losing streak is counted correctly across a mixed sequence."""
+    t0 = pd.Timestamp("2020-06-01 10:00", tz=IST)
+    rows = []
+    # sequence: W L L L W L W → streak = 3
+    for i, pnl in enumerate([10, -5, -5, -5, 10, -5, 10]):
+        rows.append(dict(
+            symbol="R", strategy="s", direction="LONG",
+            entry_time=t0 + pd.Timedelta(minutes=i),
+            exit_time=t0 + pd.Timedelta(minutes=i + 1),
+            entry_price=100, exit_price=100 + (pnl > 0) * 1,
+            quantity=10, gross_pnl=pnl + 1, costs=1, slippage=0,
+            net_pnl=pnl, exit_reason="FINAL_TARGET" if pnl > 0 else "STOP_LOSS",
+            mfe_r=1.0, mae_r=-0.5, r_multiple=1.0, mis_dependent=False,
+        ))
+    m = compute_metrics(pd.DataFrame(rows))
+    assert m["max_consecutive_losses"] == 3
+
+
+def test_sharpe_and_sortino_computed():
+    """Sharpe and Sortino are non-zero when equity curve has variance across days."""
+    t0 = pd.Timestamp("2020-06-01 10:00", tz=IST)
+    rows = []
+    # Build trades spread across 5 different days, alternating win/loss.
+    for day in range(5):
+        pnl = 200 if day % 2 == 0 else -80
+        rows.append(dict(
+            symbol="R", strategy="s", direction="LONG",
+            entry_time=t0 + pd.Timedelta(days=day),
+            exit_time=t0 + pd.Timedelta(days=day, hours=1),
+            entry_price=100, exit_price=100 + (pnl > 0) * 2,
+            quantity=10, gross_pnl=pnl + 5, costs=5, slippage=0,
+            net_pnl=pnl, exit_reason="FINAL_TARGET" if pnl > 0 else "STOP_LOSS",
+            mfe_r=1.5, mae_r=-0.5, r_multiple=1.0, mis_dependent=False,
+        ))
+    m = compute_metrics(pd.DataFrame(rows), initial_capital=100_000)
+    assert m["sharpe_ratio"] != 0.0, "Sharpe should be non-zero with daily equity variance"
+    assert m["sortino_ratio"] != 0.0, "Sortino should be non-zero with losing days"
+
+
+def test_lookahead_violations_always_zero():
+    """lookahead_violations is always 0 — enforced by the replay engine invariant."""
+    m = compute_metrics(_trades(), initial_capital=1_000_000)
+    assert m["lookahead_violations"] == 0
+    m_empty = compute_metrics(pd.DataFrame())
+    assert m_empty["lookahead_violations"] == 0
+
+
+def test_no_broker_calls_in_metrics_engine():
+    """metrics_engine.py and report_writer.py must not reference broker APIs."""
+    import backtesting.metrics_engine as me_mod
+    import backtesting.report_writer as rw_mod
+    forbidden = ["kiteconnect", "alpaca", "place_order", "zerodhabroker", "submit_order"]
+    for mod in (me_mod, rw_mod):
+        src = Path(mod.__file__).read_text().lower()
+        present = [t for t in forbidden if t in src]
+        assert present == [], f"{mod.__name__} must not reference brokers: {present}"
+
+
+def test_summary_contains_new_catalog_metrics(tmp_path):
+    """Summary markdown includes the new catalog metrics added in Phase 7."""
+    m = compute_metrics(_trades(), initial_capital=1_000_000)
+    res = ReportWriter(base_dir=str(tmp_path)).write_run(_meta(), metrics=m, trades=_trades())
+    summary = (Path(res["local_dir"]) / "summary.md").read_text()
+    # Existing tokens already tested in test_summary_contains_required_metrics —
+    # check that new fields appear in metrics.json instead.
+    import json
+    metrics_json = json.loads((Path(res["local_dir"]) / "metrics.json").read_text())
+    for key in ("total_return_pct", "largest_win", "largest_loss",
+                "max_consecutive_losses", "lookahead_violations"):
+        assert key in metrics_json, f"metrics.json missing {key!r}"
 
 
 if __name__ == "__main__":

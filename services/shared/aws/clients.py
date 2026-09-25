@@ -57,6 +57,7 @@ _s3_client: Any = None
 _dynamodb_resource: Any = None
 _dynamodb_client: Any = None  # Low-level client (for conditional writes)
 _secretsmanager_client: Any = None
+_cloudwatch_client: Any = None
 
 
 def _endpoint_kwargs() -> dict[str, Any]:
@@ -143,6 +144,23 @@ def get_secretsmanager_client() -> Any:
     return _secretsmanager_client
 
 
+def get_cloudwatch_client() -> Any:
+    """Return a shared boto3 CloudWatch client (metrics, not logs).
+
+    Backtest workers use this to emit custom metrics under the
+    ``QuantEmbrace/Backtest`` namespace.
+    """
+    global _cloudwatch_client
+    if _cloudwatch_client is None:
+        _cloudwatch_client = boto3.client(
+            "cloudwatch",
+            config=_BOTO_CONFIG,
+            **_endpoint_kwargs(),
+        )
+        _log_client_init("CloudWatch")
+    return _cloudwatch_client
+
+
 def reset_clients() -> None:
     """
     Reset all singleton clients.
@@ -150,11 +168,12 @@ def reset_clients() -> None:
     Used in tests to force fresh client creation with different configs,
     e.g., when patching LOCALSTACK_ENDPOINT_URL between tests.
     """
-    global _s3_client, _dynamodb_resource, _dynamodb_client, _secretsmanager_client
+    global _s3_client, _dynamodb_resource, _dynamodb_client, _secretsmanager_client, _cloudwatch_client
     _s3_client = None
     _dynamodb_resource = None
     _dynamodb_client = None
     _secretsmanager_client = None
+    _cloudwatch_client = None
 
 
 def is_localstack() -> bool:

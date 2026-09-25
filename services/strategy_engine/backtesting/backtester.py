@@ -398,15 +398,24 @@ class Backtester:
                 max_dd_abs = dd_abs
 
         # ── Close any remaining open positions at last bar price ───────────
+        # Collect the last bar PER OPEN-POSITION SYMBOL. Only record symbols
+        # that actually hold a position — otherwise, in a multi-symbol bar
+        # stream, the early break can stop before an open symbol's last bar is
+        # seen, and the fallback below would close it at another symbol's price
+        # (a cross-symbol mark-out bug that inflates/garbles EOD P&L).
         last_bar_map: dict[str, Bar] = {}
         for bar in reversed(bars):
-            if bar.symbol not in last_bar_map:
+            if bar.symbol in open_positions and bar.symbol not in last_bar_map:
                 last_bar_map[bar.symbol] = bar
             if len(last_bar_map) == len(open_positions):
                 break
 
         for sym, pos in list(open_positions.items()):
-            last_bar = last_bar_map.get(sym, bars[-1])
+            # A symbol with an open position always has at least one bar, so it
+            # is guaranteed to be in last_bar_map; the fallback is defensive only.
+            last_bar = last_bar_map.get(sym)
+            if last_bar is None:
+                continue
             trade, cash = self._close_position(pos, last_bar.close, "eod", last_bar.timestamp, cash)
             result.trades.append(trade)
 

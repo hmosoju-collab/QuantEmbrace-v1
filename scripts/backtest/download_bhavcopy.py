@@ -35,11 +35,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import queue
 import sys
 import threading
 import time
+import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -55,10 +57,20 @@ _DEFAULT_BASE = _REPO / "backtest-data"
 
 # ── NSE config ────────────────────────────────────────────────────────────────
 NSE_HOME = "https://www.nseindia.com"
+# New format (2019-present): full bhavcopy with delivery data in a single flat CSV
 NSE_ARCHIVE_URL = (
     "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{date}.csv"
 )
-EQUITY_MASTER_URL = "https://www.nseindia.com/content/equities/EQUITY_L.csv"
+# Legacy format (pre-2019): cm bhavcopy ZIP in /content/historical/EQUITIES/{YYYY}/{MMM}/
+NSE_LEGACY_URL = (
+    "https://nsearchives.nseindia.com/content/historical/EQUITIES"
+    "/{year}/{month}/cm{date_str}bhav.csv.zip"
+)
+PRE_2019_CUTOFF = date(2019, 1, 1)
+_MONTH_ABBR = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+EQUITY_MASTER_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -159,6 +171,12 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _legacy_url(d: date) -> str:
+    month = _MONTH_ABBR[d.month - 1]
+    date_str = f"{d.day:02d}{month}{d.year:04d}"
+    return NSE_LEGACY_URL.format(year=d.year, month=month, date_str=date_str)
+
+
 def _raw_dir(base: Path, d: date) -> Path:
     return base / "raw" / "bhavcopy" / f"ingest_date={d.isoformat()}"
 
@@ -170,20 +188,35 @@ def _lake_dir(base: Path, symbol: str, year: int) -> Path:
 
 def download_one(session: requests.Session, d: date, base: Path,
                  dry_run: bool = False) -> Optional[dict]:
-    """Download a single day's Bhavcopy. Returns manifest dict or None on skip/failure."""
-    date_str = d.strftime("%d%m%Y")   # DDMMYYYY
-    url = NSE_ARCHIVE_URL.format(date=date_str)
-    raw_dir = _raw_dir(base, date.today())  # group by ingest date (today)
-    dest_file = raw_dir / f"sec_bhavdata_full_{date_str}.csv"
+    """Download a single day's Bhavcopy. Returns manifest dict or None on skip/failure.
+
+    Dispatches to the legacy cm-bhavcopy ZIP format for dates before 2019-01-01,
+    and to the modern sec_bhavdata_full CSV for 2019+.
+    """
+    raw_dir = _raw_dir(base, date.today())
     manifest_file = raw_dir / "_manifest.json"
 
+    if d < PRE_2019_CUTOFF:
+        # ── Legacy path (pre-2019): cm{DDMMMYYYY}bhav.csv.zip ──────────────
+        month = _MONTH_ABBR[d.month - 1]
+        date_str = f"{d.day:02d}{month}{d.year:04d}"
+        url = _legacy_url(d)
+        dest_file = raw_dir / f"cm{date_str}bhav.csv"
+        filename_key = dest_file.name
+    else:
+        # ── Modern path (2019+): sec_bhavdata_full_DDMMYYYY.csv ─────────────
+        date_str = d.strftime("%d%m%Y")
+        url = NSE_ARCHIVE_URL.format(date=date_str)
+        dest_file = raw_dir / f"sec_bhavdata_full_{date_str}.csv"
+        filename_key = dest_file.name
+
     # Idempotent: skip if already downloaded
-    if dest_file.exists() and manifest_file.exists():
-        with open(manifest_file) as f:
-            mf = json.load(f)
-        # Check this specific trading date is recorded
-        if any(e.get("trading_date") == d.isoformat() for e in mf.get("files", [])):
-            return None  # already done
+    already_have = any(
+        f.name == filename_key
+        for f in base.rglob(filename_key)
+    )
+    if already_have:
+        return None
 
     if dry_run:
         print(f"  [dry-run] would download {url}")
@@ -192,10 +225,8 @@ def download_one(session: requests.Session, d: date, base: Path,
     try:
         resp = session.get(url, timeout=30, headers=BROWSER_HEADERS)
         if resp.status_code == 404:
-            # Holiday or non-trading day — expected, not an error
             return None
         if resp.status_code == 403:
-            # Bot-shield kicked in — re-prime and retry once
             print(f"\n  [WARN] 403 on {url} — re-priming session...")
             _prime_session(session, verbose=False)
             time.sleep(3)
@@ -203,9 +234,25 @@ def download_one(session: requests.Session, d: date, base: Path,
 
         resp.raise_for_status()
         raw_bytes = resp.content
-        sha = _sha256_bytes(raw_bytes)
+
+        # For legacy format: extract the CSV from the ZIP before saving
+        if d < PRE_2019_CUTOFF:
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+                    csv_name = next((n for n in z.namelist() if n.endswith(".csv")), None)
+                    if not csv_name:
+                        print(f"\n  [WARN] {d} — no CSV inside ZIP, skipping")
+                        return None
+                    save_bytes = z.read(csv_name)
+            except zipfile.BadZipFile:
+                print(f"\n  [WARN] {d} — bad ZIP response, skipping")
+                return None
+        else:
+            save_bytes = raw_bytes
+
+        sha = _sha256_bytes(save_bytes)
         raw_dir.mkdir(parents=True, exist_ok=True)
-        dest_file.write_bytes(raw_bytes)
+        dest_file.write_bytes(save_bytes)
 
         # Update manifest
         entry = {
@@ -213,10 +260,11 @@ def download_one(session: requests.Session, d: date, base: Path,
             "filename": dest_file.name,
             "url": url,
             "sha256": sha,
-            "size_bytes": len(raw_bytes),
+            "size_bytes": len(save_bytes),
             "downloaded_at": datetime.utcnow().isoformat() + "Z",
             "source": "bhavcopy",
             "trust_level": "HIGH",
+            "format": "legacy_cm" if d < PRE_2019_CUTOFF else "sec_bhavdata_full",
         }
         existing = []
         if manifest_file.exists():
@@ -232,14 +280,29 @@ def download_one(session: requests.Session, d: date, base: Path,
 
 
 def _parse_bhavcopy(csv_bytes: bytes, trading_date: date) -> pd.DataFrame:
-    """Parse a sec_bhavdata_full CSV into canonical DataFrame (EQ series only)."""
-    import io
-
-    df = pd.read_csv(
-        io.BytesIO(csv_bytes),
-        dtype=str,
-        skipinitialspace=True,   # strips leading whitespace from headers/values
-    )
+    """Parse a sec_bhavdata_full CSV (or XLSX) into canonical DataFrame (EQ series only)."""
+    # NSE occasionally serves XLSX instead of CSV (ZIP magic bytes PK\x03\x04)
+    if csv_bytes[:4] == b"PK\x03\x04":
+        try:
+            df = pd.read_excel(io.BytesIO(csv_bytes), dtype=str)
+        except Exception as e:
+            print(f"  WARN: {trading_date} — XLSX parse failed ({e}), skipping")
+            return pd.DataFrame()
+    else:
+        try:
+            df = pd.read_csv(
+                io.BytesIO(csv_bytes),
+                dtype=str,
+                skipinitialspace=True,
+                encoding="utf-8",
+            )
+        except UnicodeDecodeError:
+            df = pd.read_csv(
+                io.BytesIO(csv_bytes),
+                dtype=str,
+                skipinitialspace=True,
+                encoding="latin-1",
+            )
 
     # Normalise column names (strip whitespace, uppercase)
     df.columns = [c.strip().upper() for c in df.columns]
@@ -310,6 +373,72 @@ def _parse_bhavcopy(csv_bytes: bytes, trading_date: date) -> pd.DataFrame:
     return df
 
 
+def _parse_legacy_bhavcopy(csv_bytes: bytes, trading_date: date) -> pd.DataFrame:
+    """Parse the old cm{DDMMMYYYY}bhav.csv format (pre-2019 NSE archives).
+
+    Old columns: SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,
+                 TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN,DELIV_QTY,DELIV_PER
+    """
+    try:
+        df = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, skipinitialspace=True)
+    except UnicodeDecodeError:
+        df = pd.read_csv(io.BytesIO(csv_bytes), dtype=str, skipinitialspace=True,
+                         encoding="latin-1")
+
+    df.columns = [c.strip().upper() for c in df.columns]
+
+    if "SERIES" not in df.columns:
+        return pd.DataFrame()
+    df = df[df["SERIES"].str.strip() == "EQ"].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    col_map = {
+        "SYMBOL":    "symbol",
+        "ISIN":      "isin",
+        "OPEN":      "open",
+        "HIGH":      "high",
+        "LOW":       "low",
+        "CLOSE":     "close",
+        "PREVCLOSE": "prev_close",
+        "TOTTRDQTY": "volume",
+        "DELIV_QTY": "delivery_qty",
+        "DELIV_PER": "delivery_pct",
+    }
+    df = df.rename(columns=col_map)
+    df["symbol"] = df["symbol"].str.strip()
+
+    ts = pd.Timestamp(trading_date.isoformat() + " 15:30:00").tz_localize("Asia/Kolkata")
+    df["timestamp"] = ts
+
+    for col in ["open", "high", "low", "close", "prev_close"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "volume" in df.columns:
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
+    if "delivery_qty" in df.columns:
+        df["delivery_qty"] = pd.to_numeric(df["delivery_qty"], errors="coerce").fillna(0.0)
+    if "delivery_pct" in df.columns:
+        df["delivery_pct"] = pd.to_numeric(df["delivery_pct"], errors="coerce")
+
+    df["market"] = "NSE"
+    df["segment"] = "EQ"
+    df["interval"] = "1d"
+    df["source"] = "bhavcopy"
+    df["trust_level"] = "HIGH"
+
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    valid = (
+        (df["low"] <= df["open"]) & (df["low"] <= df["close"]) &
+        (df["high"] >= df["open"]) & (df["high"] >= df["close"]) &
+        (df["open"] > 0) & (df["close"] > 0)
+    )
+    bad = (~valid).sum()
+    if bad:
+        print(f"  [WARN] {bad} rows failed OHLC validation on {trading_date} — dropping")
+    return df[valid].copy()
+
+
 def normalize_to_parquet(base: Path, year: int, verbose: bool = True) -> dict:
     """
     Read all downloaded Bhavcopy CSVs for a given year, normalize, and write
@@ -323,38 +452,48 @@ def normalize_to_parquet(base: Path, year: int, verbose: bool = True) -> dict:
     raw_base = base / "raw" / "bhavcopy"
     symbol_frames: dict[str, list[pd.DataFrame]] = {}
 
-    # Scan all ingest_date= dirs for CSVs matching this year
-    csv_files = sorted(raw_base.rglob(f"sec_bhavdata_full_??{year:04d}*.csv"))
-    # Also check DDMMYYYY pattern where year is at the end
-    # Pattern: sec_bhavdata_full_DDMMYYYY.csv
-    year_csvs = []
+    # ── New format: sec_bhavdata_full_DDMMYYYY.csv (2019+) ──────────────────
+    year_csvs: list[tuple[date, Path, str]] = []  # (trading_date, path, format)
     for f in sorted(raw_base.rglob("sec_bhavdata_full_*.csv")):
         name = f.stem  # sec_bhavdata_full_DDMMYYYY
         parts = name.split("_")
         if len(parts) >= 4:
             date_part = parts[-1]  # DDMMYYYY
             if len(date_part) == 8 and date_part[4:] == str(year):
-                year_csvs.append(f)
+                try:
+                    d = date(int(date_part[4:8]), int(date_part[2:4]), int(date_part[0:2]))
+                    year_csvs.append((d, f, "modern"))
+                except ValueError:
+                    pass
+
+    # ── Legacy format: cm{DDMMMYYYY}bhav.csv (pre-2019) ─────────────────────
+    for f in sorted(raw_base.rglob("cm*bhav.csv")):
+        name = f.stem  # cm{DDMMMYYYY}bhav
+        date_str = name[2:-4]  # strip 'cm' prefix and 'bhav' suffix → DDMMMYYYY
+        try:
+            d = datetime.strptime(date_str, "%d%b%Y").date()
+            if d.year == year:
+                year_csvs.append((d, f, "legacy"))
+        except ValueError:
+            pass
 
     if not year_csvs:
         if verbose:
             print(f"  No CSVs found for {year} — skipping")
         return {"year": year, "symbols": 0, "rows": 0, "days": 0}
 
+    year_csvs.sort(key=lambda x: x[0])
     if verbose:
         print(f"  Found {len(year_csvs)} CSV files for {year}")
 
     rows_total = 0
     days_processed = 0
-    for csv_path in sorted(year_csvs):
-        date_part = csv_path.stem.split("_")[-1]  # DDMMYYYY
-        try:
-            d = date(int(date_part[4:8]), int(date_part[2:4]), int(date_part[0:2]))
-        except ValueError:
-            continue
-
+    for d, csv_path, fmt in year_csvs:
         raw_bytes = csv_path.read_bytes()
-        df = _parse_bhavcopy(raw_bytes, d)
+        if fmt == "legacy":
+            df = _parse_legacy_bhavcopy(raw_bytes, d)
+        else:
+            df = _parse_bhavcopy(raw_bytes, d)
         if df.empty:
             continue
 
@@ -400,9 +539,9 @@ def normalize_to_parquet(base: Path, year: int, verbose: bool = True) -> dict:
 
 
 def download_equity_master(session: requests.Session, base: Path) -> None:
-    """Download EQUITY_L.csv (SYMBOL→ISIN reference) once."""
+    """Download EQUITY_L.csv (SYMBOL→ISIN reference) once (re-downloads if empty)."""
     dest = base / "reference" / "symbol_map" / "equity_l.csv"
-    if dest.exists():
+    if dest.exists() and dest.stat().st_size > 0:
         print("EQUITY_L.csv already present — skipping")
         return
     print("Downloading EQUITY_L.csv (SYMBOL→ISIN reference)...", end=" ", flush=True)

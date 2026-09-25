@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO / "services"))
@@ -139,5 +140,76 @@ def test_scalp_remains_paper_only():
     assert enriched["metadata"]["paper_trade"] is True
 
 
+def test_get_adapter_raises_for_unknown_name():
+    with pytest.raises(ValueError, match="Unknown strategy"):
+        get_adapter("doesnotexist")
+
+
+def test_list_adapters_returns_all_six():
+    names = list_adapters()
+    assert set(names) == {"vwap_reversion", "momentum", "orb", "trend_15m", "preclose", "scalp_1m"}
+    assert len(names) == 6
+
+
+def test_paper_only_adapters_filterable():
+    """Only scalp_1m is paper_only; 5 adapters are eligible for live comparison."""
+    live_eligible = [n for n in list_adapters() if not get_adapter(n).paper_only]
+    paper_only_names = [n for n in list_adapters() if get_adapter(n).paper_only]
+    assert paper_only_names == ["scalp_1m"]
+    assert len(live_eligible) == 5
+    assert "scalp_1m" not in live_eligible
+
+
+def test_enrich_non_scalp_preserves_paper_trade_flag():
+    """A non-paper-only adapter's enrich() does not override paper_trade."""
+    from shared.models.signal import Direction, Signal
+
+    mom = get_adapter("momentum")
+    assert mom.paper_only is False
+    raw = Signal(
+        symbol="INFY", market="NSE", direction=Direction.BUY, quantity=1, confidence=0.85,
+        strategy_name="momentum", price_at_signal=1500.0, stop_loss=1485.0, take_profit=1530.0,
+        paper_trade=False,
+    )
+    enriched = mom.enrich(raw, data_version="snap-test")
+    assert enriched.get("paper_trade") is not True
+    assert enriched["strategy_version"] == "momentum@2.0"
+    assert enriched["data_version"] == "snap-test"
+    assert enriched["metadata"]["backtest"] is True
+
+
+def test_enrich_tee_metadata_completeness():
+    """enrich() includes all TEE fields the Trade Exit Engine needs."""
+    from shared.models.signal import Direction, Signal
+
+    a = get_adapter("momentum")
+    raw = Signal(
+        symbol="TCS", market="NSE", direction=Direction.BUY, quantity=5, confidence=0.8,
+        strategy_name="momentum", price_at_signal=3500.0, stop_loss=3465.0, take_profit=3570.0,
+        paper_trade=True,
+    )
+    e = a.enrich(raw, data_version="v2")
+    tee = e["metadata"]["tee"]
+    assert tee["strategy"] == "momentum"
+    assert tee["entry_price"] == 3500.0
+    assert tee["stop_loss"] == 3465.0
+    assert tee["take_profit"] == 3570.0
+    assert abs(tee["risk_per_unit"] - 35.0) < 1e-6   # 3500 - 3465
+    assert abs(tee["rr_target"] - 2.0) < 0.1         # 70 / 35
+    assert tee["product_type"] == "MIS"
+    assert tee["exit_policy_version"] == "tee@1.0"
+    assert e["metadata"]["backtest"] is True
+
+
+def test_no_broker_calls_in_strategy_adapter():
+    """strategy_adapter.py must not reference broker APIs."""
+    import backtesting.strategy_adapter as sa_mod
+
+    forbidden = ["kiteconnect", "alpaca", "place_order", "zerodhabroker", "submit_order"]
+    src = Path(sa_mod.__file__).read_text().lower()
+    present = [t for t in forbidden if t in src]
+    assert present == [], f"strategy_adapter.py must not reference brokers: {present}"
+
+
 if __name__ == "__main__":
-    sys.exit(__import__("pytest").main([__file__, "-q"]))
+    sys.exit(pytest.main([__file__, "-q"]))

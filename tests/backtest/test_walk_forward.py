@@ -1,8 +1,10 @@
-"""Unit tests for walk-forward validation (Phase AWS-BT-9).
+"""Unit tests for walk-forward validation (Phase 5).
 
 Covers: train/validation windows do not overlap · validation always after train ·
 no future leakage · fold reports generated · unstable strategy flagged ·
-parameters selected only from the train period.
+parameters selected only from the train period · REJECT eligibility ·
+PAPER_OPTIMIZATION eligibility · registry run registration · INSUFFICIENT_DATA ·
+no broker references.
 
 Backtest-only: a stub ``evaluate`` callback — no real backtest, no broker, no AWS.
 
@@ -109,6 +111,101 @@ def test_parameters_selected_only_from_train_period():
         # Validate phase was called exactly once for this fold, with the chosen param.
         val_calls = [p for (f, ph, p) in calls if f == fid and ph == "validate"]
         assert val_calls == [2.0]
+
+
+def test_reject_eligibility_when_oos_gates_fail():
+    """Strategy with negative OOS expectancy → REJECT verdict."""
+    def bad_evaluate(params, fold, phase):
+        return {"expectancy": -2.0, "profit_factor": 0.8, "net_pnl": -5000.0}
+
+    res = run_walk_forward(
+        start="2018-01-01", end="2020-07-01", spec=PRESETS["default"],
+        param_grid=GRID, evaluate=bad_evaluate,
+    )
+    assert res.eligibility == "REJECT"
+    assert res.aggregate["gates"]["overall_pass"] is False
+    assert res.overfit_warning is True
+
+
+def test_paper_optimization_when_gates_pass_but_overfit():
+    """OOS gates pass but severe IS→OOS degradation → PAPER_OPTIMIZATION."""
+    call_counts: dict[str, int] = {}
+
+    def degraded_evaluate(params, fold, phase):
+        call_counts[phase] = call_counts.get(phase, 0) + 1
+        if phase == "train":
+            return {"expectancy": 20.0, "profit_factor": 3.0, "net_pnl": 50000.0}
+        # OOS: expectancy barely positive but degradation ratio = 0.1 < 0.5 → overfit
+        return {"expectancy": 2.0, "profit_factor": 1.3, "net_pnl": 5000.0}
+
+    res = run_walk_forward(
+        start="2018-01-01", end="2020-07-01", spec=PRESETS["default"],
+        param_grid=GRID, evaluate=degraded_evaluate,
+    )
+    assert res.aggregate["gates"]["overall_pass"] is True
+    assert res.aggregate["is_oos_degradation"] < 0.5
+    assert res.overfit_warning is True
+    assert res.eligibility == "PAPER_OPTIMIZATION"
+
+
+def test_registry_run_registration():
+    """When registry + run_spec_factory are supplied, each OOS fold gets a run_id."""
+    from unittest.mock import MagicMock
+
+    fake_rec = MagicMock()
+    fake_rec.run_id = "bt_test_fold"
+    registry = MagicMock()
+    registry.create_run.return_value = fake_rec
+
+    def run_spec_factory(fold, params):
+        return MagicMock()
+
+    res = run_walk_forward(
+        start="2018-01-01", end="2019-07-01", spec=PRESETS["default"],
+        param_grid=GRID, evaluate=_good_evaluate,
+        registry=registry, run_spec_factory=run_spec_factory,
+    )
+    n = len(res.folds)
+    assert n > 0
+    assert registry.create_run.call_count == n
+    assert registry.mark_completed.call_count == n
+    for fr in res.folds:
+        assert fr.run_id == "bt_test_fold"
+
+
+def test_insufficient_data_returns_no_folds():
+    """Date range shorter than one full train+validate window → no folds, INSUFFICIENT_DATA."""
+    spec = PRESETS["default"]  # 12m train + 3m validate = 15m minimum
+    # Provide only 6 months → cannot fit even one fold
+    res = run_walk_forward(
+        start="2020-01-01", end="2020-06-01", spec=spec,
+        param_grid=GRID, evaluate=_good_evaluate,
+    )
+    assert res.folds == []
+    assert res.eligibility == "INSUFFICIENT_DATA"
+    assert res.stability_score == 0.0
+
+
+def test_anchored_mode_train_window_grows():
+    """Anchored mode: train_start is fixed while validate window rolls forward."""
+    spec = WindowSpec(12, 3, 3, anchored=True)
+    folds = generate_folds("2018-01-01", "2021-01-01", spec)
+    assert len(folds) > 1
+    # All train windows share the same start date.
+    starts = {f.train_start for f in folds}
+    assert len(starts) == 1
+    # Train window grows each fold (end advances).
+    ends = [f.train_end for f in folds]
+    assert ends == sorted(ends)
+
+
+def test_no_broker_calls_in_walk_forward():
+    """walk_forward.py must not import or reference any broker API."""
+    import backtesting.walk_forward as wf_mod
+    src = Path(wf_mod.__file__).read_text().lower()
+    forbidden = ["kiteconnect", "alpaca", "place_order", "zerodhabroker", "submit_order"]
+    present = [t for t in forbidden if t in src]
+    assert present == [], f"walk_forward must not reference brokers: {present}"
 
 
 if __name__ == "__main__":

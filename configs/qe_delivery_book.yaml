@@ -1,0 +1,21 @@
+name: delivery-book
+mode: sim
+start_date: 2025-12-31
+end_date: 2027-12-31   # open horizon — sim's complete-month rule never rebalances the final partial month
+universe:
+  market: NSE
+  segment: EQ
+  symbols: null
+data:
+  lake_root: backtest-data/lake
+  interval: 1d
+journal_dir: journals
+seed_nav: 1000000.0
+strategy:
+  kind: factor_book
+  factor: delivery
+  top_n: 200
+  k: 20
+  max_weight: 0.08
+  cash_buffer: 0.02
+  rebalance: monthly

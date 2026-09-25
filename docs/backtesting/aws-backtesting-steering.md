@@ -95,3 +95,42 @@ The lab **consumes** the same strategy classes, cost model, and feature definiti
 ## 7. Document map
 
 `aws-backtesting-specification.md` (what to build) · `aws-backtesting-implementation-plan.md` (phased build + report gates) · `aws-data-lake-contract.md` · `aws-backtest-run-registry.md` · `aws-serverless-genai-backtesting-design.md` · `no-lookahead-rules.md` · `cost-slippage-model.md` · `metrics-catalog.md` · `walk-forward-validation.md` · `model-dataset-spec.md`. Decisions are recorded as **ADR-029** in `memory/decisions.md` (to be added in a later approved step).
+
+## 8. Advisory findings log (what the lab has concluded)
+
+> Advisory only. Backtesting can **recommend**, never **promote**. A human approves all
+> production changes. Nothing here changes trading behaviour or lifts the live-trading block.
+> Each entry links to its full report + ADR.
+
+| Phase | Scope | Data (trust) | Verdict | Report / ADR |
+|---|---|---|---|---|
+| 13 / 14A | `momentum` (SMA crossover), NIFTY50 daily | NSE Bhavcopy (HIGH) | First authoritative edge: PF 1.80, sw=10/lw=50 | `aws-phase14a-*`, ADR-032 |
+| 15B / 15C | `momentum` walk-forward | Bhavcopy (HIGH) | **PAPER_OPTIMIZATION** — +₹90/trade OOS, PF 1.52, regime-sensitive; `sw=10/lw=50` stable/dominant | `aws-phase15c-*`, ADR-032 |
+| **B** | `orb` · `vwap_reversion` · `trend_15m` · `preclose`, NIFTY50 1m/5m/15m | Zerodha Kite (HIGH provenance, **limited depth** ~3 yr) | **CLOSED — no intraday edge.** All four REJECT or no-edge after the full NSE statutory cost stack | `aws-phaseB-intraday-backtest-report.md`, ADR-033 |
+
+### Phase B — formal close (2026-06-14)
+
+Real 3-year intraday history (16.1M bars, 46/47 NIFTY50 × 1m/5m/15m, 2022–2024) was fetched
+from Zerodha Kite and backtested per-day (fresh session state = daily reset + MIS EOD flatten;
+`trend_15m` via opt-in warm-start that carries indicator buffers across days, mirroring the live
+ADR-031 warm-start).
+
+- `orb` −₹94/trade (PF 0.45) · `vwap_reversion` −₹174 (PF 0.25) · `preclose` −₹84 (PF 0.05).
+- `trend_15m`: 0 trades at production config (ADX≥25 and confidence≥0.65 are mutually exclusive
+  on NIFTY50 15m); filters-off the raw trend logic loses (PF 0.30, −₹368k). REJECT either way.
+- **Conclusion:** naive intraday entries do not clear round-trip costs — consistent with the
+  platform's standing cost thesis. **Daily momentum (Phase 15C) remains the only positive
+  advisory edge.** `scalp_1m` not tested (Stage-1 disabled).
+
+A genuine **shared-`Backtester` bug** surfaced and was fixed during this phase: the multi-symbol
+end-of-day flatten could mark a position out at another symbol's close (the first run produced
+impossible >4000% win rates). Fixed + regression-pinned (`test_eod_multi_symbol_uses_own_symbol_price`),
+216 backtest tests green. This corrects any future multi-symbol backtest, not just Phase B.
+
+**Next options (operator-gated):** procure deeper licensed intraday only if a strategy ever
+shows edge (none did) · intraday walk-forward · continue paper sessions (Session 18, the
+priority) · GenAI analysis over the artifacts.
+
+> **Note on lab status:** the **local** Phase-1 data lake + replay/backtest tooling are now
+> implemented and exercised on real data; the **AWS** environment (S3/DynamoDB/worker ASG) in
+> §3–§7 remains `[PLANNED — design only]` and unbuilt.

@@ -158,5 +158,69 @@ def test_bad_source_trust_level_rejected():
     assert res.manifest["authoritative"] is False
 
 
+def test_forward_return_handles_missing_series():
+    """forward_return returns None when no price series is available."""
+    from datetime import timedelta
+
+    ts = pd.Timestamp("2020-06-01 10:00", tz=IST)
+    assert forward_return(None, ts, timedelta(minutes=5)) is None
+    assert forward_return(pd.Series([], dtype=float), ts, timedelta(minutes=5)) is None
+
+
+def test_quality_label_threshold():
+    """quality_label is strictly > threshold, not >=."""
+    assert quality_label(0.0) == 0            # == threshold → not positive
+    assert quality_label(0.01) == 1           # just above 0
+    assert quality_label(0.5, threshold=0.5) == 0   # not > 0.5
+    assert quality_label(0.51, threshold=0.5) == 1  # above custom threshold
+
+
+def test_feature_prefix_isolation():
+    """Features appear as feat_{name} in feature_columns; bare names are absent."""
+    b = ModelDatasetBuilder()
+    res = b.build_dataset(
+        [_sig(0, 100), _sig(1, -50)], {"R": _series()}, _meta(train_frac=1.0, val_frac=0.0)
+    )
+    assert all(c.startswith("feat_") for c in res.feature_columns)
+    assert "rsi_14" not in res.feature_columns
+    assert "ema_ratio" not in res.feature_columns
+    assert "feat_rsi_14" in res.feature_columns
+    assert "feat_ema_ratio" in res.feature_columns
+
+
+def test_schema_column_roles():
+    """Schema assigns the correct role to each column group."""
+    b = ModelDatasetBuilder()
+    res = b.build_dataset(
+        [_sig(i, 100) for i in range(5)], {"R": _series()}, _meta(train_frac=1.0, val_frac=0.0)
+    )
+    cols = res.schema["columns"]
+    assert cols["signal_id"]["role"] == "identity"
+    assert cols["feat_rsi_14"]["role"] == "feature"
+    assert cols["quality_label"]["role"] == "label"
+    assert cols["net_pnl"]["role"] == "label"
+    assert cols["entry_price"]["role"] == "trade"
+    assert cols["trust_level"]["role"] == "meta"
+
+
+def test_empty_signals_build():
+    """Build with zero signals produces empty splits and a valid manifest."""
+    b = ModelDatasetBuilder()
+    res = b.build_dataset([], {}, _meta(train_frac=0.6, val_frac=0.2))
+    assert res.train.empty and res.val.empty and res.test.empty
+    assert res.manifest["rows_total"] == 0
+    assert res.manifest["authoritative"] is True   # no LOW-trust signals
+
+
+def test_no_broker_calls_in_dataset_builder():
+    """model_dataset_builder.py must not reference broker APIs."""
+    import backtesting.model_dataset_builder as mdb_mod
+
+    forbidden = ["kiteconnect", "alpaca", "place_order", "zerodhabroker", "submit_order"]
+    src = Path(mdb_mod.__file__).read_text().lower()
+    present = [t for t in forbidden if t in src]
+    assert present == [], f"model_dataset_builder.py must not reference brokers: {present}"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

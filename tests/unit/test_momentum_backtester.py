@@ -693,6 +693,64 @@ async def test_eod_close_remaining_positions():
             f"Expected EOD exit at 130.0, got {eod_trades[0].exit_price}")
 
 
+async def test_eod_multi_symbol_uses_own_symbol_price():
+    """Regression: EOD flatten must mark each open position out at its OWN
+    symbol's last bar close — never another symbol's.
+
+    Bug (pre-fix): the EOD loop collected the last bar for *every* symbol and
+    broke once it had len(open_positions) entries; an open-position symbol whose
+    last bar was reached later fell back to bars[-1] (a different symbol's
+    price). In a multi-symbol intraday day with disparate price scales this
+    produced absurd cross-symbol mark-outs (e.g. a ₹100 stock closed at ₹3000).
+
+    Setup: only AAA opens a position (held to EOD), and three other symbols
+    (no positions) trade LATER at a ~30x price scale. The single open position
+    must close at AAA's own ~102, not the ~3020 of the last bar in the stream.
+    """
+    from datetime import timedelta
+    from strategy_engine.signals.signal import Signal
+
+    class _BuyAAAOnce(MomentumStrategy):
+        def __init__(self):
+            super().__init__(short_window=5, long_window=10, min_confidence=0.0, nav=1_000_000)
+            self._cur = None
+            self._bought = False
+
+        async def on_bar(self, bar):
+            self._cur = bar
+
+        async def generate_signal(self):
+            if self._cur is not None and self._cur.symbol == "AAA" and not self._bought:
+                self._bought = True
+                return Signal(
+                    symbol="AAA", market="NSE", direction=Direction.BUY,
+                    quantity=10, confidence=1.0, strategy_name="eod_multi",
+                    price_at_signal=100.0, stop_loss=1.0, take_profit=1_000_000.0,
+                )
+            return None
+
+    base = datetime(2024, 1, 1, 9, 15, tzinfo=timezone.utc)
+    bars = [
+        _bar(100.0, symbol="AAA", ts=base),
+        _bar(101.0, symbol="AAA", ts=base + timedelta(minutes=1)),   # entry bar
+        _bar(102.0, symbol="AAA", ts=base + timedelta(minutes=2)),   # AAA's last bar
+        _bar(3000.0, symbol="BBB", ts=base + timedelta(minutes=3)),  # later, no position
+        _bar(3010.0, symbol="CCC", ts=base + timedelta(minutes=4)),
+        _bar(3020.0, symbol="DDD", ts=base + timedelta(minutes=5)),  # bars[-1] (the trap)
+    ]
+
+    bt = Backtester(_BuyAAAOnce(), initial_capital=1_000_000, commission_pct=0.0)
+    result = await bt.run(bars)
+
+    eod = [t for t in result.trades if t.exit_reason == "eod"]
+    _assert(len(eod) == 1, f"expected exactly 1 EOD trade (AAA), got {len(eod)}")
+    t = eod[0]
+    _assert(t.symbol == "AAA", f"expected AAA, got {t.symbol}")
+    _assert(abs(t.exit_price - 102.0) < 1e-6,
+            f"EOD must use AAA's own last close 102.0; got {t.exit_price} "
+            f"(cross-symbol bug if ~3020)")
+
+
 # =============================================================================
 # TestBacktesterCommission
 # =============================================================================
@@ -851,6 +909,7 @@ ALL_TESTS = [
     ("stop-loss triggers at correct price", test_stop_loss_triggered),
     ("take-profit triggers at correct price", test_take_profit_triggered),
     ("EOD close remaining positions", test_eod_close_remaining_positions),
+    ("EOD multi-symbol uses own-symbol price", test_eod_multi_symbol_uses_own_symbol_price),
     # Commission
     ("commission reduces profit", test_commission_reduces_profit),
     # Short

@@ -23,6 +23,11 @@ GATE_EXPECTANCY_MIN = 0.0
 GATE_PROFIT_FACTOR_MIN = 1.2
 GATE_NET_PNL_MIN = 0.0
 
+# Annualised risk-free rate assumption (NSE / Indian equity context).
+_RF_ANNUAL = 0.06          # 6%
+_TRADING_DAYS_PER_YEAR = 252
+_RF_DAILY = _RF_ANNUAL / _TRADING_DAYS_PER_YEAR
+
 
 @dataclass
 class RunMeta:
@@ -56,14 +61,21 @@ def compute_metrics(
         "number_of_trades": int(len(trades)),
         "gross_pnl": 0.0,
         "net_pnl": 0.0,
+        "total_return_pct": 0.0,
+        "annualised_return_pct": 0.0,
         "cost_impact": 0.0,
         "total_slippage": 0.0,
         "win_rate": 0.0,
         "avg_winner": 0.0,
         "avg_loser": 0.0,
+        "largest_win": 0.0,
+        "largest_loss": 0.0,
         "payoff_ratio": 0.0,
         "profit_factor": 0.0,
         "expectancy": 0.0,
+        "max_consecutive_losses": 0,
+        "sharpe_ratio": 0.0,
+        "sortino_ratio": 0.0,
         "max_drawdown_pct": 0.0,
         "max_drawdown_abs": 0.0,
         "daily_drawdown_pct": 0.0,
@@ -75,6 +87,7 @@ def compute_metrics(
         "avg_mfe_r": 0.0,
         "avg_mae_r": 0.0,
         "profit_capture_ratio": 0.0,
+        "lookahead_violations": 0,   # enforced by replay_engine; always 0
     }
     if trades.empty:
         m["gates"] = evaluate_gates(m)
@@ -90,16 +103,20 @@ def compute_metrics(
 
     m["gross_pnl"] = float(gross.sum())
     m["net_pnl"] = float(net.sum())
+    m["total_return_pct"] = m["net_pnl"] / initial_capital * 100.0 if initial_capital else 0.0
     m["cost_impact"] = float(costs.sum())
     m["total_slippage"] = float(slip.sum())
     m["win_rate"] = len(wins) / len(net) * 100.0
     m["avg_winner"] = _safe_mean(wins)
     m["avg_loser"] = _safe_mean(losses)
+    m["largest_win"] = float(wins.max()) if len(wins) else 0.0
+    m["largest_loss"] = float(losses.min()) if len(losses) else 0.0
     m["payoff_ratio"] = (m["avg_winner"] / abs(m["avg_loser"])) if m["avg_loser"] < 0 else float("inf") if m["avg_winner"] > 0 else 0.0
     gross_profit = float(wins.sum())
     gross_loss = float(abs(losses.sum()))
     m["profit_factor"] = (gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
     m["expectancy"] = float(net.mean())
+    m["max_consecutive_losses"] = _max_consecutive_losses(net)
 
     # Turnover.
     if {"entry_price", "exit_price", "quantity"} <= set(trades.columns):
@@ -131,7 +148,7 @@ def compute_metrics(
         em = pd.to_datetime(trades["exit_time"]).dt.strftime("%Y-%m")
         m["monthly_pnl"] = {k: float(v) for k, v in net.groupby(em).sum().items()}
 
-    # Drawdown (from equity curve, or built from cumulative net P&L).
+    # Drawdown + risk-adjusted metrics (from equity curve, or built from cumulative net P&L).
     eq = equity_curve
     if eq is None:
         ordered = trades.sort_values("exit_time") if "exit_time" in trades else trades
@@ -143,6 +160,18 @@ def compute_metrics(
     m["max_drawdown_pct"] = dd_pct
     m["max_drawdown_abs"] = dd_abs
     m["daily_drawdown_pct"] = _daily_drawdown(eq)
+
+    # CAGR — requires a known period length.
+    if period_seconds and period_seconds > 0:
+        calendar_years = period_seconds / (365.25 * 24 * 3600)
+        final_equity = float(eq["equity"].iloc[-1]) if not eq.empty else initial_capital
+        if calendar_years > 0 and initial_capital > 0:
+            m["annualised_return_pct"] = (
+                (final_equity / initial_capital) ** (1.0 / calendar_years) - 1.0
+            ) * 100.0
+
+    # Sharpe and Sortino from daily equity returns.
+    m["sharpe_ratio"], m["sortino_ratio"] = _sharpe_sortino(eq)
 
     m["gates"] = evaluate_gates(m)
     return m
@@ -169,6 +198,52 @@ def _daily_drawdown(eq: pd.DataFrame) -> float:
         ddp, _ = _max_drawdown(grp["equity"].astype(float))
         worst = max(worst, ddp)
     return worst
+
+
+def _max_consecutive_losses(net: pd.Series) -> int:
+    """Count the longest losing streak (consecutive net_pnl <= 0 trades)."""
+    best, current = 0, 0
+    for v in net:
+        if v <= 0:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def _sharpe_sortino(eq: pd.DataFrame) -> tuple[float, float]:
+    """Annualised Sharpe and Sortino from a daily-resampled equity curve.
+
+    Returns (0.0, 0.0) when there are fewer than 2 distinct equity days.
+    """
+    if eq.empty or "timestamp" not in eq or "equity" not in eq:
+        return 0.0, 0.0
+    try:
+        ts = pd.to_datetime(eq["timestamp"])
+        daily = eq.copy()
+        daily["date"] = ts.dt.date
+        daily_eq = daily.groupby("date")["equity"].last()
+    except Exception:
+        return 0.0, 0.0
+
+    if len(daily_eq) < 2:
+        return 0.0, 0.0
+
+    rets = daily_eq.pct_change().dropna()
+    if rets.empty or rets.std() == 0:
+        return 0.0, 0.0
+
+    excess = rets - _RF_DAILY
+    sharpe = float(excess.mean() / rets.std() * math.sqrt(_TRADING_DAYS_PER_YEAR))
+
+    downside = rets[rets < 0]
+    if downside.empty or downside.std() == 0:
+        sortino = float("inf") if excess.mean() > 0 else 0.0
+    else:
+        sortino = float(excess.mean() / downside.std() * math.sqrt(_TRADING_DAYS_PER_YEAR))
+
+    return sharpe, sortino
 
 
 def evaluate_gates(metrics: dict) -> dict:

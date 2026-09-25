@@ -21,6 +21,8 @@ The engine only reads candle data and hands it to a consumer.
 
 from __future__ import annotations
 
+import signal
+import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -390,6 +392,7 @@ class CandleReplayEngine:
         registry: Any = None,
         checkpoint: Any = None,
         backtester_kwargs: dict[str, Any] | None = None,
+        cw_emitter: Any = None,
     ) -> dict[str, Any]:
         """Reuse the existing ``Backtester`` per partition over ordered bars.
 
@@ -397,6 +400,12 @@ class CandleReplayEngine:
         state never bleeds across shards. ``backtester_kwargs`` are forwarded to the
         ``Backtester`` (e.g. ``slippage_bps``, ``commission_pct``) so cost/slippage
         models flow end-to-end. Returns ``{partition_id: BacktestResult}``.
+
+        SIGTERM (Spot instance interruption 2-min notice): the in-flight partition
+        is checkpointed as FAILED and the run is marked FAILED before exit so a
+        subsequent resume correctly retries the interrupted shard from scratch.
+        The SIGTERM handler is restored to its original value in the ``finally``
+        block regardless of how the function exits.
         """
         import asyncio
 
@@ -405,7 +414,34 @@ class CandleReplayEngine:
         bt_kwargs = backtester_kwargs or {}
         if registry is not None and run_id:
             registry.mark_running(run_id)
+
         results: dict[str, Any] = {}
+        # Mutable cell so the SIGTERM closure can read the current partition.
+        _current_pid: list[str] = []
+
+        orig_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def _on_spot_termination(signum: int, frame: Any) -> None:
+            """Checkpoint the in-flight partition as FAILED then exit cleanly."""
+            pid = _current_pid[0] if _current_pid else None
+            if pid and checkpoint is not None and run_id:
+                try:
+                    checkpoint.fail_partition(run_id, pid, "spot_interruption")
+                except Exception:
+                    pass
+            if registry is not None and run_id:
+                try:
+                    registry.mark_failed(run_id, "spot_interruption: Spot instance reclaimed")
+                except Exception:
+                    pass
+            if cw_emitter is not None:
+                try:
+                    cw_emitter.run_failed()
+                except Exception:
+                    pass
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _on_spot_termination)
         try:
             plan = self.plan()
             pending = (
@@ -414,6 +450,7 @@ class CandleReplayEngine:
                 else plan
             )
             for pid in pending:
+                _current_pid[:] = [pid]
                 ordered, _gaps = _prepare(self._source.load_partition(pid, self._config), self._config)
                 bars = [c.to_bar() for c in self._iter_monotonic(ordered)]
                 res = asyncio.run(Backtester(strategy=strategy_factory(), **bt_kwargs).run(bars))
@@ -425,13 +462,23 @@ class CandleReplayEngine:
                         last_processed_timestamp=bars[-1].timestamp.isoformat(),
                         partial_metrics={"trades": res.total_trades},
                     )
+                if cw_emitter is not None:
+                    cw_emitter.checkpoint_written()
+                _current_pid.clear()
             if registry is not None and run_id:
                 registry.mark_completed(run_id)
+            if cw_emitter is not None:
+                cw_emitter.run_completed()
             return results
         except Exception as exc:
             if registry is not None and run_id:
                 registry.mark_failed(run_id, str(exc))
+            if cw_emitter is not None:
+                cw_emitter.run_failed()
             raise
+        finally:
+            signal.signal(signal.SIGTERM, orig_sigterm)
+            _current_pid.clear()
 
     @staticmethod
     def _iter_monotonic(ordered: list[Candle]) -> Iterator[Candle]:

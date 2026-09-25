@@ -1,0 +1,18 @@
+# RPLITE (SPY/TLT/GLD risk-parity-lite) forward book — REAL-TIME PAPER mode (ADR-041 P5).
+# Run at month-end: `python -m qe paper --config configs/qe_us_rplite_book_paper.yaml`
+# Advisory only. PaperBroker (no real venue). Live trading remains BLOCKED.
+# Not yet activated as of this file's creation (2026-07-14) — awaiting operator
+# approval of docs/strategy/us-qe-phase5-report.md. First forward rebalance once
+# activated: 2026-07-31.
+name: rplite-book-paper
+mode: paper
+start_date: 2026-07-31          # inception (informational; book resumes from persisted state)
+end_date: 2028-12-31            # open horizon for the forward program
+universe: {market: US, segment: EQ, symbols: [SPY, TLT, GLD]}
+data: {lake_root: backtest-data/lake, interval: 1d}
+journal_dir: journals
+seed_nav: 1000000.0
+strategy: {kind: risk_parity_lite, assets: [SPY, TLT, GLD], vol_lookback: 63, cash_buffer: 0.005}
+risk:
+  max_drawdown_frac: 0.35       # auto-halt if book draws down >35% from peak
+  max_data_age_days: 10         # fail-closed if lake data older than 10 days (US lake refresh is less frequent than NSE bhavcopy)

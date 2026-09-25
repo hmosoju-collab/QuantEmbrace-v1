@@ -1,0 +1,12 @@
+name: m1-acceptance
+mode: "null"
+start_date: 2024-01-01
+end_date: 2024-03-31
+universe:
+  market: NSE
+  segment: EQ
+  symbols: [RELIANCE, OIL, RAILTEL]
+data:
+  lake_root: backtest-data/lake
+  interval: 1d
+journal_dir: journals
