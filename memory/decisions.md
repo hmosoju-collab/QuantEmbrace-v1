@@ -3015,3 +3015,61 @@ NAV ₹1,000,000 both books).
   `--end 2025-12-31`; a bare cadence invocation silently skips 2026 catch-up. Fixed
   operationally today with explicit `--start 2026-07-08 --end 2026-07-14`; consider
   defaulting `--end` to today.
+
+---
+
+## ADR-043: Offline Advisory AI Research Layer (`qe.ai`) — TradingAgents-Inspired, Engine-Isolated (2026-09-25)
+
+**Status:** Approved (operator, 2026-09-25) — Phases 0–5 authorised; 6–10 design-only ·
+**Branch:** `feature/hybrid-ai-research` · **Design:** `docs/architecture/hybrid-ai-system.md`
+
+### Context
+
+The operator asked for a hybrid AI + systematic research platform inspired by
+TauricResearch/TradingAgents (LLM analyst team → bull/bear debate → trader → risk debate →
+portfolio manager). Constraints from the existing canon: RA-1 F-4 cut `ai_engine` from the
+hot path (ADR-037); `qe` is the primary engine and v1 is frozen (ADR-038); the governance wall
+(backtesting recommends, GenAI explains, humans promote) is non-negotiable; ADR-042 showed
+that any new `RunConfig` field moves every config hash and strands the paper books.
+Reconnaissance (`docs/architecture/current-state.md`) found: `services/ai_engine` HMM/GBT
+are untrained stubs; the lake is prices-only (no news/fundamentals/sentiment); a dormant
+Bedrock GenAI layer exists in `services/backtesting/genai/`.
+
+### Decision
+
+1. **New package `qe/ai/`, offline and advisory.** Own entry point `python -m qe.ai`; the
+   `qe` CLI and every trading module (`qe.engine`, `qe.execution`, `qe.risk`, `qe.strategy`,
+   `qe.killswitch`, `qe.live_gate`, `qe.cli`, `qe.research`) are untouched and never import
+   it; `qe.ai` imports only an allowlist (`qe.config`, `qe.journal`, `qe.data.*`,
+   `qe.strategy.base`, `qe.universe`, `qe.clock`, `qe.version`). Enforced by AST + fresh-
+   interpreter tests.
+2. **Structured outputs only.** `ResearchSignal` v1 (`research_signal/1`), per-component
+   status; the LLM returns scores + evidence IDs, code attaches evidence and timestamps.
+3. **Tools are called by code**, read-only, point-in-time (`Context.at`), no LLM-directed tool
+   calling. No-data agents (fundamental/news/sentiment) return UNAVAILABLE with zero LLM calls.
+4. **Contamination rule.** An LLM evaluated at a date ≤ its knowledge cutoff (+90d guard) has
+   seen the future; such signals are flagged (computed, never claimed) and never carry weight.
+   **Historical backtests of AI scores are not evidence**; AI can earn weight only via
+   pre-registered forward (post-cutoff) shadow accrual (P6/P10).
+5. **Deterministic fusion, default `AI_ADVISORY` with AI weight 0** — the fused decision equals
+   the engine's own pick; the AI recommendation is reported next to it, never merged. WEIGHTED
+   (cap 0.20) / EXPERIMENTAL (cap 0.50) allowed only in `study` context. Hard risk flags
+   always REJECT. AI alone never decides.
+6. **Own configs, own hash** (`configs/qe_ai_research.yaml`, `configs/research_fusion.yaml`,
+   hashed with `exclude_none`) — `RunConfig` is not modified, so no config-hash drift.
+7. **LLM backend:** provider protocol; Bedrock Converse adapter (lazy boto3, IAM, no API key)
+   ported from the dormant genai layer's pattern (not imported); deterministic fake LLM for all
+   tests; real spend requires `--allow-llm-spend` and is out of scope until P10.
+8. **No new dependencies.** No LangGraph/LangChain; no TradingAgents code copied (clean-room).
+9. **Writes confined** to `journals/ai/`, `reports/qe-ai/`, `backtest-data/ai_cache/`; never
+   `reports/qe/` or `journals/paper-*` (live-gate / forward-gate evidence).
+
+### Consequences
+
+- Phases 0–5 deliver plumbing (safety, governance, traceability) — **not an edge**. With a
+  price-only lake the analysts re-describe what the factor model already sees.
+- `services/ai_engine` and `services/backtesting/genai` stay as-is (v1 frozen / lab dormant).
+- Current-state findings F-1…F-14 are documented only; F-11 (no-gates-passes) and F-12
+  (family count not persisted) must be fixed before P6 hypothesis generation.
+- CI does not run `tests/qe` (F-13), so boundary tests are enforced locally only until a
+  separately-approved CI change.

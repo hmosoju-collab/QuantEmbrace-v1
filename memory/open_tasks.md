@@ -1683,3 +1683,31 @@ Every phase writes a report and **stops for human approval**.
 **Standing cautions:** QC "proven" strategies are hypotheses — most should die in validation.
 Free data = LOW trust → quarantine → cross-validate → promote. Extend qe; never revive v1 for
 US (v1 Alpaca code = porting reference only). Live BLOCKED.
+
+---
+
+## 🤖 HYBRID AI RESEARCH TRACK (ADR-043, approved 2026-09-25)
+
+**Design:** `docs/architecture/hybrid-ai-system.md` · **Branch:** `feature/hybrid-ai-research`
+(branched from `dev` checkpoint `d8ca741`). Offline advisory `qe/ai/` package; never in a
+trading path; AI weight 0 by default; historical AI backtests are not evidence (contamination).
+Operator authorised Phases 0–5 as one run, then STOP for review.
+
+| Phase | Scope | Status |
+|---|---|---|
+| P0 | Current-state recon (`docs/architecture/current-state*.md`), TradingAgents adaptation analysis | ✅ DONE 2026-09-25 |
+| P1 | Architecture/boundary/security/data-flow/look-ahead/discovery/experiment docs + ADR-043 | ✅ DONE 2026-09-25 |
+| P2 | Schemas (`ResearchSignal` v1), `qe.ai` config, import-boundary + engine-untouched tests | ⏳ |
+| P3 | LLM protocol/fake/Bedrock adapter, guardrails, PIT tools, analyst agents | ⏳ |
+| P4 | Bull/bear/critic/synthesizer, FAST/STANDARD/DEEP orchestration, research journal, CLI | ⏳ |
+| P5 | Deterministic fusion (AI_ADVISORY default) + parity/invariance tests + ops docs + report | ⏳ |
+| P6 | Hypothesis→study pipeline; forward AI shadow ledger + pre-registered AI gate | 🔒 design-only — needs F-11/F-12 fixes first |
+| P7 | Post-trade analyst; knowledge-time-stamped reflection memory | 🔒 design-only |
+| P8 | Research dashboard | 🔒 design-only |
+| P9 | External-data (news/fundamentals) security hardening + data-lake quarantine | 🔒 design-only |
+| P10 | First real Bedrock spend; paper-shadow validation (forward, post-cutoff only) | 🔒 design-only |
+
+**Documented-only findings awaiting operator triage** (`docs/architecture/current-state.md §10`):
+F-1 v1 `paper_trade` missing-field → live (HIGH) · F-2 non-NSE universe bypass in all modes
+(HIGH) · F-10 `wf_v1.regime_series` total-period-turnover look-ahead · F-11 walk-forward with no
+gates reports pass · F-12 family test-budget count not persisted · F-13 CI does not run `tests/qe`.

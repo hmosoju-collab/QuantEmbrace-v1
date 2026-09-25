@@ -642,6 +642,27 @@ candle-cache (DynamoDB poll)
 
 ---
 
+## Hybrid AI Research Layer — `qe.ai` (ADR-043, Advisory Only)
+
+**Status:** `[PLANNED — not yet implemented]` — design approved 2026-09-25; Phases 2–5 build it on
+branch `feature/hybrid-ai-research`. **Not in any trading path.**
+
+An offline, TradingAgents-inspired multi-agent research package inside the v2 engine tree
+(`qe/ai/`, entry point `python -m qe.ai`). It reads the lake point-in-time, runs analyst agents
+(technical/regime/risk; fundamental/news/sentiment are UNAVAILABLE — no data source), an
+optional bull/bear debate + critic + synthesizer, and emits typed `ResearchSignal` v1 records to
+its own journal (`journals/ai/`). A deterministic fusion layer reports the AI view **next to**
+QuantEmbrace's own decision; default `AI_ADVISORY` gives AI zero weight, so the fused decision
+equals the engine's pick. The engine never imports `qe.ai`; `qe.ai` cannot import engine, risk,
+execution, live-gate, or broker code. LLM signals dated before the model's knowledge cutoff are
+flagged as contaminated and can never carry weight — AI earns weight only via pre-registered
+forward shadow accrual (P6+, planned).
+
+Design: `docs/architecture/hybrid-ai-system.md` · boundary: `docs/architecture/ai-quant-boundary.md`
+· security: `docs/architecture/security-model.md` · look-ahead: `docs/research/lookahead-prevention.md`.
+
+---
+
 ## Layer 6: Infrastructure Layer
 
 ### Compute: EC2 ARM64 Auto Scaling Groups
