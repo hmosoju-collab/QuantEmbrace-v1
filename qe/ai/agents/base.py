@@ -171,6 +171,12 @@ def _observation_fields(out: BaseModel) -> dict[str, Any]:
             "points": (*d["contradictions"], *d["unsupported_claims"])[:6],
             "evidence_ids": d["evidence_ids"],
         }
+    if "hypotheses" in d:
+        return {
+            "summary": "; ".join(h["name"] for h in d["hypotheses"])[:800],
+            "points": tuple(h["family"] for h in d["hypotheses"]),
+            "evidence_ids": d["evidence_ids"],
+        }
     return {  # synthesis/1
         "confidence": d["ai_confidence"],
         "summary": d["consensus"],

@@ -3,6 +3,7 @@
     python -m qe.ai research --config configs/qe_ai_research.yaml --as-of 2026-07-14
     python -m qe.ai report   --journal journals/ai/<run_id>.jsonl
     python -m qe.ai fuse     --research journals/ai/<run_id>.jsonl [--engine-journal ...]
+    python -m qe.ai hypothesize --research journals/ai/<run_id>.jsonl
 
 A separate entry point from ``python -m qe`` on purpose: the engine CLI imports
 the paper engine at load, and qe.ai must never share a process path with it.
@@ -43,6 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--context", choices=("shadow", "study"), default="shadow")
     f.add_argument("--engine-journal", default=None, help="optional qe engine journal (read-only)")
     f.add_argument("--base-dir", default=".")
+
+    h = sub.add_parser("hypothesize", help="draft testable hypotheses for human review")
+    h.add_argument("--research", required=True, help="research journal (journals/ai/...)")
+    h.add_argument("--allow-llm-spend", action="store_true")
+    h.add_argument("--base-dir", default=".")
 
     args = parser.parse_args(argv)
     base = Path(args.base_dir)
@@ -107,4 +113,24 @@ def main(argv: list[str] | None = None) -> int:
             f"selected : {len(rep.selected)}; divergences from engine: {rep.divergences or 'none'}"
         )
         return 0
+
+    if args.cmd == "hypothesize":
+        from qe.ai.hypotheses import generate_hypotheses
+        from qe.ai.llm import SpendNotAllowed
+
+        try:
+            run = generate_hypotheses(
+                base / args.research, base_dir=base, allow_spend=args.allow_llm_spend
+            )
+        except SpendNotAllowed as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 2
+        print(f"journal  : {run.journal_path}")
+        print(f"drafts   : {len(run.drafts)} CANDIDATE draft(s) -> {run.out_dir or '(none)'}")
+        for d in run.drafts:
+            flags = [f"re-proposes {d.eliminated_family}"] if d.eliminated_family else []
+            flags += [] if d.testable_now else [f"needs {', '.join(d.missing_data)}"]
+            print(f"  {d.draft_id} {d.name} [{d.family}] {'; '.join(flags) or 'testable now'}")
+        print("advisory : drafts only; a human decides via `python -m qe lifecycle`")
+        return 0 if run.status == "OK" else 1
     return 2

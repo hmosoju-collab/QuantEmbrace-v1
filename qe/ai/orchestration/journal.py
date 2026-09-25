@@ -25,11 +25,17 @@ class ResearchJournal:
         self._open = True
 
     def start(
-        self, *, run_id: str, config: ResearchRunConfig, code_sha: str, snapshot_id: str
+        self,
+        *,
+        run_id: str,
+        config: ResearchRunConfig,
+        code_sha: str,
+        snapshot_id: str,
+        mode: str = JOURNAL_MODE,
     ) -> None:
         self._writer.session_start(
             session_id=run_id,
-            mode=JOURNAL_MODE,
+            mode=mode,
             config_hash=config.config_hash(),
             config=redact_obj(config.model_dump(mode="json", exclude_none=True)),
             code_sha=code_sha,

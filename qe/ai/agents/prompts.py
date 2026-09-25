@@ -5,7 +5,7 @@ hashes in ``tests/qe/ai/test_ai_agents.py`` then fail until the affected
 ``prompt_version`` is bumped — prompts are versioned artifacts, not strings.
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 
@@ -58,6 +58,54 @@ class CriticOutput(FrozenModel):
     evidence_ids: Ids = ()
 
 
+# Data kinds a hypothesis may require. Code (not the LLM) decides testability
+# against qe.ai.hypotheses.AVAILABLE_DATA — what the lake actually holds.
+DataKind = Literal[
+    "nse_eod_prices",
+    "nse_delivery_pct",
+    "nse_turnover",
+    "india_vix",
+    "nifty_futures_eod",
+    "nifty_options_eod",
+    "us_eod_prices",
+    "fundamentals",
+    "news",
+    "sentiment",
+    "intraday_option_chains",
+    "alternative_data",
+]
+Slug = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{2,48}$")]
+# The metrics qe.research walk-forward studies compute (qe/research/metrics.py);
+# a gate on anything else would FAIL closed, so it is rejected up front.
+GateMetric = Literal[
+    "cagr", "vol", "sharpe", "maxdd", "hit", "months", "n_years",
+    "positive_years", "per_year_positive_frac", "worst_year_return",
+]  # fmt: skip
+
+
+class GateItem(FrozenModel):
+    name: Slug
+    metric: GateMetric
+    op: Literal[">=", "<=", ">", "<"]
+    value: float
+
+
+class HypothesisItem(FrozenModel):
+    name: Slug
+    family: Slug
+    hypothesis: Text
+    rationale: Text
+    required_data: Annotated[tuple[DataKind, ...], Field(min_length=1, max_length=6)]
+    proposed_study_kind: Literal["walk_forward", "forward_book"]
+    # An ungated study proves nothing (F-11): at least one pre-registered gate.
+    proposed_gates: Annotated[tuple[GateItem, ...], Field(min_length=1, max_length=6)]
+
+
+class HypothesisOutput(FrozenModel):
+    hypotheses: Annotated[tuple[HypothesisItem, ...], Field(min_length=1, max_length=3)]
+    evidence_ids: Ids = ()
+
+
 class SynthesisOutput(FrozenModel):
     bull_case: Text
     bear_case: Text
@@ -74,6 +122,7 @@ SCHEMAS: dict[str, type[FrozenModel]] = {
     "debate/1": DebateOutput,
     "critic/1": CriticOutput,
     "synthesis/1": SynthesisOutput,
+    "hypothesis/1": HypothesisOutput,
 }
 
 SCHEMA_FIELDS = {
@@ -101,5 +150,16 @@ SCHEMA_FIELDS = {
         '"consensus": string (max 600), "ai_confidence": number in [0, 1], '
         '"risks": up to 5 strings, "supporting_evidence_ids": up to 8 ids, '
         '"contradicting_evidence_ids": up to 8 ids (ids from ALLOWED_EVIDENCE_IDS)}'
+    ),
+    "hypothesis/1": (
+        '{"hypotheses": 1-3 objects {"name": slug, "family": slug, "hypothesis": string '
+        '(testable, max 600), "rationale": string (max 600), "required_data": 1-6 of '
+        "[nse_eod_prices, nse_delivery_pct, nse_turnover, india_vix, nifty_futures_eod, "
+        "nifty_options_eod, us_eod_prices, fundamentals, news, sentiment, "
+        'intraday_option_chains, alternative_data], "proposed_study_kind": walk_forward|'
+        'forward_book, "proposed_gates": 1-6 objects {"name": slug, "metric": one of [cagr, '
+        "vol, sharpe, maxdd, hit, months, n_years, positive_years, per_year_positive_frac, "
+        'worst_year_return], "op": >=|<=|>|<, "value": number}}, '
+        '"evidence_ids": up to 8 ids from ALLOWED_EVIDENCE_IDS}'
     ),
 }

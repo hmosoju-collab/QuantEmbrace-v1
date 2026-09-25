@@ -1,0 +1,86 @@
+# Research families already settled — machine-readable form of
+# docs/strategy/research-program-consolidation-2026-06-20.md (NSE) and
+# docs/strategy/us-qc-candidate-report.md (US screen, ADR-041 P2).
+#
+# Read (never written) by qe.ai hypothesis generation (ADR-043 P6) to FLAG
+# re-proposals: "Do not re-chase eliminated edges without a new angle and fresh
+# data" (consolidation memo §7). A flagged draft is not dropped — a human decides.
+# Human-maintained: add a family here when a study settles it.
+schema_version: research_eliminated_families/1
+families:
+  - id: intraday-cash-equity
+    status: RETIRED
+    reason: PF < 1 net of intraday costs; NSE large-cap intraday drift is negative (C6)
+    aliases: [intraday, orb, opening range, vwap reversion, scalp, pre-close momentum, trend 15m]
+    source: consolidation-2026-06-20 §2 / strategy-retirement-register-2026-06-19
+  - id: gap-reaction
+    status: SHELVED
+    reason: continuation real but thin and year-inconsistent (n=259)
+    aliases: [gap reaction, gap continuation, gap fade, opening gap]
+    source: consolidation-2026-06-20 §2 (C1)
+  - id: calendar-turn-of-month
+    status: SHELVED
+    reason: timing strategy loses to buy-hold risk-adjusted (cash 82% of days)
+    aliases: [turn of month, turn-of-month, calendar effect, month-end effect]
+    source: consolidation-2026-06-20 §2 (C7)
+  - id: delivery-momentum-combo
+    status: REJECTED
+    reason: legs +0.67 correlated; no diversification (MaxDD worse than delivery alone)
+    aliases: [delivery momentum combo, delivery + momentum, combined book, factor combo]
+    source: consolidation-2026-06-20 §2
+  - id: low-volatility
+    status: REJECTED
+    reason: risk reducer, not alpha
+    aliases: [low volatility, lowvol, low vol, minimum variance]
+    source: consolidation-2026-06-20 §2
+  - id: short-term-reversal
+    status: REJECTED
+    reason: killed by costs
+    aliases: [reversal, short-term reversal, mean reversion 1m]
+    source: consolidation-2026-06-20 §2
+  - id: delivery-spike
+    status: REJECTED
+    reason: abnormal returns significantly negative at every horizon (H4)
+    aliases: [delivery spike, delivery surge, delivery jump]
+    source: consolidation-2026-06-20 §2 (H4)
+  - id: pead-proxy
+    status: REJECTED
+    reason: post-event drift negative on NSE large caps (H5 proxy)
+    aliases: [pead, post-earnings drift, post earnings announcement drift, earnings drift]
+    source: consolidation-2026-06-20 §2 (H5)
+  - id: static-short-index-vol
+    status: DEAD
+    reason: ATM VRP real but a static defined-risk condor loses gross even at zero slippage (O-2)
+    aliases: [iron condor, short strangle, short straddle, volatility risk premium, vrp, short vol]
+    source: consolidation-2026-06-20 §2 (O-1/O-2)
+  - id: overnight-index-futures
+    status: DEAD
+    reason: spot proxy overstated harvestable edge ~3.5x; real futures Sharpe 0.34 (F1)
+    aliases: [overnight futures, overnight return, overnight index, close to open]
+    source: consolidation-2026-06-20 §2 (F1)
+  - id: event-iv-crush
+    status: SHELVED
+    reason: event-timed short vol earns 1.03x random-day baseline (O1)
+    aliases: [iv crush, event volatility, earnings straddle, budget vol, rbi vol]
+    source: consolidation-2026-06-20 §2 (O1)
+  - id: index-futures-trend
+    status: SHELVED
+    reason: drawdown reduction, not alpha; hinges on one crash (F2)
+    aliases: [futures trend, trend following, time-series momentum, index trend]
+    source: consolidation-2026-06-20 §2 (F2)
+  - id: us-dual-momentum-rotation
+    status: REJECTED
+    reason: post-publication decay (GEM / GTAA / sector rotation failed the pre-registered screen)
+    aliases: [gem, dual momentum, gtaa, tactical asset allocation, sector rotation]
+    source: us-qc-candidate-report (ADR-041 P2)
+  # Live forward experiments — not eliminated, but do not spin new variants until their gate resolves.
+  - id: delivery-factor
+    status: FORWARD_TESTING
+    reason: the live forward experiment (Forward Factor Gate, eligible ~Dec-2026)
+    aliases: [delivery %, delivery pct, delivery factor, delivery conviction]
+    source: consolidation-2026-06-20 §6
+  - id: momentum-factor
+    status: FORWARD_TESTING
+    reason: forward book alongside delivery; mostly beta per backtest
+    aliases: [12-1 momentum, cross-sectional momentum, momentum factor, xsmom]
+    source: consolidation-2026-06-20 §6

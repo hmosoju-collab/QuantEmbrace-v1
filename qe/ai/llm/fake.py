@@ -73,6 +73,23 @@ def default_payload(request: LLMRequest, seed: int = 0) -> dict:
             "supporting_evidence_ids": ids[:1],
             "contradicting_evidence_ids": ids[1:2],
         }
+    if schema == "hypothesis/1":
+        return {
+            "hypotheses": [
+                {
+                    "name": "fake-hypothesis",
+                    "family": "fake-family",
+                    "hypothesis": "Fake testable hypothesis (deterministic test double).",
+                    "rationale": "Fake rationale.",
+                    "required_data": ["nse_eod_prices"],
+                    "proposed_study_kind": "walk_forward",
+                    "proposed_gates": [
+                        {"name": "sharpe-min", "metric": "sharpe", "op": ">=", "value": 1.0}
+                    ],
+                }
+            ],
+            "evidence_ids": ids,
+        }
     raise ValueError(f"FakeLLM has no default payload for schema {schema!r}")
 
 
