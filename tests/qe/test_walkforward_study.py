@@ -80,7 +80,10 @@ def test_walk_forward_study_end_to_end(tmp_path, panel):
         "delivery+overlay",
         "benchmark",
         "benchmark+overlay",
+        "delivery+overlay_pit",
+        "benchmark+overlay_pit",
     }
+    assert "look-ahead proxy (F-10)" in wf.report_path.read_text()
 
     # Registry recorded the run with the family budget.
     records = read_registry(tmp_path)
