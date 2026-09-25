@@ -2,6 +2,7 @@
 
     python -m qe.ai research --config configs/qe_ai_research.yaml --as-of 2026-07-14
     python -m qe.ai report   --journal journals/ai/<run_id>.jsonl
+    python -m qe.ai fuse     --research journals/ai/<run_id>.jsonl [--engine-journal ...]
 
 A separate entry point from ``python -m qe`` on purpose: the engine CLI imports
 the paper engine at load, and qe.ai must never share a process path with it.
@@ -35,6 +36,13 @@ def main(argv: list[str] | None = None) -> int:
     rp = sub.add_parser("report", help="rebuild reports/qe-ai/<run_id>/ from a research journal")
     rp.add_argument("--journal", required=True)
     rp.add_argument("--base-dir", default=".")
+
+    f = sub.add_parser("fuse", help="AI view vs QuantEmbrace decision (deterministic fusion)")
+    f.add_argument("--research", required=True, help="research journal (journals/ai/...)")
+    f.add_argument("--config", default="configs/research_fusion.yaml", help="fusion config YAML")
+    f.add_argument("--context", choices=("shadow", "study"), default="shadow")
+    f.add_argument("--engine-journal", default=None, help="optional qe engine journal (read-only)")
+    f.add_argument("--base-dir", default=".")
 
     args = parser.parse_args(argv)
     base = Path(args.base_dir)
@@ -75,5 +83,28 @@ def main(argv: list[str] | None = None) -> int:
         from qe.ai.reporting import write_research_report
 
         print(write_research_report(base / args.journal, base))
+        return 0
+
+    if args.cmd == "fuse":
+        from qe.ai.fusion import FusionConfig, FusionRefused, run_fusion
+
+        cfg = FusionConfig.from_yaml(base / args.config)
+        try:
+            run = run_fusion(
+                base / args.research,
+                cfg,
+                context=args.context,
+                base_dir=base,
+                engine_journal=args.engine_journal,
+            )
+        except FusionRefused as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 2
+        rep = run.report
+        print(f"view     : {run.out_dir}")
+        print(f"mode     : {rep.mode} ({rep.context}), decision date {rep.decision_date}")
+        print(
+            f"selected : {len(rep.selected)}; divergences from engine: {rep.divergences or 'none'}"
+        )
         return 0
     return 2
