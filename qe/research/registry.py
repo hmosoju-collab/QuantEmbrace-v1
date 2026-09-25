@@ -44,19 +44,25 @@ def family_experiment_count(base_dir: str | Path, family: str) -> int:
 def register_run(
     base_dir: str | Path, experiment: ExperimentConfig, run_record: dict[str, Any]
 ) -> dict[str, Any]:
-    """Append one run record; returns it (with the family test-budget count
-    as of this registration, including this experiment)."""
+    """Append one run record and return it. The family test-budget count as of
+    this registration (including this experiment) is PERSISTED in the record,
+    so the ledger itself shows how many hypotheses a family had consumed when
+    each result was produced — reviewable in the PR, not recomputed later (F-12)."""
+    exp_id = experiment_id(experiment.name, experiment.hypothesis)
+    prior = {
+        r["experiment_id"] for r in read_registry(base_dir) if r.get("family") == experiment.family
+    }
     record = {
-        "experiment_id": experiment_id(experiment.name, experiment.hypothesis),
+        "experiment_id": exp_id,
         "name": experiment.name,
         "family": experiment.family,
         "hypothesis": experiment.hypothesis,
         "registered_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "family_experiment_count": len(prior | {exp_id}),
         "run": run_record,
     }
     path = registry_path(base_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
-    record["family_experiment_count"] = family_experiment_count(base_dir, experiment.family)
     return record
