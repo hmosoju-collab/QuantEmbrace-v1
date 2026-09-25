@@ -1697,10 +1697,10 @@ Operator authorised Phases 0–5 as one run, then STOP for review.
 |---|---|---|
 | P0 | Current-state recon (`docs/architecture/current-state*.md`), TradingAgents adaptation analysis | ✅ DONE 2026-09-25 |
 | P1 | Architecture/boundary/security/data-flow/look-ahead/discovery/experiment docs + ADR-043 | ✅ DONE 2026-09-25 |
-| P2 | Schemas (`ResearchSignal` v1), `qe.ai` config, import-boundary + engine-untouched tests | ⏳ |
-| P3 | LLM protocol/fake/Bedrock adapter, guardrails, PIT tools, analyst agents | ⏳ |
-| P4 | Bull/bear/critic/synthesizer, FAST/STANDARD/DEEP orchestration, research journal, CLI | ⏳ |
-| P5 | Deterministic fusion (AI_ADVISORY default) + parity/invariance tests + ops docs + report | ⏳ |
+| P2 | Schemas (`ResearchSignal` v1), `qe.ai` config, import-boundary + engine-untouched tests | ✅ DONE 2026-09-25 (fixed a real `safe_write_path` symlink bypass en route) |
+| P3 | LLM protocol/fake/Bedrock adapter, guardrails, PIT tools, analyst agents | ✅ DONE 2026-09-25 |
+| P4 | Bull/bear/critic/synthesizer, FAST/STANDARD/DEEP orchestration, research journal, CLI | ✅ DONE 2026-09-25 |
+| P5 | Deterministic fusion (AI_ADVISORY default) + parity/invariance tests + ops docs + report | ✅ DONE 2026-09-25 — `tests/qe` 424 passed / 0 skipped (89 engine + 335 qe.ai); report `docs/research/ai-research-p0-p5-report.md`; **STOPPED for operator review** |
 | P6 | Hypothesis→study pipeline; forward AI shadow ledger + pre-registered AI gate | 🔒 design-only — needs F-11/F-12 fixes first |
 | P7 | Post-trade analyst; knowledge-time-stamped reflection memory | 🔒 design-only |
 | P8 | Research dashboard | 🔒 design-only |
@@ -1711,3 +1711,7 @@ Operator authorised Phases 0–5 as one run, then STOP for review.
 F-1 v1 `paper_trade` missing-field → live (HIGH) · F-2 non-NSE universe bypass in all modes
 (HIGH) · F-10 `wf_v1.regime_series` total-period-turnover look-ahead · F-11 walk-forward with no
 gates reports pass · F-12 family test-budget count not persisted · F-13 CI does not run `tests/qe`.
+
+**⚠️ Environment blocker found 2026-09-25:** 1,003/7,548 daily lake files (2024–26) are iCloud-evicted
+("dataless") — reads stall with ~0 CPU. The real-lake `qe.ai` E2E was stopped (nothing written); `qe study`/
+`qe paper` would stall the same way. Fix: `brctl download backtest-data/lake` or move the lake out of iCloud.

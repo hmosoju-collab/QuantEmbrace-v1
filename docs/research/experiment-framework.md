@@ -1,6 +1,6 @@
 # Experiment Framework (AI + Quant)
 
-> ADR-043. The research-run manifest is built in P2–P4 and is `[PLANNED — not yet implemented]` until then. Experiment-registry integration and the forward shadow ledger are `[PLANNED — not yet implemented]` (P6).
+> ADR-043. The research-run manifest (§2) and replay guarantee (§3) are implemented as of P4. Experiment-registry integration and the forward shadow ledger (§4) are `[PLANNED — not yet implemented]` (P6).
 
 ## 1. What already exists (quant side)
 

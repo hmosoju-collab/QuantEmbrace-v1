@@ -1,6 +1,6 @@
 # Hybrid AI Research — Data Flow
 
-> ADR-043. Flows for `qe.ai` alongside the unchanged engine. Components are `[PLANNED — not yet implemented]` until their phase lands (see [hybrid-ai-system.md §6](hybrid-ai-system.md)).
+> ADR-043. Flows for `qe.ai` alongside the unchanged engine — implemented as of P5, except the P6 human-declared study path, which is `[PLANNED — not yet implemented]`.
 
 ## 1. Two separate paths
 

@@ -1,6 +1,6 @@
 # Look-Ahead Prevention for AI Research
 
-> ADR-043. This extends the platform's point-in-time rules (`docs/backtesting/no-lookahead-rules.md`, the data-lake contract) to `qe.ai`. The mechanisms are `[PLANNED — not yet implemented]` until P2–P5 land.
+> ADR-043. This extends the platform's point-in-time rules (`docs/backtesting/no-lookahead-rules.md`, the data-lake contract) to `qe.ai`. §1.1–1.4 and §2.1–2.2 (items 1–2) are implemented and tested as of P5; §1.5 (future data types) and the forward shadow ledger (§2.2 item 3) are `[PLANNED — not yet implemented]`.
 
 AI research has **two** independent look-ahead channels. The first can be fully closed with engineering. The second cannot, so it is handled by governance.
 

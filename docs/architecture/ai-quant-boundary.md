@@ -1,6 +1,6 @@
 # AI / Quant Boundary
 
-> ADR-043. This document states the rules that keep `qe.ai` advisory. **Each rule names the test that enforces it.** The tests are `[PLANNED — not yet implemented]` until Phase 2 lands (see [hybrid-ai-system.md §6](hybrid-ai-system.md)).
+> ADR-043. This document states the rules that keep `qe.ai` advisory. **Each rule names the test that enforces it** — all implemented and passing as of P5 (`tests/qe/ai/`). Note: CI does not yet run `tests/qe` (current-state F-13), so enforcement is local until that separately-approved CI change lands.
 
 ## 1. Layering
 

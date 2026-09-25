@@ -1,6 +1,6 @@
 # Hybrid AI Research System (`qe.ai`)
 
-> ADR-043. Status per component is listed in §6. Anything marked `[PLANNED — not yet implemented]` does not exist in code.
+> ADR-043. Status per component is listed in §6: P0–P5 are **implemented** (offline, advisory, not wired to any engine path); anything marked `[PLANNED — not yet implemented]` does not exist in code.
 > Related: [ai-quant-boundary.md](ai-quant-boundary.md) · [security-model.md](security-model.md) · [data-flow.md](data-flow.md) · [lookahead-prevention](../research/lookahead-prevention.md) · [TradingAgents analysis](../tradingagents/adaptation-analysis.md)
 
 ## 1. Principle
@@ -79,10 +79,10 @@ Every run also has:
 |---|---|---|
 | Current-state recon, adaptation analysis | P0 | Implemented (docs) |
 | Architecture and security design, ADR-043 | P1 | Implemented (docs) |
-| Schemas, config, boundary tests | P2 | `[PLANNED — not yet implemented]` |
-| LLM layer, guardrails, tools, analyst agents | P3 | `[PLANNED — not yet implemented]` |
-| Debate, orchestration, journal, CLI | P4 | `[PLANNED — not yet implemented]` |
-| Deterministic fusion (AI_ADVISORY) | P5 | `[PLANNED — not yet implemented]` |
+| Schemas, config, boundary tests | P2 | Implemented — `qe/ai/{config,paths,models}`, `tests/qe/ai/test_ai_{schemas,boundary,engine_untouched}.py` |
+| LLM layer, guardrails, tools, analyst agents | P3 | Implemented — `qe/ai/{llm,guardrails,tools,agents}`; fake backend only exercised (zero spend) |
+| Debate, orchestration, journal, CLI | P4 | Implemented — `qe/ai/orchestration`, `qe/ai/{reporting,cli}.py`, `python -m qe.ai research|report` |
+| Deterministic fusion (AI_ADVISORY) | P5 | Implemented — `qe/ai/fusion`, `python -m qe.ai fuse`; ADVISORY parity with the engine proven at every sim rebalance |
 | Hypothesis → study pipeline, forward AI shadow ledger, pre-registered AI gate | P6 | `[PLANNED — not yet implemented]` |
 | Post-trade analyst, reflection memory stamped with knowledge time | P7 | `[PLANNED — not yet implemented]` |
 | Research dashboard (beyond the markdown fusion view) | P8 | `[PLANNED — not yet implemented]` |

@@ -49,6 +49,11 @@ ADR-040) → `check_forward_gate.py` → `qe paper` both books → `qe report`. 
 intraday protocol below is the **frozen fallback only** — run it only when the operator
 explicitly asks for a v1 intraday session (its strategies are retired, ADR-033/034).
 
+**Hybrid AI research layer (`qe.ai`, ADR-043):** offline, advisory, never imported by the engine;
+`python -m qe.ai research|report|fuse`. Default fusion `AI_ADVISORY` = AI weight 0 (decision == engine
+pick). Paid LLM backends need `--allow-llm-spend`. Pre-cutoff LLM signals are contaminated → never evidence.
+Docs: `docs/architecture/hybrid-ai-system.md` · `docs/operations/ai-configuration.md`.
+
 ---
 
 ## Paper Trading Start Protocol (v1 intraday — FROZEN FALLBACK, explicit request only)

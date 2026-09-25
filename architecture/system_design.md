@@ -644,8 +644,10 @@ candle-cache (DynamoDB poll)
 
 ## Hybrid AI Research Layer — `qe.ai` (ADR-043, Advisory Only)
 
-**Status:** `[PLANNED — not yet implemented]` — design approved 2026-09-25; Phases 2–5 build it on
-branch `feature/hybrid-ai-research`. **Not in any trading path.**
+**Status:** Phases 0–5 **implemented** 2026-09-25 on branch `feature/hybrid-ai-research` (offline,
+advisory, fake-LLM only — zero spend; **not wired to any engine path**). Phases 6–10 (forward AI
+shadow gate, post-trade analyst, dashboard, external data, real Bedrock spend) are
+`[PLANNED — not yet implemented]`. Report: `docs/research/ai-research-p0-p5-report.md`.
 
 An offline, TradingAgents-inspired multi-agent research package inside the v2 engine tree
 (`qe/ai/`, entry point `python -m qe.ai`). It reads the lake point-in-time, runs analyst agents
