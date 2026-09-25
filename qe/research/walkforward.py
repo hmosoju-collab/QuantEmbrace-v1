@@ -154,10 +154,12 @@ def run_walk_forward_study(
 
     gates = config.experiment.gates if config.experiment else ()
     engine_gates = evaluate_gates(gates, engine_metrics)
-    engine_pass = all_passed(engine_gates) if gates else True
+    # No pre-registered gates means nothing was tested: FAIL, never a vacuous
+    # pass (F-11; all_passed([]) is False by design, see qe/research/gates.py).
+    engine_pass = all_passed(engine_gates)
     if wf.v1_cross_check and v1_variants is not None:
         v1_gates = evaluate_gates(gates, v1_variants["delivery"]["metrics"])
-        v1_pass = all_passed(v1_gates) if gates else True
+        v1_pass = all_passed(v1_gates)
 
     out_dir = Path(report_dir) if report_dir else base_dir / "reports" / "qe" / sim.session_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +232,7 @@ def run_walk_forward_study(
 
 def _fmt_gates(results: list[dict]) -> list[str]:
     if not results:
-        return ["_(no gates declared)_"]
+        return ["_(no gates declared — verdict is FAIL: an ungated study proves nothing)_"]
     lines = ["| Gate | Metric | Threshold | Actual | Verdict |", "|---|---|---|---:|---|"]
     for g in results:
         actual = "—" if g["actual"] is None else f"{g['actual']:.4f}"
