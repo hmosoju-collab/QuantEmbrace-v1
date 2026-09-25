@@ -73,6 +73,13 @@ def default_payload(request: LLMRequest, seed: int = 0) -> dict:
             "supporting_evidence_ids": ids[:1],
             "contradicting_evidence_ids": ids[1:2],
         }
+    if schema == "post_trade/1":
+        return {
+            "unexpected_event": "",
+            "lesson": "Fake lesson (deterministic test double).",
+            "confidence": conf,
+            "evidence_ids": ids,
+        }
     if schema == "hypothesis/1":
         return {
             "hypotheses": [

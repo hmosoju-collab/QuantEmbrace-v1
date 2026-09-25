@@ -171,6 +171,13 @@ def _observation_fields(out: BaseModel) -> dict[str, Any]:
             "points": (*d["contradictions"], *d["unsupported_claims"])[:6],
             "evidence_ids": d["evidence_ids"],
         }
+    if "lesson" in d:  # post_trade/1
+        return {
+            "confidence": d["confidence"],
+            "summary": d["lesson"],
+            "points": (d["unexpected_event"],) if d["unexpected_event"] else (),
+            "evidence_ids": d["evidence_ids"],
+        }
     if "hypotheses" in d:
         return {
             "summary": "; ".join(h["name"] for h in d["hypotheses"])[:800],

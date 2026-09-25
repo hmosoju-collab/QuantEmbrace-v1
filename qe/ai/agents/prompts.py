@@ -106,6 +106,15 @@ class HypothesisOutput(FrozenModel):
     evidence_ids: Ids = ()
 
 
+class PostTradeOutput(FrozenModel):
+    """Narrative only: every classification of a trade is computed by code."""
+
+    unexpected_event: Annotated[str, Field(max_length=240)] = ""
+    lesson: Annotated[str, Field(max_length=400)]
+    confidence: Unit
+    evidence_ids: Ids = ()
+
+
 class SynthesisOutput(FrozenModel):
     bull_case: Text
     bear_case: Text
@@ -123,6 +132,7 @@ SCHEMAS: dict[str, type[FrozenModel]] = {
     "critic/1": CriticOutput,
     "synthesis/1": SynthesisOutput,
     "hypothesis/1": HypothesisOutput,
+    "post_trade/1": PostTradeOutput,
 }
 
 SCHEMA_FIELDS = {
@@ -150,6 +160,11 @@ SCHEMA_FIELDS = {
         '"consensus": string (max 600), "ai_confidence": number in [0, 1], '
         '"risks": up to 5 strings, "supporting_evidence_ids": up to 8 ids, '
         '"contradicting_evidence_ids": up to 8 ids (ids from ALLOWED_EVIDENCE_IDS)}'
+    ),
+    "post_trade/1": (
+        '{"unexpected_event": string (max 240, "" if none), "lesson": string (max 400, one '
+        'actionable research lesson), "confidence": number in [0, 1], '
+        '"evidence_ids": up to 8 ids from ALLOWED_EVIDENCE_IDS}'
     ),
     "hypothesis/1": (
         '{"hypotheses": 1-3 objects {"name": slug, "family": slug, "hypothesis": string '

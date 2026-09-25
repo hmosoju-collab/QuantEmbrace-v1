@@ -33,6 +33,7 @@ from qe.ai.llm import CircuitBreaker, LLMClient, LLMGateway, ResponseCache, RunB
 from qe.ai.models import ComponentStatus, Evidence
 from qe.ai.orchestration.journal import ResearchJournal
 from qe.ai.paths import AI_REPORT_DIR, safe_write_path
+from qe.ai.post_trade import lessons_known_at
 from qe.ai.reporting import load_research_journal
 from qe.clock import market_close_time, market_tz
 from qe.config import FrozenModel
@@ -206,6 +207,14 @@ def generate_hypotheses(
             ),
             ("family-test-budget", budget),
             ("available-data", sorted(AVAILABLE_DATA)),
+            (
+                # only lessons knowable at this research cutoff (knowledge_ts ≤ cutoff)
+                "past-trade-lessons",
+                [
+                    {"lesson": r.lesson, "quant_thesis": r.quant_thesis, "excess": r.excess_return}
+                    for r in lessons_known_at(base_dir, cutoff)
+                ],
+            ),
             (
                 "research-summary",
                 [
