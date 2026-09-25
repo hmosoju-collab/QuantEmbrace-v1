@@ -8,7 +8,7 @@ Tests cover:
   - Emergency exclusion blocks symbol
   - Missing snapshot: paper mode allows (with warning), live mode blocks
   - Snapshot mode mismatch raises on update_snapshot
-  - US market orders pass through (not validated)
+  - Non-NSE orders: allowed in paper modes, BLOCKED in LIVE (fail-closed, F-2)
   - ValidationResult fields are populated
 """
 
@@ -159,6 +159,30 @@ class TestUsMarketPassthrough:
         result = validator.validate("TSLA", "US")
         assert result.approved is True
         assert "Non-NSE market" in result.reason
+
+    @pytest.mark.parametrize("mode", [UniverseMode.PAPER_SAFE_START, UniverseMode.PAPER_EXPAND])
+    def test_non_nse_allowed_in_every_paper_mode(self, mode) -> None:
+        validator = UniverseOrderValidator(_make_snapshot(mode, _NIFTY50_SYMBOLS))
+        result = validator.validate("AAPL", "US")
+        assert result.approved is True
+        assert "paper only" in result.reason
+
+    def test_non_nse_blocked_in_live_with_snapshot(self) -> None:
+        """F-2: a LIVE_ADVANCED validator must never approve an unvalidated market."""
+        validator = UniverseOrderValidator(
+            _make_snapshot(UniverseMode.LIVE_ADVANCED, _NIFTY50_SYMBOLS)
+        )
+        result = validator.validate("AAPL", "US")
+        assert result.approved is False
+        assert "BLOCKED" in result.reason and "fail-closed" in result.reason
+
+    def test_non_nse_blocked_in_live_without_snapshot(self) -> None:
+        validator = UniverseOrderValidator(None, mode=UniverseMode.LIVE_ADVANCED)
+        assert validator.validate("AAPL", "US").approved is False
+
+    def test_non_nse_blocked_when_mode_unknown_defaults_to_strictest(self) -> None:
+        validator = UniverseOrderValidator(None)  # no snapshot, no mode ⇒ LIVE_ADVANCED
+        assert validator.validate("AAPL", "US").approved is False
 
 
 # ── Batch validation ──────────────────────────────────────────────────────────
