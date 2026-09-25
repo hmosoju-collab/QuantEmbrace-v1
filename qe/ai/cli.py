@@ -6,6 +6,7 @@
     python -m qe.ai hypothesize --research journals/ai/<run_id>.jsonl
     python -m qe.ai shadow   --gate configs/qe_ai_shadow_gate.yaml [--as-of D] [--show-binding]
     python -m qe.ai post-trade --engine-journal journals/<sim-or-paper>.jsonl [--max-trades N]
+    python -m qe.ai dashboard   # static research view -> reports/qe-ai/dashboard/index.html
 
 A separate entry point from ``python -m qe`` on purpose: the engine CLI imports
 the paper engine at load, and qe.ai must never share a process path with it.
@@ -58,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     pt.add_argument("--max-trades", type=int, default=20, help="most recent completed trades")
     pt.add_argument("--allow-llm-spend", action="store_true")
     pt.add_argument("--base-dir", default=".")
+
+    db = sub.add_parser("dashboard", help="render the static research view (no JavaScript)")
+    db.add_argument("--base-dir", default=".")
 
     sh = sub.add_parser("shadow", help="evaluate the pre-registered forward AI shadow gate")
     sh.add_argument("--gate", default="configs/qe_ai_shadow_gate.yaml")
@@ -150,6 +154,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {d.draft_id} {d.name} [{d.family}] {'; '.join(flags) or 'testable now'}")
         print("advisory : drafts only; a human decides via `python -m qe lifecycle`")
         return 0 if run.status == "OK" else 1
+
+    if args.cmd == "dashboard":
+        from qe.ai.dashboard import build_dashboard
+
+        print(build_dashboard(base))
+        return 0
 
     if args.cmd == "post-trade":
         from qe.ai.config import ResearchRunConfig
