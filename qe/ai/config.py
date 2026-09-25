@@ -71,6 +71,10 @@ class ResearchRunConfig(FrozenModel):
     # Extra symbols to research beyond the engine's own basket at as_of.
     symbols: tuple[str, ...] | None = None
     max_symbols: int = Field(20, ge=1, le=100)
+    # Withhold tickers from prompts: with price-only evidence the name adds no
+    # information but invites answers from model memory. A mitigation only —
+    # it never clears contamination_risk (lookahead-prevention §2).
+    mask_identifiers: bool = True
     temperature: float = Field(0.0, ge=0.0, le=1.0)
     region: str = "ap-south-1"
     seed: int = 0

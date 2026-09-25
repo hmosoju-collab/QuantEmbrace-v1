@@ -22,6 +22,7 @@ budget:
   breaker_threshold: 3
 guard_days: 90
 max_symbols: 20
+mask_identifiers: true      # withhold tickers from prompts (contamination mitigation, not a cure)
 temperature: 0.0
 seed: 0
 use_cache: true
