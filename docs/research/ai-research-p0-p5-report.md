@@ -79,12 +79,12 @@ Full analysis: `docs/tradingagents/adaptation-analysis.md`.
 
 **Bug found and fixed during P2.** `safe_write_path` initially resolved symlinks on the *allowed root* as well as the target. A symlinked `journals/ai → reports/qe` would therefore have let research output land in gate-evidence territory. A test caught it; it was fixed before the first commit of the package.
 
-**Documented, not fixed** — `docs/architecture/current-state.md §10`, operator triage needed:
+**Documented in Phase 0; triaged 2026-09-25** — dispositions in `docs/architecture/current-state.md §10a` (F-1, F-2, F-10, F-11, F-12, F-13 fixed):
 
 | ID | Severity | Finding |
 |---|---|---|
-| F-1 | HIGH | v1 `paper_trade` deserializes to **live** when the field is missing (5 places) |
-| F-2 | HIGH | Non-NSE markets bypass universe validation in every mode, including LIVE |
+| F-1 | ~~HIGH~~ MED | v1 `paper_trade`: a *missing* field was already refused by schema validation (this report originally overstated it); the real gap was a `null`/string value routing live. **Fixed 2026-09-25** (`f929947`) |
+| F-2 | HIGH | Non-NSE markets bypass universe validation in every mode, including LIVE — **fixed 2026-09-25** (`40c6792`) |
 | F-3 | MED | `QE_EXECUTION_LIVE_TRADING_ENABLED` is not a settings field |
 | F-4 | MED | `RISK_PROFILE` defaults to `tiny-live` in pydantic but `paper` in env readers |
 | F-6 | MED | The universe validator is skipped when it is `None` |

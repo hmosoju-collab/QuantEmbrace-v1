@@ -164,13 +164,13 @@ Neither adapter checks paper or live mode itself.
 | Cloud-sync duplicates | 26 files matching `* 2.*`, `* 3.*` or `* 4.*` (none are `.py`), plus 4 empty duplicate directories under `.claude/skills/` and `configs/backtesting/genai 2` |
 | Unused safety code | `services/shared/live_gate_checker.py` has no caller outside tests and references a missing `scripts/ops/approve_live_gate.py` |
 
-## 10. Findings (documented only — not fixed in this track)
+## 10. Findings (Phase 0 record — see §10a for the 2026-09-25 triage and fixes)
 
 Severity reflects the impact **if the v1 stack were ever run live**. Live is blocked today.
 
 | ID | Sev | Finding | Location |
 |---|---|---|---|
-| F-1 | HIGH | `paper_trade` deserializes to **`False` (live)** when the field is missing. This is fail-open. | `shared/models/signal.py:143`, `enriched_signal.py:204`, `kafka_signal_consumer.py:323`, `kafka_approved_consumer.py:306`, `candle_adapter.py:196` |
+| F-1 | ~~HIGH~~ MED (corrected) | `paper_trade` falls back to **`False` (live)** in the parsers. *Correction:* a **missing** field was already refused (it is in `SIGNAL_REQUIRED_FIELDS`); the real gap was a present-but-`null`/string value, which `bool(...)` routed live. | `shared/models/signal.py:143`, `enriched_signal.py:204`, `kafka_signal_consumer.py:323`, `kafka_approved_consumer.py:306`, `candle_adapter.py:196` |
 | F-2 | HIGH | Non-NSE markets bypass universe validation in **every** mode, including `LIVE_ADVANCED`. Logged only at DEBUG. | `services/shared/universe/order_validator.py:89-101` |
 | F-3 | MED | `QE_EXECUTION_LIVE_TRADING_ENABLED` is not a settings field, so the exit-router live path is unreachable. Its keyword call also does not match `ZerodhaBrokerClient.place_order(order)`. | `execution_engine/service.py:542`, `exit/exit_order_router.py:315` |
 | F-4 | MED | `RISK_PROFILE` defaults to `"tiny-live"` in pydantic but `"paper"` in direct env reads | `settings.py:226` vs `risk_engine/service.py:299`, `margin_validator.py:111` |
@@ -184,6 +184,28 @@ Severity reflects the impact **if the v1 stack were ever run live**. Live is blo
 | F-12 | LOW | **v2:** the family multiple-testing count is returned but **not persisted** to the ledger | `qe/research/registry.py:59-61` |
 | F-13 | MED | **CI gap:** CI runs `ruff --select E9,F63,F7,F82` and `pytest tests/unit/` only. `tests/qe` (including the broker-isolation and parity tests) and the TID251 banned-API rule are **not enforced in CI**. | `.github/workflows/ci.yml:76-80` |
 | F-14 | LOW | `rules/trading_layer_separation.yaml` lists forbidden imports, but has no enforcement mechanism | `rules/` |
+
+### 10a. Triage and dispositions (2026-09-25, operator-approved)
+
+Fixes are on branch `fix/findings-triage` (off `dev`, one commit per finding, independently
+reviewable), merged into `feature/hybrid-ai-research`. Each fix ships with tests that fail without it.
+
+| ID | Disposition | Detail |
+|---|---|---|
+| F-1 | **FIXED** `f929947` | `validate_event` requires `paper_trade` to be a JSON boolean on pending/enriched/approved; `null`/strings go to the DLQ, never approved or executed. Risk-layer "unknown ⇒ strict" semantics unchanged. 28 tests. |
+| F-2 | **FIXED** `40c6792` | Non-NSE orders BLOCKED in LIVE (CRITICAL log); paper modes allowed with WARNING. 5 tests. |
+| F-3 | DEFER (v1 decommission) | Net effect is fail-closed today (the v1 live exit path is unreachable). Must be fixed only if v1 were ever revived for live; qe replaces it. |
+| F-4 | DEFER (v1) | Pydantic default `tiny-live` is the *stricter* profile, so an unset env var fails safe for limits; run scripts set `RISK_PROFILE=paper` explicitly. Inconsistency recorded, not dangerous. |
+| F-5 | MITIGATED by F-1 | Entry routing uses the per-signal flag, now type-validated at every boundary and stamped from strategy-config by StrategyRunner. |
+| F-6 | ACCEPT (documented degrade) | Paper-only graceful degrade, logged WARNING; live remains fatal at startup — matches the CLAUDE.md paper-degrade rule. |
+| F-7 | DEFER (v1) | Exit/flatten paths bypass the entry funnel by design (must work under kill switch). Revisit only if v1 is revived. |
+| F-8 | DEFER (v1 decommission) | Broker construction at startup; removed wholesale by the v1 decommission runbook. |
+| F-9 | TRACKED | ALPACA-FIX already owned by ADR-041 P6b (US live automation). |
+| F-10 | **FIXED (research)** `c73fa19` | `qe.research.regime.pit_regime_series` (re-selects the proxy monthly from trailing turnover) reported beside the verbatim v1 overlay, which is labelled look-ahead; a test proves the v1 proxy leaks. Re-measurement of the ADR-034 overlay conclusion on the real lake: see ADR-034 correction note. |
+| F-11 | **FIXED** `a0e4ec1` | An ungated walk-forward study reports FAIL. |
+| F-12 | **FIXED** `b47e158` | Family test-budget count persisted in each ledger record (existing lines untouched — append-only). |
+| F-13 | **FIXED** `4a441bc` | CI `test-qe` job: full ruff rules on `qe/`, `pytest tests/qe`, fails on unexpected skips. Not yet run on GitHub (nothing pushed). |
+| F-14 | SUPERSEDED for qe | Import rules for qe/qe.ai are now enforced by tests in CI (F-13); `rules/trading_layer_separation.yaml` stays advisory for frozen v1. |
 
 ## 11. Tests and CI
 
