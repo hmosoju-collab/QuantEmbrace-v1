@@ -33,6 +33,8 @@ def _configs(base: Path, backend: str = "fake") -> str:
     }
     (base / "configs" / "book.yaml").write_text(yaml.safe_dump(book))
     (base / "configs" / "ai.yaml").write_text(yaml.safe_dump(ai))
+    fusion = (REPO / "configs" / "research_fusion.yaml").read_text()  # the committed default
+    (base / "configs" / "research_fusion.yaml").write_text(fusion)
     return "configs/ai.yaml"
 
 
@@ -61,9 +63,28 @@ def test_research_and_report_end_to_end(synthetic_lake, synthetic_panel, capsys)
     assert not (base / "reports" / "qe").exists()  # gate evidence untouched
     assert not list((base / "journals").glob("paper-*"))  # live-gate evidence untouched
 
-    journal = next((base / "journals" / "ai").glob("*.jsonl"))
+    journal = str(next((base / "journals" / "ai").glob("*.jsonl")).relative_to(base))
+    assert main(["report", "--journal", journal, "--base-dir", str(base)]) == 0
+    assert main(["fuse", "--research", journal, "--base-dir", str(base)]) == 0
+    out = capsys.readouterr().out
+    assert "AI_ADVISORY (shadow)" in out and "divergences from engine: none" in out
+    views = list((base / "reports" / "qe-ai").rglob("fusion-ai_advisory-shadow.*"))
+    assert len(views) == 2
+    # weighted fusion outside a study is refused by the CLI, not silently applied
+    (base / "configs" / "weighted.yaml").write_text("mode: AI_WEIGHTED\nai_weight: 0.2\n")
     assert (
-        main(["report", "--journal", str(journal.relative_to(base)), "--base-dir", str(base)]) == 0
+        main(
+            [
+                "fuse",
+                "--research",
+                journal,
+                "--config",
+                "configs/weighted.yaml",
+                "--base-dir",
+                str(base),
+            ]
+        )
+        == 2
     )
 
 

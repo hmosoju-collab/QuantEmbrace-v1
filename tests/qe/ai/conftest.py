@@ -29,8 +29,9 @@ def make_panel(n_days: int = 520, n_syms: int = 60, seed: int = 5) -> Panel:
     return Panel(close=close, turnover=turn, delivery=deliv)
 
 
-@pytest.fixture()
+@pytest.fixture(scope="session")
 def synthetic_panel() -> Panel:
+    """Shared read-only panel (test_ai_tools_pit asserts tools never mutate it)."""
     return make_panel()
 
 
