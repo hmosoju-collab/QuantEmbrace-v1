@@ -6,6 +6,7 @@ Usage:
     python -m qe paper  --config path/to/run.yaml [--as-of YYYY-MM-DD] [--base-dir DIR]
     python -m qe kill   status|activate|deactivate [--reason ...] [--path FILE]
     python -m qe report --journal path/to/journal.jsonl
+    python -m qe lifecycle status | transition --strategy ID --to STATE --approved-by NAME ...
 """
 
 import argparse
@@ -52,6 +53,19 @@ def main(argv: list[str] | None = None) -> int:
 
     p_drill = sub.add_parser("drill", help="run fail-closed pre-live safety drills")
     p_drill.add_argument("--base-dir", default=".")
+
+    p_life = sub.add_parser("lifecycle", help="strategy lifecycle ledger (human-approved)")
+    p_life.add_argument("action", choices=["status", "transition"])
+    p_life.add_argument("--strategy", help="strategy id (transition)")
+    p_life.add_argument("--to", dest="to_state", help="target state (transition)")
+    p_life.add_argument("--approved-by", help="the human approving this transition")
+    p_life.add_argument("--family")
+    p_life.add_argument("--hypothesis-ref", help="doc path or qe.ai:<draft_id>")
+    p_life.add_argument("--experiment-id")
+    p_life.add_argument("--paper-config")
+    p_life.add_argument("--gate-evidence", help="forward-gate pass artifact path")
+    p_life.add_argument("--reason", help="cause of death (GRAVEYARD)")
+    p_life.add_argument("--base-dir", default=".")
 
     args = parser.parse_args(argv)
 
@@ -245,6 +259,42 @@ def main(argv: list[str] | None = None) -> int:
             "the fail-closed machinery " + ("works." if all_pass else "MUST be fixed before live.")
         )
         return 0 if all_pass else 1
+
+    if args.command == "lifecycle":
+        from qe.research import lifecycle
+
+        base = Path(args.base_dir)
+        if args.action == "status":
+            states = lifecycle.status(base)
+            for sid, state in sorted(states.items()):
+                print(f"  {sid:32} {state}")
+            if not states:
+                print("  (no strategies registered)")
+            return 0
+        if not (args.strategy and args.to_state and args.approved_by):
+            print("transition needs --strategy, --to and --approved-by", file=sys.stderr)
+            return 2
+        try:
+            rec = lifecycle.transition(
+                base,
+                strategy_id=args.strategy,
+                to_state=args.to_state,
+                approved_by=args.approved_by,
+                family=args.family,
+                hypothesis_ref=args.hypothesis_ref,
+                experiment_id=args.experiment_id,
+                paper_config=args.paper_config,
+                gate_evidence=args.gate_evidence,
+                reason=args.reason,
+            )
+        except lifecycle.LifecycleError as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 2
+        print(
+            f"  {rec['strategy_id']}: {rec['from_state']} -> {rec['to_state']} "
+            f"(approved by {rec['approved_by']})"
+        )
+        return 0
     return 2
 
 
