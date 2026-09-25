@@ -133,14 +133,16 @@ class ResearchData:
     index_bars: dict[str, pd.Series]
 
 
-def load_research_data(book: RunConfig, as_of: date, base_dir: str | Path = ".") -> ResearchData:
-    """Load the PIT panel for [as_of - 2y, as_of] exactly as the engine does,
-    plus market-level index closes when the lake has them, and pin one data
+def load_research_data(
+    book: RunConfig, as_of: date, base_dir: str | Path = ".", *, start: date | None = None
+) -> ResearchData:
+    """Load the PIT panel for [start or as_of - 2y, as_of] exactly as the engine
+    does, plus market-level index closes when the lake has them, and pin one data
     snapshot covering every file read (provenance for the research journal)."""
     base_dir = Path(base_dir)
     lake_root = base_dir / book.data.lake_root
     market = book.universe.market
-    start = as_of - timedelta(days=WARMUP_DAYS)
+    start = start or as_of - timedelta(days=WARMUP_DAYS)
     files = resolve_panel_files(
         lake_root,
         start,

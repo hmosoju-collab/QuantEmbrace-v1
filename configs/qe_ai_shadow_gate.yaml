@@ -1,0 +1,33 @@
+# Forward AI Shadow Gate (ADR-043 P6) — PRE-REGISTRATION DRAFT, NOT YET SIGNED OFF.
+#
+# The only way an AI research score can ever earn fusion weight: forward accrual on
+# decision dates after BOTH the operator's sign-off and the model's knowledge cutoff
+# (+guard), scored later against realized returns. Historical backtests of LLM scores
+# are not evidence (docs/research/lookahead-prevention.md §2).
+#
+# Mirrors the Forward Factor Gate (scripts/paper/check_forward_gate.py) — ≥12 months,
+# IR ≥ 0.50, ≥58% positive months, no single month > 50% — measured on the AI score's
+# INCREMENTAL information over the factor rank: each month, ai_score is residualized on
+# the quant score q across the researched names, and the Spearman IC of that residual
+# vs the forward return is taken.
+#
+# While status is DRAFT, `python -m qe.ai shadow` reports counts only and refuses any
+# verdict. To sign off, a human fills the binding fields (see `--show-binding`), sets
+# status: SIGNED_OFF, and commits BEFORE accrual starts. Thresholds must never be
+# relaxed afterwards. A PASS means human review + a new ADR — never an automatic
+# weight change.
+schema_version: qe_ai_shadow_gate/1
+status: DRAFT                 # DRAFT | SIGNED_OFF
+signed_off_by: null
+signed_off_on: null           # accrual counts decision dates strictly AFTER this date
+research_config: configs/qe_ai_research.yaml
+research_config_hash: null    # bound at sign-off (python -m qe.ai shadow --show-binding)
+model_id: null                # the analyst (quick) model the series is registered for
+horizon_days: 21              # forward return horizon, trading days from the decision close
+min_names_per_month: 8        # a month with fewer scored names is not counted
+thresholds:
+  min_months: 12
+  min_mean_ic: 0.0            # mean monthly incremental IC must be > this
+  min_ic_ir: 0.50             # mean / std * sqrt(12)
+  min_positive_frac: 0.58     # share of months with IC > 0
+  max_single_month_share: 0.50  # no single month > 50% of cumulative IC

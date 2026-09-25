@@ -4,6 +4,7 @@
     python -m qe.ai report   --journal journals/ai/<run_id>.jsonl
     python -m qe.ai fuse     --research journals/ai/<run_id>.jsonl [--engine-journal ...]
     python -m qe.ai hypothesize --research journals/ai/<run_id>.jsonl
+    python -m qe.ai shadow   --gate configs/qe_ai_shadow_gate.yaml [--as-of D] [--show-binding]
 
 A separate entry point from ``python -m qe`` on purpose: the engine CLI imports
 the paper engine at load, and qe.ai must never share a process path with it.
@@ -49,6 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     h.add_argument("--research", required=True, help="research journal (journals/ai/...)")
     h.add_argument("--allow-llm-spend", action="store_true")
     h.add_argument("--base-dir", default=".")
+
+    sh = sub.add_parser("shadow", help="evaluate the pre-registered forward AI shadow gate")
+    sh.add_argument("--gate", default="configs/qe_ai_shadow_gate.yaml")
+    sh.add_argument("--as-of", type=date.fromisoformat, help="default: latest lake date")
+    sh.add_argument(
+        "--show-binding", action="store_true", help="print the values a human signs off"
+    )
+    sh.add_argument("--base-dir", default=".")
 
     args = parser.parse_args(argv)
     base = Path(args.base_dir)
@@ -133,4 +142,51 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {d.draft_id} {d.name} [{d.family}] {'; '.join(flags) or 'testable now'}")
         print("advisory : drafts only; a human decides via `python -m qe lifecycle`")
         return 0 if run.status == "OK" else 1
+
+    if args.cmd == "shadow":
+        from qe.ai.config import ResearchRunConfig
+        from qe.ai.shadow import ShadowGateConfig, run_shadow
+
+        gate = ShadowGateConfig.from_yaml(base / args.gate)
+        if args.show_binding:
+            cfg = ResearchRunConfig.from_yaml(base / gate.research_config)
+            print("Fill these into the gate, set status: SIGNED_OFF, commit BEFORE accrual:")
+            print(f"  research_config_hash: {cfg.config_hash()}")
+            print(f"  model_id: {cfg.quick_model.model_id}   # analyst model")
+            print(
+                f"  (knowledge_cutoff in {gate.research_config}: {cfg.quick_model.knowledge_cutoff})"
+            )
+            print("  signed_off_by: <your name>   signed_off_on: <today, YYYY-MM-DD>")
+            if cfg.quick_model.knowledge_cutoff is None:
+                print(
+                    "WARNING: do NOT sign off yet - knowledge_cutoff is unknown, so every "
+                    "signal would be contaminated and the series could never accrue."
+                )
+            if cfg.backend == "fake":
+                print(
+                    "WARNING: do NOT sign off yet - backend=fake produces deterministic "
+                    "test-double scores, not research. Configure the real model first (P10)."
+                )
+            return 0
+        as_of = args.as_of
+        if as_of is None:
+            from qe.data.feed import LiveLakeFeed, reference_symbol_for_market
+
+            cfg = ResearchRunConfig.from_yaml(base / gate.research_config)
+            from qe.config import RunConfig
+
+            book = RunConfig.from_yaml(base / cfg.book_config)
+            m = book.universe.market
+            as_of = LiveLakeFeed(
+                base / book.data.lake_root,
+                market=m,
+                reference_symbol=reference_symbol_for_market(m),
+            ).latest_date()
+        rep = run_shadow(args.gate, as_of=as_of, base_dir=base)
+        r = rep.result
+        print(f"gate     : {rep.gate_status} ({rep.gate_hash[:12]})")
+        print(f"verdict  : {r.verdict} - {r.reason}")
+        print(f"months   : {r.months}; observations: {len(rep.collected.observations)}")
+        print(f"report   : {rep.out_dir}")
+        return 0
     return 2
