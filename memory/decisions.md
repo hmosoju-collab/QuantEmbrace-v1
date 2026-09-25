@@ -3095,3 +3095,26 @@ headline numbers reproduced exactly):
   for the delivery book; a market-exposure overlay would need its own pre-registered study.
 - The verbatim v1 function is kept unchanged as a parity anchor and is labelled look-ahead in
   every walk-forward report; the PIT rows are the evidence.
+
+---
+
+## ADR-043 addendum — Phase 6 delivered + findings triage (2026-09-25)
+
+**Status:** Implemented (operator-approved "proceed with recommended") · **Branches:**
+`fix/findings-triage` (off `dev`, one commit per fix) merged into `feature/hybrid-ai-research`.
+
+- **Findings triage** (`docs/architecture/current-state.md §10a`): fixed F-1 (paper_trade must be a
+  JSON boolean at every signal boundary — Phase 0 overstated it: a *missing* flag was already
+  refused; the real gap was null/string), F-2 (non-NSE blocked in LIVE), F-10 (point-in-time regime
+  overlay beside the leaky v1 one; see ADR-034 correction note), F-11 (ungated study = FAIL),
+  F-12 (family count persisted), F-13 (CI `test-qe` job). F-3…F-9/F-14 deferred to v1 decommission,
+  accepted as documented paper degrade, tracked, or superseded — each with its reason.
+- **iCloud:** 4,764 evicted lake files re-downloaded (`brctl download` per file — the folder form
+  does nothing); the real-lake `qe.ai` E2E then ran in 8 s.
+- **P6:** `qe.research.lifecycle` (evidence-gated, human-approved, append-only ledger; AI identities
+  refused; qe.ai cannot import it) · `qe.ai.hypotheses` (CANDIDATE drafts; code flags settled-family
+  re-proposals from `governance/research-eliminated-families.yaml`, untestable data, and the family
+  test budget) · `qe.ai.shadow` + `configs/qe_ai_shadow_gate.yaml` (forward gate on incremental IC
+  over the factor rank, mirroring the Forward Factor Gate; **committed as DRAFT — no verdict until a
+  human signs off**, which must wait for a real model + cutoff, P10).
+- **Not done:** P7–P10; the CI job has not run on GitHub (nothing pushed); the shadow gate is unsigned.

@@ -1701,7 +1701,7 @@ Operator authorised Phases 0–5 as one run, then STOP for review.
 | P3 | LLM protocol/fake/Bedrock adapter, guardrails, PIT tools, analyst agents | ✅ DONE 2026-09-25 |
 | P4 | Bull/bear/critic/synthesizer, FAST/STANDARD/DEEP orchestration, research journal, CLI | ✅ DONE 2026-09-25 |
 | P5 | Deterministic fusion (AI_ADVISORY default) + parity/invariance tests + ops docs + report | ✅ DONE 2026-09-25 — `tests/qe` 424 passed / 0 skipped (89 engine + 335 qe.ai); report `docs/research/ai-research-p0-p5-report.md`; **STOPPED for operator review** |
-| P6 | Hypothesis→study pipeline; forward AI shadow ledger + pre-registered AI gate | 🔒 design-only — needs F-11/F-12 fixes first |
+| P6 | Hypothesis drafts, strategy lifecycle ledger, forward AI shadow gate | ✅ DONE 2026-09-25 — F-11/F-12 fixed first; gate committed **DRAFT (unsigned)**; report `docs/research/ai-research-p6-report.md`; **STOPPED for review** |
 | P7 | Post-trade analyst; knowledge-time-stamped reflection memory | 🔒 design-only |
 | P8 | Research dashboard | 🔒 design-only |
 | P9 | External-data (news/fundamentals) security hardening + data-lake quarantine | 🔒 design-only |
@@ -1712,6 +1712,10 @@ F-1 v1 `paper_trade` missing-field → live (HIGH) · F-2 non-NSE universe bypas
 (HIGH) · F-10 `wf_v1.regime_series` total-period-turnover look-ahead · F-11 walk-forward with no
 gates reports pass · F-12 family test-budget count not persisted · F-13 CI does not run `tests/qe`.
 
-**⚠️ Environment blocker found 2026-09-25:** 1,003/7,548 daily lake files (2024–26) are iCloud-evicted
-("dataless") — reads stall with ~0 CPU. The real-lake `qe.ai` E2E was stopped (nothing written); `qe study`/
-`qe paper` would stall the same way. Fix: `brctl download backtest-data/lake` or move the lake out of iCloud.
+**✅ iCloud lake eviction RESOLVED 2026-09-25:** 4,764 evicted lake files re-downloaded (`brctl download` must
+be run per FILE — the folder form silently does nothing). Real-lake `qe.ai` E2E then ran in 8 s. It can recur
+(Optimize Mac Storage) — check `find backtest-data/lake -flags +dataless | wc -l` before a cadence run.
+
+**Findings triage 2026-09-25** (`current-state.md §10a`): F-1, F-2, F-10, F-11, F-12, F-13 FIXED on
+`fix/findings-triage` (off `dev`, merged into the AI branch); F-3…F-9, F-14 deferred/accepted with reasons.
+**Open:** push + first GitHub run of the new CI `test-qe` job; sign-off of the AI shadow gate only after P10.

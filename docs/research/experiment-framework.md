@@ -42,12 +42,12 @@ Given the same config, snapshot, code SHA and LLM cache, a research run replays 
 
 Tested in `test_ai_orchestration.py::test_replay_from_cache_is_identical`.
 
-## 4. Forward shadow ledger — `[PLANNED — not yet implemented]` (P6)
+## 4. Forward shadow gate — implemented as a DRAFT pre-registration (P6)
 
 This is how an AI score could ever earn weight:
 
-1. **Pre-register** `configs/qe_ai_shadow_gate.yaml`: the metric (for example the rank IC of `ai_score` against forward 21-day return, net of the quant score), thresholds, minimum months, and the model ID. It is committed before accrual starts.
-2. **Accrue.** Each month-end, run research on the engine basket plus a control sample, only for decision dates after `knowledge_cutoff + guard_days`. Append to `governance/ai-shadow-ledger.jsonl`.
+1. **Pre-register** `configs/qe_ai_shadow_gate.yaml` (committed as **DRAFT**): monthly Spearman IC of `ai_score` residualized on the factor rank `q` vs the 21-trading-day forward return; thresholds mirror the Forward Factor Gate. A human signs off (binding the research-config hash and model; `python -m qe.ai shadow --show-binding`) before accrual starts; the evaluator refuses a verdict until then.
+2. **Accrue.** Each month-end, `python -m qe.ai research` on the book basket. The research journals themselves are the ledger (`journals/ai/`); only decision dates after sign-off count, only uncontaminated signals, and only the **first** run per date (re-runs cannot cherry-pick).
 3. **Score** outcomes after they are realized, using knowledge-time-correct returns.
-4. **Evaluate** with a `check_ai_shadow_gate.py` that mirrors `check_forward_gate.py`. It fails closed and never relaxes.
+4. **Evaluate** with `python -m qe.ai shadow` (mirrors `check_forward_gate.py`): fails closed, counts every exclusion, never relaxes. A constant or factor-parroting AI score scores IC 0.0 — counted, not dropped.
 5. **Pass means a human review, not an automatic weight change.** Any change to `ai_weight` or to the engine requires a new ADR and operator approval.

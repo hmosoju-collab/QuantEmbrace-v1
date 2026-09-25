@@ -648,6 +648,11 @@ candle-cache (DynamoDB poll)
 advisory, fake-LLM only — zero spend; **not wired to any engine path**). Phases 6–10 (forward AI
 shadow gate, post-trade analyst, dashboard, external data, real Bedrock spend) are
 `[PLANNED — not yet implemented]`. Report: `docs/research/ai-research-p0-p5-report.md`.
+**Phase 6 implemented 2026-09-25** (`docs/research/ai-research-p6-report.md`): strategy lifecycle ledger
+(`qe/research/lifecycle.py`, `python -m qe lifecycle` — evidence-gated, human-approved, append-only
+`governance/strategy-lifecycle.jsonl`; qe.ai cannot call it), AI hypothesis drafts (`python -m qe.ai
+hypothesize`, CANDIDATE-only), and the forward AI shadow gate (`configs/qe_ai_shadow_gate.yaml`,
+**DRAFT — unsigned**; `python -m qe.ai shadow` refuses a verdict until a human signs off).
 
 An offline, TradingAgents-inspired multi-agent research package inside the v2 engine tree
 (`qe/ai/`, entry point `python -m qe.ai`). It reads the lake point-in-time, runs analyst agents

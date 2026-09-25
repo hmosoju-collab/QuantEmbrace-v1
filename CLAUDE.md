@@ -52,6 +52,8 @@ explicitly asks for a v1 intraday session (its strategies are retired, ADR-033/0
 **Hybrid AI research layer (`qe.ai`, ADR-043):** offline, advisory, never imported by the engine;
 `python -m qe.ai research|report|fuse`. Default fusion `AI_ADVISORY` = AI weight 0 (decision == engine
 pick). Paid LLM backends need `--allow-llm-spend`. Pre-cutoff LLM signals are contaminated → never evidence.
+P6: `python -m qe lifecycle` (human-approved strategy states; AI cannot promote) · `qe.ai hypothesize` (drafts
+only) · `qe.ai shadow` (forward AI gate — DRAFT until a human signs off; never sign off on the fake backend).
 Docs: `docs/architecture/hybrid-ai-system.md` · `docs/operations/ai-configuration.md`.
 
 ---

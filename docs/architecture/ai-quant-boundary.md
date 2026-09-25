@@ -32,8 +32,8 @@ Risk Engine (qe.risk) → Execution (qe.engine.core, qe.execution) → Broker po
 | `qe.ai` may write | `qe.ai` must never write |
 |---|---|
 | `journals/ai/<run_id>.jsonl` (research journal) | `journals/paper-*.jsonl` (read by `qe.live_gate` as clean-session evidence) |
-| `reports/qe-ai/<run_id>/…` (derived views) | anything under `reports/qe/` (read by `qe.live_gate` and `check_forward_gate.py` as gate evidence) |
-| `backtest-data/ai_cache/…` (LLM response cache) | `backtest-data/paper_book/*` (book state, kill flag), `governance/live-gate/*`, `governance/experiment-registry.jsonl` (P6 will register hypotheses there only through `qe.research.registry`, called by a human-run study) |
+| `reports/qe-ai/<run_id>/…`, `reports/qe-ai/hypotheses/…`, `reports/qe-ai/shadow/…` (derived views, drafts, gate reports) | anything under `reports/qe/` (read by `qe.live_gate` and `check_forward_gate.py` as gate evidence) |
+| `backtest-data/ai_cache/…` (LLM response cache) | `backtest-data/paper_book/*` (book state, kill flag), `governance/*` — including the experiment registry and the strategy lifecycle ledger (`qe.ai` *reads* the registry and `research-eliminated-families.yaml`; only human-run `qe study` / `qe lifecycle` write governance) |
 | `backtest-data/lake/_snapshots/` **only through** `qe.data.snapshot.create_snapshot` (provenance, the same mechanism the engine uses) | orders, positions, risk limits, configs, broker credentials, account settings |
 
 All `qe.ai` writes go through `qe.ai.paths.safe_write_path`, which refuses the forbidden locations. Enforced by `test_ai_boundary.py`, `test_ai_cli.py` (an end-to-end run asserts nothing new under `reports/qe/` or `journals/paper-*`), and `test_ai_engine_untouched.py`.

@@ -17,6 +17,20 @@ python -m qe.ai fuse --research journals/ai/<run_id>.jsonl \
     [--engine-journal journals/paper-delivery-book-paper-<...>.jsonl] [--context shadow|study]
 ```
 
+```bash
+# P6: draft testable hypotheses from a research run (CANDIDATE drafts for human review only)
+python -m qe.ai hypothesize --research journals/ai/<run_id>.jsonl
+
+# P6: evaluate the pre-registered forward AI shadow gate (DRAFT ⇒ counts only, no verdict)
+python -m qe.ai shadow [--as-of YYYY-MM-DD]
+python -m qe.ai shadow --show-binding          # the values a human fills in to sign off
+
+# P6: strategy lifecycle ledger (engine-side governance; qe.ai cannot call it)
+python -m qe lifecycle status
+python -m qe lifecycle transition --strategy <id> --to CANDIDATE --family <f> \
+    --hypothesis-ref qe.ai:<draft_id> --approved-by <your name>
+```
+
 `python -m qe.ai` is intentionally separate from `python -m qe`. The engine CLI loads the paper engine at import time, and the two must never share a process.
 
 ## 2. Research config — `configs/qe_ai_research.yaml`
@@ -100,3 +114,16 @@ The brief sketched four configurable weights (quant, regime, AI, risk). Only `ai
 - A fusion run recomputes the quant view on the **same data snapshot** the research run used. If the lake changed since, the run is refused.
 - Signals researched for a different `information_cutoff` are ignored and listed in `ignored_signals`.
 - `--engine-journal` is read-only. It adds what the engine actually did that day (risk verdict, rebalance or skip, kill-blocked) to the view.
+
+## 4. Signing off the forward AI shadow gate (P6 → P10)
+
+`configs/qe_ai_shadow_gate.yaml` is committed as **DRAFT**. Do **not** sign it off while the research
+config uses `backend: fake` or an unknown `knowledge_cutoff` — `--show-binding` warns about both.
+
+1. Complete §2.2 (real Bedrock model IDs + their knowledge cutoffs) and commit the research config.
+2. `python -m qe.ai shadow --show-binding` → copy `research_config_hash` and `model_id`.
+3. Set `status: SIGNED_OFF`, `signed_off_by`, `signed_off_on` (today) in the gate and **commit before the
+   first counted month-end**. Thresholds are never relaxed afterwards; changing the research config or
+   model starts a new series (a new sign-off).
+4. Monthly: `python -m qe.ai research …` at the book's month-end, then `python -m qe.ai shadow`.
+5. A PASS means human review and a new ADR before any `ai_weight` change — never automatic.

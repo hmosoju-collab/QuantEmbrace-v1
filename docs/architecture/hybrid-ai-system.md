@@ -83,7 +83,7 @@ Every run also has:
 | LLM layer, guardrails, tools, analyst agents | P3 | Implemented — `qe/ai/{llm,guardrails,tools,agents}`; fake backend only exercised (zero spend) |
 | Debate, orchestration, journal, CLI | P4 | Implemented — `qe/ai/orchestration`, `qe/ai/{reporting,cli}.py`, `python -m qe.ai research|report` |
 | Deterministic fusion (AI_ADVISORY) | P5 | Implemented — `qe/ai/fusion`, `python -m qe.ai fuse`; ADVISORY parity with the engine proven at every sim rebalance |
-| Hypothesis → study pipeline, forward AI shadow ledger, pre-registered AI gate | P6 | `[PLANNED — not yet implemented]` |
+| Hypothesis drafts, strategy lifecycle ledger, forward AI shadow gate | P6 | Implemented 2026-09-25 — `qe/ai/{hypotheses,shadow}`, `qe/research/lifecycle.py`; gate committed as **DRAFT, not signed off** (sign-off waits for the real model, P10) |
 | Post-trade analyst, reflection memory stamped with knowledge time | P7 | `[PLANNED — not yet implemented]` |
 | Research dashboard (beyond the markdown fusion view) | P8 | `[PLANNED — not yet implemented]` |
 | External-data (news/fundamentals) security hardening | P9 | `[PLANNED — not yet implemented]` |
