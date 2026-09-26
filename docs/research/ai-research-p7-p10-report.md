@@ -79,14 +79,14 @@ The 403 text ends "contact AWS Sales", which points to an account-level entitlem
 2. **The AWS account is not entitled to Claude on Bedrock**, or at least not on the endpoints tried. Your options: enable Anthropic model access for the account (Bedrock console, or AWS Sales), or provide a first-party Anthropic credential and I add a second adapter behind the same `LLMClient` protocol (about a day's work, not built).
 3. **Signals dated before 2026-09-29 are contaminated** under the Jun-2026 knowledge cutoff plus 90-day guard. The first date that can ever count toward the shadow gate is the **2026-09-30 month-end**. Missing it costs one month of the 12-month series, not the program.
 4. **The shadow gate must not be signed off** until a real model has run and been probed. `--show-binding` warns about this.
-5. **The NSE downloader is untested against the live site**, and NSE actively blocks scripted access.
+5. ~~The NSE downloader is untested against the live site~~ — verified live 2026-09-26 (addendum); NSE still blocks scripted access at will, so expect intermittent failures.
 6. **The screen is heuristic.** Held documents need a human, and the injection patterns will need tuning on real data.
 7. **The CI `test-qe` job has still never run on GitHub**, and nothing is pushed.
 
 ## 8. Recommended next steps
 
 1. **Unblock the model** (operator): enable Anthropic access on the AWS account, then run `python -m qe.ai probe … --allow-llm-spend`. Tell me if you'd rather use a first-party API key instead.
-2. Run the downloader once for a small window (`--symbols INFY,TCS`), then `corpus ingest` and inspect `held/` and `rejected/`.
+2. ~~Run the downloader once~~ — done (see the addendum). Widen it (all 217 universe names, a longer history) once the screen has seen more text.
 3. Once a probe passes, run the capped smoke run, then a STANDARD run on **2026-09-30** (the first clean date) to start accruing.
 4. Only after that, review and sign off the shadow gate.
 5. Push and open the two PRs (`fix/findings-triage`, `feature/hybrid-ai-research`) so CI runs the new `test-qe` job.
