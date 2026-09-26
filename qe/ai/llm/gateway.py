@@ -10,6 +10,7 @@ gateway: it becomes a component status and the deterministic path continues.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import time
 from typing import Any
 
 from qe.ai.guardrails import SecretLeakError, assert_no_secrets
@@ -37,6 +38,7 @@ class GatewayStats:
     output_tokens: int = 0
     failures: int = 0
     by_status: dict[str, int] = field(default_factory=dict)
+    errors: dict[str, int] = field(default_factory=dict)  # sanitized provider error labels
 
 
 class LLMGateway:
@@ -49,12 +51,14 @@ class LLMGateway:
         cache: ResponseCache | None,
         max_retries: int,
         sink: EventSink | None = None,
+        backoff_s: float = 0.0,
     ):
         self.client = client
         self.budget = budget
         self.breaker = breaker
         self.cache = cache
         self.max_retries = max_retries
+        self.backoff_s = backoff_s
         self.sink = sink or (lambda _t, _d: None)
         self.stats = GatewayStats()
 
@@ -119,8 +123,10 @@ class LLMGateway:
                 resp = self.client.complete(request)
             except LLMTimeout as exc:
                 last_status, last_error = ComponentStatus.TIMEOUT, f"timeout: {exc}"
+                self.stats.errors[str(exc)] = self.stats.errors.get(str(exc), 0) + 1
             except LLMError as exc:
                 last_status, last_error = ComponentStatus.ERROR, f"provider error: {exc}"
+                self.stats.errors[str(exc)] = self.stats.errors.get(str(exc), 0) + 1
             else:
                 self.budget.record(resp.input_tokens, resp.output_tokens)
                 self.stats.input_tokens += resp.input_tokens
@@ -133,4 +139,6 @@ class LLMGateway:
             self.breaker.record_failure()
             if self.breaker.is_open:
                 break
+            if self.backoff_s and attempts <= self.max_retries:
+                time.sleep(self.backoff_s * attempts)  # linear backoff before the retry
         return CallResult(None, last_status, last_error, attempts)

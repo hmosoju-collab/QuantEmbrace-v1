@@ -25,6 +25,7 @@ def cache_key(request: LLMRequest, prompt_version: str) -> str:
             "prompt": request.prompt,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
+            "effort": request.effort,
         },
         sort_keys=True,
     )

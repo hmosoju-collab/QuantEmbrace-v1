@@ -158,6 +158,7 @@ def run_research(
             cache=ResponseCache(base_dir) if cfg.use_cache else None,
             max_retries=cfg.budget.max_retries,
             sink=journal.event,
+            backoff_s=cfg.budget.retry_backoff_s or 0.0,
         )
         ctx = AgentContext(
             gateway=gateway,
@@ -168,6 +169,7 @@ def run_research(
             temperature=cfg.temperature,
             max_retries=cfg.budget.max_retries,
             mask_identifiers=cfg.mask_identifiers,
+            effort=cfg.effort,
         )
 
         regime_result, reading = regime(api)
@@ -224,6 +226,8 @@ def run_research(
             signals=tuple(signals),
             failed_symbols=tuple(failed),
             llm_calls=stats.calls,
+            llm_failures=stats.failures,
+            llm_errors=dict(stats.errors),
             cache_hits=stats.cache_hits,
             input_tokens=stats.input_tokens,
             output_tokens=stats.output_tokens,

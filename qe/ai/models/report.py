@@ -3,6 +3,8 @@
 from datetime import date, datetime
 from typing import Literal
 
+from pydantic import Field
+
 from qe.ai.config import ResearchMode
 from qe.ai.models.common import Unit
 from qe.ai.models.signal import ResearchSignal
@@ -29,6 +31,8 @@ class ResearchReport(FrozenModel):
     signals: tuple[ResearchSignal, ...]
     failed_symbols: tuple[str, ...] = ()
     llm_calls: int = 0
+    llm_failures: int = 0
+    llm_errors: dict[str, int] = Field(default_factory=dict)
     cache_hits: int = 0
     input_tokens: int = 0
     output_tokens: int = 0

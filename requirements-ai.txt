@@ -1,0 +1,5 @@
+# Optional: real LLM backend for qe.ai (ADR-043 P10). NOT needed for the fake backend,
+# tests, CI, or any engine/research command. Imported lazily only in qe/ai/llm/bedrock.py.
+#   pip install -r requirements-ai.txt
+# Official Anthropic SDK with the Amazon Bedrock (Mantle / Messages API) client.
+anthropic[bedrock]>=1.8,<2

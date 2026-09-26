@@ -181,3 +181,27 @@ def test_identical_research_is_served_from_cache(tech):
     a = run_analyst(ANALYSTS["technical"], ctx, symbol="S007", results=[tech]).observation
     b = run_analyst(ANALYSTS["technical"], ctx, symbol="S007", results=[tech]).observation
     assert a.score == b.score and len(fake.requests) == 1
+
+
+def test_provider_refusal_is_blocked_without_retry(tech):
+    from qe.ai.llm import LLMResponse
+
+    class Refusing(FakeLLM):
+        def complete(self, request):
+            self.requests.append(request)
+            return LLMResponse("", request.model_id, 5, 0, 0.0, "refusal")
+
+    fake = Refusing()
+    obs = run_analyst(ANALYSTS["technical"], _ctx(fake), symbol="S007", results=[tech]).observation
+    assert obs.status is ComponentStatus.BLOCKED and "refused" in obs.error
+    assert len(fake.requests) == 1 and obs.score is None  # no corrective retry
+
+
+def test_effort_is_forwarded_to_the_provider(tech):
+    from dataclasses import replace
+
+    fake = FakeLLM()
+    run_analyst(
+        ANALYSTS["technical"], replace(_ctx(fake), effort="low"), symbol="S007", results=[tech]
+    )
+    assert fake.requests[0].effort == "low"

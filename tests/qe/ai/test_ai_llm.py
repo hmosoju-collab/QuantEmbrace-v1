@@ -63,54 +63,84 @@ def test_fake_script_simulates_failures():
     assert json.loads(fake.complete(_req()).text)["evidence_ids"] == ["tech.a", "tech.b"]
 
 
+class _Block:
+    def __init__(self, type_, text=""):
+        self.type, self.text = type_, text
+
+
+class _Usage:
+    input_tokens, output_tokens = 12, 3
+    cache_creation_input_tokens, cache_read_input_tokens = 0, 5
+
+
+class _Resp:
+    def __init__(self, stop_reason="end_turn"):
+        # thinking blocks come back empty (display omitted) and must be ignored
+        self.content = [_Block("thinking"), _Block("text", '{"a": 1}')]
+        self.usage, self.stop_reason = _Usage(), stop_reason
+
+
+class _Messages:
+    def __init__(self, owner):
+        self.owner = owner
+
+    def create(self, **kw):
+        self.owner.calls.append(kw)
+        if self.owner.exc:
+            raise self.owner.exc
+        return _Resp(self.owner.stop_reason)
+
+
 class _FakeRuntime:
-    def __init__(self, exc=None):
-        self.exc, self.calls = exc, []
+    """Stands in for AnthropicBedrockMantle: ``client.messages.create(**kw)``."""
 
-    def converse(self, **kw):
-        self.calls.append(kw)
-        if self.exc:
-            raise self.exc
-        return {
-            "output": {"message": {"content": [{"text": '{"a": 1}'}]}},
-            "usage": {"inputTokens": 12, "outputTokens": 3},
-            "metrics": {"latencyMs": 42},
-            "stopReason": "end_turn",
-        }
+    def __init__(self, exc=None, stop_reason="end_turn"):
+        self.exc, self.calls, self.stop_reason = exc, [], stop_reason
+        self.messages = _Messages(self)
 
 
-def test_bedrock_converse_request_and_response_mapping():
+def test_bedrock_messages_request_and_response_mapping():
     rt = _FakeRuntime()
-    resp = BedrockLLM(region="ap-south-1", timeout_s=5, runtime_client=rt).complete(_req())
-    assert (resp.text, resp.input_tokens, resp.output_tokens, resp.latency_ms) == (
-        '{"a": 1}',
-        12,
-        3,
-        42.0,
-    )
+    req = LLMRequest(model_id="anthropic.claude-opus-5-5", system="sys", prompt="p",
+                     max_tokens=100, temperature=0.7, effort="low")  # fmt: skip
+    resp = BedrockLLM(region="ap-south-1", timeout_s=5, runtime_client=rt).complete(req)
+    assert resp.text == '{"a": 1}'  # thinking blocks ignored, text joined
+    assert (resp.input_tokens, resp.output_tokens) == (12 + 5, 3)  # cache reads are input
+    assert resp.stop_reason == "end_turn" and resp.latency_ms >= 0
     call = rt.calls[0]
-    assert call["modelId"] == "m" and call["system"] == [{"text": "sys"}]
-    assert call["inferenceConfig"] == {"maxTokens": 100, "temperature": 0.0}
-    assert "toolConfig" not in call  # the model is never given tools
+    assert call["model"] == "anthropic.claude-opus-5-5" and call["system"] == "sys"
+    assert call["messages"] == [{"role": "user", "content": "p"}]
+    assert call["max_tokens"] == 100 and call["output_config"] == {"effort": "low"}
+    # Opus 5.x removed sampling params (400) and the model is never given tools
+    for banned in ("temperature", "top_p", "top_k", "tools", "tool_choice", "thinking"):
+        assert banned not in call
+
+
+def test_bedrock_omits_output_config_when_no_effort():
+    rt = _FakeRuntime()
+    BedrockLLM(region="r", timeout_s=5, runtime_client=rt).complete(_req())
+    assert "output_config" not in rt.calls[0]
 
 
 def test_bedrock_errors_are_sanitized():
-    class ReadTimeoutError(Exception):
+    class APITimeoutError(Exception):
         pass
 
-    with pytest.raises(LLMTimeout, match=r"^ReadTimeoutError$"):
-        BedrockLLM(
-            region="r", timeout_s=5, runtime_client=_FakeRuntime(ReadTimeoutError("arn:aws:secret"))
-        ).complete(_req())
+    class APIStatusError(Exception):
+        status_code = 429
+
+    with pytest.raises(LLMTimeout, match=r"^APITimeoutError$"):
+        BedrockLLM(region="r", timeout_s=5,
+                   runtime_client=_FakeRuntime(APITimeoutError("arn:aws:secret"))).complete(_req())  # fmt: skip
     with pytest.raises(LLMError) as ei:
-        BedrockLLM(
-            region="r", timeout_s=5, runtime_client=_FakeRuntime(ValueError("req-id 123 arn:x"))
-        ).complete(_req())
-    assert str(ei.value) == "ValueError"  # provider message (ids/ARNs) never crosses
+        BedrockLLM(region="r", timeout_s=5,
+                   runtime_client=_FakeRuntime(APIStatusError("req-id 123 arn:x"))).complete(_req())  # fmt: skip
+    assert str(ei.value) == "APIStatusError:429"  # type + status only; provider text never crosses
 
 
 def test_bedrock_without_injected_client_cannot_reach_aws_in_tests():
-    # conftest patches boto3.client to raise; the adapter must surface an LLMError.
+    # conftest blocks sockets; with no injected client the adapter must surface an
+    # LLMError (or the optional SDK being absent), never a real call.
     with pytest.raises(LLMError):
         BedrockLLM(region="r", timeout_s=5).complete(_req())
 
@@ -199,3 +229,31 @@ def test_disk_cache_writes_only_under_ai_cache(tmp_path):
     assert written and all("backtest-data/ai_cache/llm" in str(p) for p in written)
     # a fresh cache over the same dir replays the stored response
     assert ResponseCache(tmp_path).get(next(iter(cache._mem))).cached
+
+
+def test_gateway_backoff_sleeps_between_retries_only(monkeypatch):
+    slept = []
+    monkeypatch.setattr("qe.ai.llm.gateway.time.sleep", slept.append)
+    fake = FakeLLM(script=[LLMTimeout("t"), LLMTimeout("t")])
+    gw = LLMGateway(fake, budget=RunBudget(10_000), breaker=CircuitBreaker(5), cache=None,
+                    max_retries=2, backoff_s=2.0)  # fmt: skip
+    assert _call(gw).status == ComponentStatus.OK  # third attempt succeeds
+    assert slept == [2.0, 4.0]  # linear backoff before each retry, none after success
+
+
+def test_effort_is_part_of_the_cache_key_and_reaches_the_request():
+    from qe.ai.llm import cache_key
+
+    a = LLMRequest("m", "s", "p", 10, effort="low")
+    b = LLMRequest("m", "s", "p", 10, effort="high")
+    assert cache_key(a, "v") != cache_key(b, "v") != cache_key(LLMRequest("m", "s", "p", 10), "v")
+
+
+def test_new_optional_config_fields_do_not_move_existing_hashes():
+    base = ResearchRunConfig(name="x", book_config="b.yaml",
+                             quick_model=ModelProfile(model_id="q", tier="quick"),
+                             deep_model=ModelProfile(model_id="d", tier="deep"))  # fmt: skip
+    assert "effort" not in base.model_dump(mode="json", exclude_none=True)
+    assert "retry_backoff_s" not in base.model_dump(mode="json", exclude_none=True)["budget"]
+    tuned = base.model_copy(update={"effort": "low"})
+    assert tuned.config_hash() != base.config_hash()  # setting it is a real change

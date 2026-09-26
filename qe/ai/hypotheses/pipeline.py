@@ -189,6 +189,7 @@ def generate_hypotheses(
             cache=ResponseCache(base_dir) if cfg.use_cache else None,
             max_retries=cfg.budget.max_retries,
             sink=journal.event,
+            backoff_s=cfg.budget.retry_backoff_s or 0.0,
         )
         ctx = AgentContext(
             gateway=gateway,
@@ -199,6 +200,7 @@ def generate_hypotheses(
             temperature=cfg.temperature,
             max_retries=cfg.budget.max_retries,
             mask_identifiers=cfg.mask_identifiers,
+            effort=cfg.effort,
         )
         blocks = [
             (

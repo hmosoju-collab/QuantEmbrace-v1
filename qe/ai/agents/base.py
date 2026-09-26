@@ -70,6 +70,7 @@ class AgentContext:
     temperature: float
     max_retries: int
     mask_identifiers: bool = True
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -225,7 +226,9 @@ def run_agent(
         prompt = render_prompt(
             spec, subject=subject, blocks=blocks, allowed_ids=allowed, correction=correction
         )
-        request = LLMRequest(model.model_id, SYSTEM_PROMPT, prompt, ctx.max_tokens, ctx.temperature)
+        request = LLMRequest(
+            model.model_id, SYSTEM_PROMPT, prompt, ctx.max_tokens, ctx.temperature, ctx.effort
+        )
         res = ctx.gateway.call(
             request,
             agent_id=spec.agent_id,
@@ -252,6 +255,14 @@ def run_agent(
         if res.status is not ComponentStatus.OK:
             obs = AgentObservation(status=res.status, error=redact(res.error or "")[:300], **meta)
             return AgentRun(obs)
+        if res.response.stop_reason == "refusal":  # the provider's safeguards declined: no retry
+            return AgentRun(
+                AgentObservation(
+                    status=ComponentStatus.BLOCKED,
+                    error="model refused (stop_reason=refusal)",
+                    **meta,
+                )
+            )
         out, status, err = parse_output(res.response.text, spec.schema_id, set(allowed))
         if out is not None:
             return AgentRun(

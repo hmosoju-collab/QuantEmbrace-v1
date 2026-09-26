@@ -54,6 +54,9 @@ class BudgetConfig(FrozenModel):
     timeout_s: float = Field(30.0, gt=0, le=300)
     max_retries: int = Field(1, ge=0, le=3)  # retries per agent on timeout/malformed
     breaker_threshold: int = Field(3, ge=1)  # consecutive LLM failures that open the breaker
+    # Pause between retries of a failed call (real backends rate-limit). None = no pause;
+    # optional so adding it did not move any existing research-config hash (ADR-042).
+    retry_backoff_s: float | None = Field(None, ge=0, le=60)
 
 
 class ResearchRunConfig(FrozenModel):
@@ -76,6 +79,9 @@ class ResearchRunConfig(FrozenModel):
     # it never clears contamination_risk (lookahead-prevention §2).
     mask_identifiers: bool = True
     temperature: float = Field(0.0, ge=0.0, le=1.0)
+    # Effort level sent to models that require one (Opus 5.x: low|medium|high). None =
+    # provider default. Optional for the same hash-stability reason as above.
+    effort: Literal["low", "medium", "high"] | None = None
     region: str = "ap-south-1"
     seed: int = 0
     use_cache: bool = True

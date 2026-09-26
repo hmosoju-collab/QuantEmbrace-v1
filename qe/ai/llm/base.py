@@ -15,7 +15,8 @@ class LLMRequest:
     system: str
     prompt: str
     max_tokens: int
-    temperature: float = 0.0
+    temperature: float = 0.0  # ignored by backends whose models removed sampling params
+    effort: str | None = None  # thinking/effort level for models that require one
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@
     python -m qe.ai post-trade --engine-journal journals/<sim-or-paper>.jsonl [--max-trades N]
     python -m qe.ai dashboard   # static research view -> reports/qe-ai/dashboard/index.html
     python -m qe.ai corpus ingest|status   # curate raw NSE announcements (scripts/ fetches them)
+    python -m qe.ai probe --config <research yaml> [--allow-llm-spend]   # can this account call the model?
 
 A separate entry point from ``python -m qe`` on purpose: the engine CLI imports
 the paper engine at load, and qe.ai must never share a process path with it.
@@ -65,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     co.add_argument("action", choices=["ingest", "status"])
     co.add_argument("--base-dir", default=".")
 
+    pr = sub.add_parser("probe", help="tiny access check for the configured LLM backend")
+    pr.add_argument("--config", default="configs/qe_ai_research.yaml")
+    pr.add_argument("--allow-llm-spend", action="store_true")
+    pr.add_argument("--base-dir", default=".")
+
     db = sub.add_parser("dashboard", help="render the static research view (no JavaScript)")
     db.add_argument("--base-dir", default=".")
 
@@ -107,8 +113,17 @@ def main(argv: list[str] | None = None) -> int:
             f"signals  : {len(rep.signals)} ({sum(s.contamination_risk for s in rep.signals)} "
             f"contaminated), failed: {list(rep.failed_symbols) or 'none'}"
         )
-        print(f"llm      : {rep.llm_calls} calls, {rep.cache_hits} cache hits")
+        print(
+            f"llm      : {rep.llm_calls} calls, {rep.cache_hits} cache hits, "
+            f"{rep.llm_failures} failed, tokens in/out {rep.input_tokens}/{rep.output_tokens}"
+        )
         print("advisory : research only; AI weight is 0 unless a study config says otherwise")
+        from qe.ai.probe import llm_health
+
+        problem = llm_health(rep.llm_calls, rep.llm_failures, rep.input_tokens, rep.llm_errors)
+        if problem:
+            print(f"WARNING  : {problem}", file=sys.stderr)
+            return 3 if rep.input_tokens == 0 else 0
         return 0
 
     if args.cmd == "report":
@@ -159,6 +174,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {d.draft_id} {d.name} [{d.family}] {'; '.join(flags) or 'testable now'}")
         print("advisory : drafts only; a human decides via `python -m qe lifecycle`")
         return 0 if run.status == "OK" else 1
+
+    if args.cmd == "probe":
+        from qe.ai.config import ResearchRunConfig
+        from qe.ai.llm import SpendNotAllowed, build_client
+        from qe.ai.probe import run_probe
+
+        cfg = ResearchRunConfig.from_yaml(base / args.config)
+        if cfg.backend == "fake":
+            print("backend=fake: nothing to probe (no network, no spend)")
+            return 0
+        try:
+            client = build_client(cfg, allow_spend=args.allow_llm_spend)
+        except SpendNotAllowed as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 2
+        res = run_probe(cfg, client)
+        print(
+            f"{'OK  ' if res.ok else 'FAIL'} {res.backend} {res.model_id} region={cfg.region}: {res.detail}"
+        )
+        if res.hint:
+            print(f"hint: {res.hint}")
+        return 0 if res.ok else 1
 
     if args.cmd == "corpus":
         from qe.ai.corpus import ingest, load_corpus
