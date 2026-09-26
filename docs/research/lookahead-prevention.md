@@ -51,10 +51,10 @@ Either way, a raw `timestamp ≤ cutoff` comparison would let the same day's clo
 
 | Type | Rule when a source is added (P9+ data phase) |
 |---|---|
-| News | `knowledge_ts` = publisher timestamp, plus ingestion lag. Never use the article's "updated" time. Store raw immutable text with fetch time. |
+| News (**implemented, P9, NSE announcements**) | `knowledge_ts` = the **later** of the exchange dissemination time and the announcement time; a date-only item counts as known at 23:59:59 IST (never usable before the next close); `fetched_at` is stored and an item dated after its own fetch time is rejected. Raw text is stored immutable; the curated file is re-validated on every load; the tool exposes only documents with `knowledge_ts ≤ cutoff`, each evidence stamped at its **own** publication time. |
 | Fundamentals | **As filed**: `knowledge_ts` = filing or announcement time. Restated figures get a new `knowledge_ts`; never overwrite history. |
 | Sentiment | `knowledge_ts` = post time. Aggregate only posts with `knowledge_ts ≤ cutoff`. |
-| AI observations / reflections | `knowledge_ts` = when the observation was produced. A reflection on a trade's outcome is knowable only after the outcome was realized (P7). |
+| AI observations / reflections (**implemented, P7**) | Each `PostTradeReview` is stamped `knowledge_ts` = the trade's exit close; `lessons_known_at(cutoff)` returns only reviews with `knowledge_ts ≤ cutoff` and is the only path by which past lessons reach a later prompt (hypothesis generation). |
 
 ## 2. Channel B — model-memory look-ahead ("contamination")
 

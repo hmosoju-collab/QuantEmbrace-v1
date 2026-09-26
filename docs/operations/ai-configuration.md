@@ -62,12 +62,30 @@ The config is hashed on its own (`exclude_none`) and echoed into the journal hea
 | STANDARD | ≤ 6 | + bull/bear (1 round), critic, synthesizer (quick model). Fundamental, news and sentiment run and return UNAVAILABLE with 0 calls. |
 | DEEP | ≤ 8 | 2 debate rounds, and the synthesizer on the deep model |
 
-### 2.2 Enabling a real backend (P10 — `[PLANNED — not yet implemented]` as an operational step)
+### 2.2 Enabling a real backend (P10 — code built; account access is the operator's step)
 
-1. Set `backend: bedrock`. Set `quick_model.model_id` and `deep_model.model_id` to Bedrock model or inference-profile IDs enabled in the account.
-2. Set each `knowledge_cutoff` from the model card. If it is left `null`, every signal is contaminated and can never carry weight.
-3. Grant the run's IAM role `bedrock:InvokeModel` / `bedrock:Converse` on those model ARNs only.
-4. Run with `--allow-llm-spend`. Without the flag the CLI refuses (exit code 2) before writing anything.
+Backend: Claude on Amazon Bedrock through the official SDK's `AnthropicBedrockMantle` client (Messages API,
+IDs like `anthropic.claude-opus-5-5`, SigV4 from the normal AWS credential chain — no API key).
+
+1. `pip install -r requirements-ai.txt` (optional dependency; not needed for the fake backend, tests or CI).
+2. Use `configs/qe_ai_research_bedrock.yaml` (Opus 5.5, `effort: low`, `max_tokens_per_call: 4096`,
+   `knowledge_cutoff: 2026-06-30` = the "training data cutoff Jun 2026" of Anthropic's models overview,
+   guard 90 d ⇒ **first uncontaminated decision date is 2026-09-29**). Opus 5.x removed sampling parameters and
+   cannot disable thinking, so the adapter sends none and relies on `effort`.
+3. Grant the run's IAM identity `bedrock-mantle:CreateInference` on the model ARN only.
+4. **Probe before spending:** `python -m qe.ai probe --config configs/qe_ai_research_bedrock.yaml --allow-llm-spend`
+   (a few tokens). It prints an actionable hint per HTTP status (403 = account not entitled, 404 = endpoint
+   does not serve that model/region, 400 = bad parameter, 429 = throttled).
+5. Run with `--allow-llm-spend`. Without the flag the CLI refuses (exit 2) before writing anything. If every
+   LLM call fails, `research` exits **3** with a loud warning (it does not pretend to have run).
+
+**State on 2026-09-26 (this account): BLOCKED.** The Messages endpoint returned `404 model does not exist` for
+every model in `ap-south-1` and `403 not available for this account` in `us-east-1` — also on the classic
+`bedrock-runtime` path, and also for models the docs list as open to all customers — while
+`aws bedrock get-foundation-model-availability` shows `AUTHORIZED`. That message directs the account to AWS
+Sales / Bedrock model access. Spend: $0 (0 tokens). Alternatives that need an operator decision: enable
+Anthropic model access for the AWS account, or use a first-party Anthropic API credential (a second adapter
+behind the same `LLMClient` protocol; not built).
 
 ## 3. Fusion — `configs/research_fusion.yaml`
 
@@ -127,3 +145,20 @@ config uses `backend: fake` or an unknown `knowledge_cutoff` — `--show-binding
    model starts a new series (a new sign-off).
 4. Monthly: `python -m qe.ai research …` at the book's month-end, then `python -m qe.ai shadow`.
 5. A PASS means human review and a new ADR before any `ai_weight` change — never automatic.
+
+## 5. New commands (P7–P10)
+
+```bash
+python -m qe.ai post-trade --engine-journal journals/<sim-or-paper>.jsonl [--max-trades 20]   # P7
+python -m qe.ai dashboard                                                                   # P8 -> reports/qe-ai/dashboard/index.html
+python scripts/backtest/download_nse_announcements.py --from 2026-08-01 --to 2026-09-25     # P9 raw zone (network)
+python -m qe.ai corpus ingest        # P9 sanitise -> screen -> validate -> promote / hold / reject
+python -m qe.ai corpus status
+python -m qe.ai probe --config configs/qe_ai_research_bedrock.yaml --allow-llm-spend        # P10 access check
+```
+
+- **Held documents** (`backtest-data/ai_corpus/held/`) are text the screen flagged as injection, secret-like or
+  forbidden-action language. They are never promoted; a human reads them and, if a false positive, edits the
+  screen — never the file.
+- **NSE announcements**: `knowledge_ts` is the later of exchange dissemination and announcement time; a date-only
+  item counts as known at 23:59:59 IST. Only sanitised headlines reach prompts.

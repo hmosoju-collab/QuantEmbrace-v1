@@ -84,10 +84,10 @@ Every run also has:
 | Debate, orchestration, journal, CLI | P4 | Implemented — `qe/ai/orchestration`, `qe/ai/{reporting,cli}.py`, `python -m qe.ai research|report` |
 | Deterministic fusion (AI_ADVISORY) | P5 | Implemented — `qe/ai/fusion`, `python -m qe.ai fuse`; ADVISORY parity with the engine proven at every sim rebalance |
 | Hypothesis drafts, strategy lifecycle ledger, forward AI shadow gate | P6 | Implemented 2026-09-25 — `qe/ai/{hypotheses,shadow}`, `qe/research/lifecycle.py`; gate committed as **DRAFT, not signed off** (sign-off waits for the real model, P10) |
-| Post-trade analyst, reflection memory stamped with knowledge time | P7 | `[PLANNED — not yet implemented]` |
-| Research dashboard (beyond the markdown fusion view) | P8 | `[PLANNED — not yet implemented]` |
-| External-data (news/fundamentals) security hardening | P9 | `[PLANNED — not yet implemented]` |
-| First real Bedrock spend and paper-shadow validation | P10 | `[PLANNED — not yet implemented]` |
+| Post-trade analyst, reflection memory stamped with knowledge time | P7 | Implemented 2026-09-26 — `qe/ai/post_trade`, `python -m qe.ai post-trade`; deterministic reviews + LLM lesson; `lessons_known_at(cutoff)` feeds hypotheses |
+| Research dashboard (beyond the markdown fusion view) | P8 | Implemented 2026-09-26 — `qe/ai/dashboard.py`, `python -m qe.ai dashboard` (static HTML, escaped, CSP, no JavaScript) |
+| External-data (news/fundamentals) security hardening | P9 | Implemented 2026-09-26 for **NSE announcements** — `qe/ai/corpus`, `scripts/backtest/download_nse_announcements.py`; fundamentals and sentiment remain `[PLANNED — not yet implemented]` (no structured source) |
+| First real Bedrock spend and paper-shadow validation | P10 | Backend + probe **built and tested (fake runtime)**; the real smoke run is **BLOCKED by the AWS account** (§ `ai-research-p7-p10-report.md`). Shadow gate remains an unsigned DRAFT. Paper-shadow accrual `[PLANNED — not yet implemented]` |
 
 ## 7. What this system will not do
 

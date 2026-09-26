@@ -1702,10 +1702,10 @@ Operator authorised Phases 0–5 as one run, then STOP for review.
 | P4 | Bull/bear/critic/synthesizer, FAST/STANDARD/DEEP orchestration, research journal, CLI | ✅ DONE 2026-09-25 |
 | P5 | Deterministic fusion (AI_ADVISORY default) + parity/invariance tests + ops docs + report | ✅ DONE 2026-09-25 — `tests/qe` 424 passed / 0 skipped (89 engine + 335 qe.ai); report `docs/research/ai-research-p0-p5-report.md`; **STOPPED for operator review** |
 | P6 | Hypothesis drafts, strategy lifecycle ledger, forward AI shadow gate | ✅ DONE 2026-09-25 — F-11/F-12 fixed first; gate committed **DRAFT (unsigned)**; report `docs/research/ai-research-p6-report.md`; **STOPPED for review** |
-| P7 | Post-trade analyst; knowledge-time-stamped reflection memory | 🔒 design-only |
-| P8 | Research dashboard | 🔒 design-only |
-| P9 | External-data (news/fundamentals) security hardening + data-lake quarantine | 🔒 design-only |
-| P10 | First real Bedrock spend; paper-shadow validation (forward, post-cutoff only) | 🔒 design-only |
+| P7 | Post-trade analyst; knowledge-time-stamped reflection memory | ✅ DONE 2026-09-26 (`qe.ai post-trade`; real-lake run 20 trades) |
+| P8 | Research dashboard | ✅ DONE 2026-09-26 (`qe.ai dashboard`, static/escaped/CSP) |
+| P9 | External-data security hardening + quarantine | ✅ DONE 2026-09-26 for NSE announcements (downloader NOT yet run live); fundamentals/sentiment still no source |
+| P10 | First real Bedrock spend; paper-shadow validation (forward, post-cutoff only) | 🔶 backend + probe BUILT; **real run BLOCKED by the AWS account** (403 not-available / 404 across regions; $0 spent). Shadow gate still unsigned DRAFT. First clean decision date 2026-09-30 |
 
 **Documented-only findings awaiting operator triage** (`docs/architecture/current-state.md §10`):
 F-1 v1 `paper_trade` missing-field → live (HIGH) · F-2 non-NSE universe bypass in all modes
@@ -1719,3 +1719,8 @@ be run per FILE — the folder form silently does nothing). Real-lake `qe.ai` E2
 **Findings triage 2026-09-25** (`current-state.md §10a`): F-1, F-2, F-10, F-11, F-12, F-13 FIXED on
 `fix/findings-triage` (off `dev`, merged into the AI branch); F-3…F-9, F-14 deferred/accepted with reasons.
 **Open:** push + first GitHub run of the new CI `test-qe` job; sign-off of the AI shadow gate only after P10.
+
+**Hybrid AI P7–P10 (2026-09-26):** built; report `docs/research/ai-research-p7-p10-report.md`. **Open, operator:** (1) enable Anthropic model
+access on the AWS account (or supply a first-party API key → second adapter) then `python -m qe.ai probe … --allow-llm-spend`;
+(2) run `scripts/backtest/download_nse_announcements.py` on a small window + `qe.ai corpus ingest`, review `held/`;
+(3) research run on 2026-09-30 (first uncontaminated date), then sign off the shadow gate; (4) push + PRs so CI `test-qe` runs.

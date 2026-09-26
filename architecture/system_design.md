@@ -648,6 +648,7 @@ candle-cache (DynamoDB poll)
 advisory, fake-LLM only — zero spend; **not wired to any engine path**). Phases 6–10 (forward AI
 shadow gate, post-trade analyst, dashboard, external data, real Bedrock spend) are
 `[PLANNED — not yet implemented]`. Report: `docs/research/ai-research-p0-p5-report.md`.
+**Phases 7–9 implemented 2026-09-26; Phase 10 built but blocked** (`docs/research/ai-research-p7-p10-report.md`): post-trade analyst (`python -m qe.ai post-trade`), static research dashboard, hardened NSE-announcement corpus + news tool (network only in `scripts/`), and a Bedrock backend on the official SDK with `probe` — the real run is blocked by the AWS account (Claude models return 403/404 for this account), $0 spent.
 **Phase 6 implemented 2026-09-25** (`docs/research/ai-research-p6-report.md`): strategy lifecycle ledger
 (`qe/research/lifecycle.py`, `python -m qe lifecycle` — evidence-gated, human-approved, append-only
 `governance/strategy-lifecycle.jsonl`; qe.ai cannot call it), AI hypothesis drafts (`python -m qe.ai

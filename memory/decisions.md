@@ -3118,3 +3118,23 @@ headline numbers reproduced exactly):
   over the factor rank, mirroring the Forward Factor Gate; **committed as DRAFT — no verdict until a
   human signs off**, which must wait for a real model + cutoff, P10).
 - **Not done:** P7–P10; the CI job has not run on GitHub (nothing pushed); the shadow gate is unsigned.
+
+---
+
+## ADR-043 addendum 2 — Phases 7–10 (2026-09-26)
+
+**Status:** P7/P8/P9 implemented; P10 built, real run blocked by the AWS account · **Report:** `docs/research/ai-research-p7-p10-report.md`
+
+- **P7** post-trade analyst: code computes every classification; the LLM writes only the lesson; reviews are stamped
+  knowable at exit close and reach later prompts only via `lessons_known_at(cutoff)` (look-ahead-safe reflection).
+- **P8** dashboard: static, HTML-escaped, CSP `default-src 'none'`, no JavaScript; shows the AI recommendation beside
+  the QuantEmbrace decision and computes nothing.
+- **P9** external text: qe.ai keeps zero network code — the downloader lives in `scripts/` and stores raw bytes;
+  curation is quarantine-first (sanitize → dual-form screen → validate → promote / hold / reject), point-in-time by
+  `knowledge_ts`, re-screened on every load; headlines only reach prompts. A test found and closed a hole where tag
+  stripping removed injection markup before the screen.
+- **P10** backend on the official Anthropic SDK Bedrock Mantle client (Opus 5.5 both tiers, operator's choice),
+  optional `requirements-ai.txt`; boto3 banned in qe.ai; `probe`; failures exit 3. **Blocked:** 404 (ap-south-1) /
+  403 not-available (us-east-1) for every Claude model on this account; $0 spent. Options recorded, not chosen:
+  enable model access, or a first-party API adapter.
+- **Unchanged:** engine, v1, required dependencies, all config hashes; shadow gate remains an unsigned DRAFT.

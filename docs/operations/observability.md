@@ -30,12 +30,25 @@ Exceptions are sanitized before `SESSION_ABORT`, and provider errors cross the B
 
 Tests: `test_ai_journal.py::test_llm_text_secrets_are_redacted_in_the_journal`, `::test_abort_is_journaled_and_sanitized`, `test_ai_llm.py::test_prompt_with_secret_is_refused_before_any_call`.
 
+### 1b. Other qe.ai journals (same format, `journals/ai/`, never `paper-*`)
+
+| Journal `mode` | Written by | Extra events |
+|---|---|---|
+| `ai-hypotheses` | `qe.ai hypothesize` | `HYPOTHESIS_MANIFEST`, `HYPOTHESIS_DRAFT` |
+| `ai-post-trade` | `qe.ai post-trade` | `POST_TRADE_MANIFEST`, `POST_TRADE_REVIEW` (the full `PostTradeReview`) |
+
+`RUN_MANIFEST` now also records `corpus_hash` (the curated announcement corpus the run saw) and `tools_version`
+`qe_ai_tools/2`. `SESSION_END` carries `llm_failures` and `by_status`; the CLI exits **3** with a warning when every
+LLM call failed.
+
 ## 3. Derived views — `reports/qe-ai/<run_id>/`
 
 | File | Built by | Content |
 |---|---|---|
 | `signals.jsonl` | `python -m qe.ai report` (also run automatically after `research`) | One validated `ResearchSignal` per line |
 | `summary.md` | same | Provenance table, contamination count, regime, per-symbol scores and statuses, bull/bear/consensus, LLM usage, failed symbols |
+| `dashboard/index.html` | `python -m qe.ai dashboard` | One static page (no JavaScript, CSP `default-src 'none'`): regime, quant score, strategy signal, AI score/confidence, risk, AI recommendation **next to** the QuantEmbrace final decision, bull/bear/consensus/conflicts, shadow gate, post-trade reviews, hypothesis drafts, lifecycle |
+| `post_trade/<engine_session>/{reviews.jsonl,report.md}` | `python -m qe.ai post-trade` | Deterministic classifications + the model's lesson, each review stamped knowable at the trade's exit close |
 | `fusion-<mode>-<context>.jsonl` / `.md` | `python -m qe.ai fuse` | The research view: market regime, quant score, strategy signal, AI score and confidence, AI recommendation, risk flags, **QuantEmbrace decision**, agreement, contamination, divergences, bull/bear/consensus/conflicting evidence, and optionally the engine's actual record that day |
 
 These files can be deleted and rebuilt from the journal at any time. **Nothing is ever written under `reports/qe/`**, which the forward and live gates read as evidence.
