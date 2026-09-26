@@ -342,3 +342,84 @@ def test_cli_corpus_ingest_and_status(tmp_path, capsys):
     assert "curated documents : 1" in capsys.readouterr().out
     written = {p.relative_to(tmp_path).parts[:2] for p in tmp_path.rglob("*") if p.is_file()}
     assert written <= {("backtest-data", "raw"), ("backtest-data", "ai_corpus")}
+
+
+# ── real-data lessons (first live NSE run, 2026-09-26) ───────────────────────
+@pytest.mark.parametrize(
+    "text,expected_start,category",
+    [
+        ("Infosys Limited has informed the Exchange regarding allotment of 44116 securities",
+         "allotment of 44116", "CORPORATE_ACTION"),
+        ("Tata Consultancy Services Limited has informed the Exchange that Record date for dividend",
+         "Record date for dividend", "DIVIDEND"),
+        ("Company X has informed the Exchange about Copy of Newspaper Publication",
+         "Copy of Newspaper", "ROUTINE_FILING"),
+        ("No boilerplate here, just a statement about results", "No boilerplate here", "RESULTS"),
+        ("Notice of Shareholders meeting to approve the scheme", "Notice of Shareholders", "GOVERNANCE"),
+        ("Allotment of shares under ESOP 2021", "Allotment of shares", "ROUTINE_FILING"),
+    ],
+)  # fmt: skip
+def test_headline_boilerplate_is_stripped_and_subject_kept(text, expected_start, category):
+    bucket, _, doc = evaluate(_wrap(_rec(desc="Updates", text=text)), NOW)
+    assert bucket == "promote" and doc.headline.startswith(expected_start)
+    assert doc.subject == "Updates" and doc.category == category
+
+
+def test_boilerplate_only_text_falls_back_instead_of_emptying():
+    bucket, _, doc = evaluate(
+        _wrap(_rec(desc="Updates", text="X Limited has informed the Exchange")), NOW
+    )
+    assert bucket == "promote" and doc.headline  # never empty
+
+
+def test_routine_filings_carry_no_news_evidence_and_no_llm_cost(tmp_path, synthetic_panel):
+    pos = 400
+
+    def rows(d):
+        return [
+            (
+                "S001",
+                _fmt(d - timedelta(days=2), 12),
+                "X Limited has informed the Exchange about Copy of Newspaper Publication",
+            )
+        ]
+
+    corpus = _corpus_for(synthetic_panel, pos, tmp_path, rows)
+    (doc,) = corpus.documents["S001"]
+    assert doc.category == "ROUTINE_FILING"  # ingested, but...
+    res = tools.news(_api(synthetic_panel, pos, corpus), "S001")
+    assert res.status is ComponentStatus.UNAVAILABLE  # ...gives the news agent nothing to spend on
+
+
+def test_news_evidence_leads_with_nse_subject_not_boilerplate(tmp_path, synthetic_panel):
+    pos = 400
+
+    def rows(d):
+        return [
+            (
+                "S001",
+                _fmt(d - timedelta(days=2), 12),
+                "X Limited has informed the Exchange regarding allotment of 500 securities",
+            )
+        ]
+
+    corpus = _corpus_for(synthetic_panel, pos, tmp_path, rows)
+    res = tools.news(_api(synthetic_panel, pos, corpus), "S001")
+    summaries = [
+        e.summary
+        for e in res.evidence
+        if e.evidence_id not in ("news.count_30d", "news.results_30d")
+    ]
+    assert summaries and summaries[0].startswith("Outcome of Board Meeting - allotment of 500")
+    assert "has informed the Exchange" not in summaries[0]
+
+
+def test_news_summary_does_not_repeat_subject_as_headline():
+    from qe.ai.tools.documents import _summary
+
+    assert _summary("General Updates", "General Updates") == "General Updates"
+    assert _summary("Investor Presentation", "investor presentation") == "investor presentation"
+    assert (
+        _summary("Shareholders meeting", "Notice of AGM") == "Shareholders meeting - Notice of AGM"
+    )
+    assert _summary("", "Only a headline") == "Only a headline"

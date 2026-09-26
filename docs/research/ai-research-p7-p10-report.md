@@ -90,3 +90,29 @@ The 403 text ends "contact AWS Sales", which points to an account-level entitlem
 3. Once a probe passes, run the capped smoke run, then a STANDARD run on **2026-09-30** (the first clean date) to start accruing.
 4. Only after that, review and sign off the shadow gate.
 5. Push and open the two PRs (`fix/findings-triage`, `feature/hybrid-ai-research`) so CI runs the new `test-qe` job.
+
+---
+
+## Addendum — first live NSE run and real-data end to end (2026-09-26, later the same day)
+
+Operator said "proceed next". The AI-model blocker is unchanged (the probe still returns `404`; no first-party credential), so I did the part that
+did not depend on it: the **first live run of the NSE downloader** and a news-enabled research run on the real lake.
+
+| Step | Result |
+|---|---|
+| Downloader, 2 symbols, 18 days | 13 records, 0 failed requests — endpoint, session priming and record shape all matched the parser |
+| Downloader, the real 20-name delivery basket, 2026-06-10 → 07-14 | 295 records, 0 failed requests |
+| `corpus ingest` (308 records seen) | **307 promoted, 1 duplicate, 0 held, 0 rejected** |
+| STANDARD research run, real lake, fake backend, as-of 2026-07-14 | 20 signals, 141 calls, 0 failures, 7.6 s; the news agent produced evidence for all 20 names; corpus hash journaled |
+
+**What the live data changed** (three fixes, tested):
+- Every announcement opens with the same boilerplate ("X Limited has informed the Exchange regarding…"). It is now stripped from the headline.
+- NSE's own subject label (`desc`, e.g. "Shareholders meeting") is now kept and leads each evidence line. 11 of the first 13 records had landed in `OTHER`.
+- Routine filings (newspaper copies, trading-window notices, ESOP allotments, investor-call notices; 81 of 307 here) are tagged `ROUTINE_FILING` and yield no news evidence, so they cost no LLM call. A subject that merely repeats the headline is shown once.
+
+**Honest limits.**
+- **0 held / 0 rejected on genuine text is what we want, but it does not prove the screen would catch a real attack.** Exchange feeds rarely contain injection attempts, and the detection evidence is still the synthetic test set. Expect to tune the patterns if the volume grows.
+- The window is one month and 22 issuers. Category coverage will need widening (about 31% of documents are `OTHER`; NSE's "General Updates" hides the real subject in the text, which the model does read).
+- **Cost projection for a real STANDARD run** (20 symbols, 141 calls): about 155k input tokens (about $0.62 at Opus 5.5's $4/MTok) plus output. Output is unmeasured, since Opus 5.x always thinks and those tokens are billed, so budget roughly **$2–5 per monthly STANDARD run** and about $0.6–1 for FAST. This is an estimate from prompt size, not a measurement.
+
+`tests/qe`: **601 passed, 0 skipped.**

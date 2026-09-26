@@ -15,7 +15,7 @@ from qe.config import FrozenModel
 
 Category = Literal[
     "RESULTS", "BOARD_MEETING", "DIVIDEND", "CORPORATE_ACTION", "ACQUISITION_OR_ORDER",
-    "RATING", "GOVERNANCE", "REGULATORY", "OTHER",
+    "RATING", "GOVERNANCE", "REGULATORY", "ROUTINE_FILING", "OTHER",
 ]  # fmt: skip
 Symbol = Annotated[str, Field(pattern=r"^[A-Z0-9][A-Z0-9&-]{0,19}$")]
 
@@ -26,6 +26,7 @@ class Document(FrozenModel):
     source: Literal["NSE_ANNOUNCEMENTS"]
     symbol: Symbol
     category: Category
+    subject: Annotated[str, Field(max_length=120)] = ""  # NSE's own subject label (desc)
     headline: Annotated[str, Field(min_length=1, max_length=200)]
     body: Annotated[str, Field(max_length=600)] = ""  # stored for humans; NOT put in prompts
     knowledge_ts: datetime

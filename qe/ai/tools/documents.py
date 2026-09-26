@@ -15,8 +15,17 @@ LOOKBACK_DAYS = 30
 MAX_HEADLINES = 5
 
 
+def _summary(subject: str, headline: str) -> str:
+    """NSE's subject label first, unless the headline just repeats it."""
+    if not subject or subject.lower() == headline.lower():
+        return headline[:240]
+    return f"{subject} - {headline}"[:240]
+
+
 def news(api: ResearchDataAPI, symbol: str) -> ToolResult:
-    docs = api.documents_for(symbol, LOOKBACK_DAYS)
+    docs = tuple(
+        d for d in api.documents_for(symbol, LOOKBACK_DAYS) if d.category != "ROUTINE_FILING"
+    )  # routine filings (newspaper copies, trading-window notices) carry no signal: no evidence, no LLM cost
     if not docs:
         why = "no announcements in the window" if api.corpus.loaded else "no curated corpus loaded"
         return unavailable(TOOL, symbol, f"{why} ({LOOKBACK_DAYS}d, P9 corpus)")
@@ -39,7 +48,7 @@ def news(api: ResearchDataAPI, symbol: str) -> ToolResult:
                 symbol=symbol,
                 knowledge_ts=d.knowledge_ts,
                 value=d.category,
-                summary=f"{d.category}: {d.headline}"[:240],
+                summary=_summary(d.subject, d.headline),
             )
         )
     return ToolResult(TOOL, symbol, ComponentStatus.OK, tuple(facts))

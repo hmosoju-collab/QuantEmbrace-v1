@@ -37,15 +37,28 @@ _FORMATS = (
 )  # fmt: skip
 _DATE_ONLY = {"%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d"}
 
+# Every NSE announcement text opens "<Company> has informed the Exchange (regarding|about|that) ...".
+# That boilerplate carries no information and eats the headline budget, so it is removed.
+_BOILERPLATE = re.compile(
+    r"^.{0,120}?\bhas (?:informed|intimated|submitted to)(?: the)? Exchange\b\s*"
+    r"(?:regarding|about|that|on|with respect to|of)?\s*",
+    re.IGNORECASE,
+)
+
 # First match wins; keywords are matched on the sanitised NSE `desc` (category) text.
 _CATEGORY_RULES: tuple[tuple[Category, tuple[str, ...]], ...] = (
+    ("ROUTINE_FILING", ("newspaper publication", "trading window", "share certificate",
+                        "esop", "esos", "esps",
+                        "certificate under regulation", "analysts/institutional investor",
+                        "loss of share", "duplicate")),
     ("RESULTS", ("financial result", "results", "earnings")),
     ("BOARD_MEETING", ("board meeting", "outcome of board", "intimation of board")),
     ("DIVIDEND", ("dividend",)),
-    ("CORPORATE_ACTION", ("bonus", "split", "buyback", "rights issue", "record date", "demerger")),
+    ("CORPORATE_ACTION", ("bonus", "split", "buyback", "rights issue", "record date", "demerger", "allotment")),
     ("ACQUISITION_OR_ORDER", ("acquisition", "amalgamation", "merger", "order", "contract", "award")),
     ("RATING", ("credit rating", "rating")),
-    ("GOVERNANCE", ("appointment", "resignation", "cessation", "auditor", "director")),
+    ("GOVERNANCE", ("appointment", "resignation", "cessation", "auditor", "director",
+                    "shareholders meeting", "annual general meeting", "postal ballot")),
     ("REGULATORY", ("sebi", "regulation 30", "regulation 29", "clarification", "disclosure")),
 )  # fmt: skip
 
@@ -121,7 +134,9 @@ def evaluate(wrapper: dict, ingested_at: datetime) -> tuple[str, str, Document |
         return "reject", "future_dated_vs_fetch_time", {"raw_sha256": raw_sha}
 
     desc = sanitize_text(rec.get("desc"), 120)
-    headline = sanitize_text(rec.get("attchmntText") or rec.get("desc"), 200)
+    text = sanitize_text(rec.get("attchmntText") or rec.get("desc"), 600)
+    stripped = _BOILERPLATE.sub("", text).strip(" .,:;-'\"")
+    headline = (stripped or text)[:200]
     body = sanitize_text(rec.get("attchmntText"), 600)
     if not headline:
         return "reject", "empty_text_after_sanitizing", {"raw_sha256": raw_sha}
@@ -141,6 +156,7 @@ def evaluate(wrapper: dict, ingested_at: datetime) -> tuple[str, str, Document |
         source="NSE_ANNOUNCEMENTS",
         symbol=symbol,
         category=_category(f"{desc} {headline}"),
+        subject=desc,
         headline=headline,
         body=body if body != headline else "",
         knowledge_ts=knowledge_ts,
