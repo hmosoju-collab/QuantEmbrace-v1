@@ -137,14 +137,16 @@ def test_index_series_is_pit_and_never_forward_filled(synthetic_panel):
     assert "regime.indiavix" not in {e.evidence_id for e in regime(api2)[0].evidence}
 
 
-def test_no_data_tools_are_unavailable():
-    for fn in (tools.fundamentals, tools.news, tools.sentiment):
+def test_no_data_tools_are_unavailable(synthetic_panel):
+    for fn in (tools.fundamentals, tools.sentiment):
         res = fn("S000")
         assert (
             res.status is ComponentStatus.UNAVAILABLE
             and not res.evidence
             and "prices only" in res.reason
         )
+    res = tools.news(ResearchDataAPI(synthetic_panel, 400, "NSE"), "S000")  # empty corpus
+    assert res.status is ComponentStatus.UNAVAILABLE and "no curated corpus" in res.reason
 
 
 def test_tool_functions_take_no_path_url_or_code_arguments():

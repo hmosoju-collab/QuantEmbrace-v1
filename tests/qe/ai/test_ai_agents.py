@@ -123,12 +123,17 @@ def test_timeout_is_a_status_not_an_exception(tech):
 
 
 @pytest.mark.parametrize("agent", ["fundamental", "news", "sentiment"])
-def test_no_data_agents_make_no_llm_call(agent):
+def test_no_data_agents_make_no_llm_call(agent, synthetic_panel):
     fake = FakeLLM()
-    result = getattr(tools, {"fundamental": "fundamentals"}.get(agent, agent))("S007")
+    api = ResearchDataAPI(synthetic_panel, 400, "NSE")  # no corpus loaded
+    result = {
+        "fundamental": lambda: tools.fundamentals("S007"),
+        "news": lambda: tools.news(api, "S007"),
+        "sentiment": lambda: tools.sentiment("S007"),
+    }[agent]()
     obs = run_analyst(ANALYSTS[agent], _ctx(fake), symbol="S007", results=[result]).observation
     assert obs.status is ComponentStatus.UNAVAILABLE and obs.llm_calls == 0
-    assert fake.requests == [] and "prices only" in obs.error
+    assert fake.requests == [] and ("prices only" in obs.error or "no curated corpus" in obs.error)
 
 
 def test_injection_in_tool_data_is_contained(synthetic_panel):

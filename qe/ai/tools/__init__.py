@@ -1,5 +1,6 @@
 """Point-in-time, read-only research tools — called by code, never by an LLM."""
 
+from qe.ai.tools.documents import news
 from qe.ai.tools.market_data import technical
 from qe.ai.tools.pit import (
     TOOLS_VERSION,
@@ -12,7 +13,7 @@ from qe.ai.tools.pit import (
 from qe.ai.tools.quant_signal import QuantSpec, QuantView, factor_scores, quant, quant_view
 from qe.ai.tools.regime import RegimeReading, regime
 from qe.ai.tools.risk import RiskMetrics, risk, risk_metrics
-from qe.ai.tools.unavailable import fundamentals, news, sentiment
+from qe.ai.tools.unavailable import fundamentals, sentiment
 
 __all__ = [
     "TOOLS_VERSION",

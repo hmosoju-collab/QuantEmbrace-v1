@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from qe.ai.corpus import Corpus, Document, load_corpus
 from qe.ai.models import ComponentStatus, Evidence
 from qe.clock import market_close_time, market_tz
 from qe.config import RunConfig
@@ -21,7 +22,7 @@ from qe.data.panel import Panel, load_panel, resolve_panel_files
 from qe.data.snapshot import create_snapshot
 from qe.strategy.base import Context
 
-TOOLS_VERSION = "qe_ai_tools/1"
+TOOLS_VERSION = "qe_ai_tools/2"
 INDEX_SYMBOLS = {"NSE": ("INDIAVIX",)}
 WARMUP_DAYS = 730  # 2y: covers 252d momentum + SMA200 regime proxy
 
@@ -38,6 +39,9 @@ class ResearchDataAPI:
     # Market-level series (e.g. INDIAVIX close) indexed by trading date. Read
     # through ``index_series`` only, which truncates at the decision date.
     index_bars: dict[str, pd.Series] = field(default_factory=dict)
+    # Curated announcement corpus (P9). Read through ``documents_for`` only, which
+    # returns documents whose knowledge_ts <= the decision cutoff.
+    corpus: Corpus = field(default_factory=Corpus)
 
     @classmethod
     def at(
@@ -46,6 +50,7 @@ class ResearchDataAPI:
         as_of: datetime,
         market: str,
         index_bars: dict[str, pd.Series] | None = None,
+        corpus: Corpus | None = None,
     ) -> "ResearchDataAPI":
         """Last row knowable at ``as_of``: a request before today's close sees
         yesterday — the same-day bar is not knowable until the close."""
@@ -57,7 +62,7 @@ class ResearchDataAPI:
                 pos = i
         if pos is None:
             raise ValueError(f"no panel row is knowable at {as_of.isoformat()}")
-        return cls(panel, pos, market, dict(index_bars or {}))
+        return cls(panel, pos, market, dict(index_bars or {}), corpus or Corpus())
 
     @property
     def decision_date(self) -> date:
@@ -69,6 +74,16 @@ class ResearchDataAPI:
 
     def context(self) -> Context:
         return Context.at(self.panel, self.pos)
+
+    def documents_for(self, symbol: str, lookback_days: int = 30) -> tuple[Document, ...]:
+        """Announcements for ``symbol`` public at the decision cutoff and no older
+        than ``lookback_days``, oldest first. Nothing after the cutoff is visible."""
+        floor = self.cutoff - timedelta(days=lookback_days)
+        return tuple(
+            d
+            for d in self.corpus.documents.get(symbol, ())
+            if floor < d.knowledge_ts <= self.cutoff
+        )
 
     def index_series(self, name: str) -> pd.Series | None:
         """PIT series ending exactly at the decision date, else None — a stale
@@ -131,6 +146,7 @@ class ResearchData:
     panel: Panel
     snapshot_id: str
     index_bars: dict[str, pd.Series]
+    corpus: Corpus = field(default_factory=Corpus)
 
 
 def load_research_data(
@@ -179,4 +195,4 @@ def load_research_data(
         },
     )
     panel = load_panel(files, start, as_of, tz=str(market_tz(market)))
-    return ResearchData(panel, manifest["snapshot_id"], index_bars)
+    return ResearchData(panel, manifest["snapshot_id"], index_bars, load_corpus(base_dir))

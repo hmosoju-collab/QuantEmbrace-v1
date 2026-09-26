@@ -153,7 +153,12 @@ def test_fresh_interpreter_import_graph_is_clean():
 
 @pytest.mark.parametrize(
     "rel",
-    ["journals/ai/run.jsonl", "reports/qe-ai/run/summary.md", "backtest-data/ai_cache/ab/k.json"],
+    [
+        "journals/ai/run.jsonl",
+        "reports/qe-ai/run/summary.md",
+        "backtest-data/ai_cache/ab/k.json",
+        "backtest-data/ai_corpus/curated/announcements.jsonl",
+    ],
 )
 def test_safe_write_path_allows_ai_roots(tmp_path, rel):
     assert safe_write_path(tmp_path, rel) == (tmp_path / rel).resolve()
@@ -167,6 +172,8 @@ def test_safe_write_path_allows_ai_roots(tmp_path, rel):
         "journals/ai/paper-x.jsonl",  # paper-* name anywhere
         "journals/x.jsonl",
         "backtest-data/paper_book/qe_kill_switch.json",
+        "backtest-data/raw/nse_announcements/ingest=x/announcements.jsonl",  # raw zone: scripts only
+        "backtest-data/lake/ohlcv/market=NSE/segment=EQ/x.parquet",
         "governance/experiment-registry.jsonl",
         "governance/live-gate/operator-approval.json",
         "configs/qe_delivery_book_paper.yaml",

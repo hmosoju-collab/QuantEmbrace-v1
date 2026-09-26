@@ -7,6 +7,7 @@
     python -m qe.ai shadow   --gate configs/qe_ai_shadow_gate.yaml [--as-of D] [--show-binding]
     python -m qe.ai post-trade --engine-journal journals/<sim-or-paper>.jsonl [--max-trades N]
     python -m qe.ai dashboard   # static research view -> reports/qe-ai/dashboard/index.html
+    python -m qe.ai corpus ingest|status   # curate raw NSE announcements (scripts/ fetches them)
 
 A separate entry point from ``python -m qe`` on purpose: the engine CLI imports
 the paper engine at load, and qe.ai must never share a process path with it.
@@ -59,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     pt.add_argument("--max-trades", type=int, default=20, help="most recent completed trades")
     pt.add_argument("--allow-llm-spend", action="store_true")
     pt.add_argument("--base-dir", default=".")
+
+    co = sub.add_parser("corpus", help="curate / inspect the external announcement corpus")
+    co.add_argument("action", choices=["ingest", "status"])
+    co.add_argument("--base-dir", default=".")
 
     db = sub.add_parser("dashboard", help="render the static research view (no JavaScript)")
     db.add_argument("--base-dir", default=".")
@@ -154,6 +159,31 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {d.draft_id} {d.name} [{d.family}] {'; '.join(flags) or 'testable now'}")
         print("advisory : drafts only; a human decides via `python -m qe lifecycle`")
         return 0 if run.status == "OK" else 1
+
+    if args.cmd == "corpus":
+        from qe.ai.corpus import ingest, load_corpus
+
+        if args.action == "ingest":
+            rep = ingest(base)
+            print(f"raw batches : {len(rep.ingests)} ({', '.join(rep.ingests) or 'none'})")
+            print(
+                f"records     : {rep.seen} seen -> {rep.promoted} promoted, "
+                f"{rep.duplicates} duplicate, {sum(rep.held.values())} HELD for review, "
+                f"{sum(rep.rejected.values())} rejected"
+            )
+            for k, v in sorted(rep.held.items()):
+                print(f"  held     {k}: {v}   (backtest-data/ai_corpus/held/)")
+            for k, v in sorted(rep.rejected.items()):
+                print(f"  rejected {k}: {v}")
+            print(f"curated     : {rep.curated_total} document(s) total")
+            return 0
+        corpus = load_corpus(base)
+        n = sum(len(v) for v in corpus.documents.values())
+        print(f"curated documents : {n} across {len(corpus.documents)} symbol(s)")
+        print(
+            f"corpus hash       : {corpus.corpus_hash or '-'}   dropped on load: {corpus.dropped_on_load}"
+        )
+        return 0
 
     if args.cmd == "dashboard":
         from qe.ai.dashboard import build_dashboard

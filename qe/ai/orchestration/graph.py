@@ -104,7 +104,9 @@ def run_research(
     book = book or RunConfig.from_yaml(base_dir / cfg.book_config)
     market = book.universe.market
     data = data or load_research_data(book, as_of, base_dir)
-    api = ResearchDataAPI.at(data.panel, knowledge_ts(as_of, market), market, data.index_bars)
+    api = ResearchDataAPI.at(
+        data.panel, knowledge_ts(as_of, market), market, data.index_bars, data.corpus
+    )
     spec = QuantSpec.from_book(book)
     view = quant_view(api, spec) if spec else None
     symbols = research_symbols(cfg, view, extra_symbols)
@@ -143,6 +145,7 @@ def run_research(
                     for s in (*ANALYSTS.values(), *DEBATERS.values())
                 },
                 "tools_version": TOOLS_VERSION,
+                "corpus_hash": data.corpus.corpus_hash,
                 "budget": cfg.budget.model_dump(mode="json"),
                 "seed": cfg.seed,
                 "mask_identifiers": cfg.mask_identifiers,
@@ -267,7 +270,7 @@ def _research_symbol(
         "technical": (technical(api, symbol), quant(api, symbol, spec, view)),
         "risk": (risk(api, symbol, top_n),),
         "fundamental": (fundamentals(symbol),),
-        "news": (news(symbol),),
+        "news": (news(api, symbol),),
         "sentiment": (sentiment(symbol),),
     }
     for results in tools.values():

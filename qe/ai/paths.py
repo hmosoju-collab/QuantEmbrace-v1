@@ -12,7 +12,10 @@ from pathlib import Path
 AI_JOURNAL_DIR = Path("journals") / "ai"
 AI_REPORT_DIR = Path("reports") / "qe-ai"
 AI_CACHE_DIR = Path("backtest-data") / "ai_cache"
-_ALLOWED_ROOTS = (AI_JOURNAL_DIR, AI_REPORT_DIR, AI_CACHE_DIR)
+# Curated external-text corpus (ADR-043 P9): sanitized, screened, promoted documents.
+# The RAW zone (backtest-data/raw/...) is written only by scripts/, never by qe.ai.
+AI_CORPUS_DIR = Path("backtest-data") / "ai_corpus"
+_ALLOWED_ROOTS = (AI_JOURNAL_DIR, AI_REPORT_DIR, AI_CACHE_DIR, AI_CORPUS_DIR)
 
 
 class UnsafeWritePath(RuntimeError):
