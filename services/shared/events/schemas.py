@@ -233,4 +233,13 @@ def validate_event(event: dict[str, Any], expected_type: str | EventType) -> lis
     if missing:
         errors.append(f"missing required fields: {', '.join(missing)}")
 
+    # paper_trade selects the paper simulator vs a real broker. Consumers read it
+    # with bool(...), so null or "false" would silently route LIVE (null) or
+    # mis-route; only a real JSON boolean is accepted (F-1, current-state.md).
+    if "paper_trade" in required and "paper_trade" in event:
+        if not isinstance(event["paper_trade"], bool):
+            errors.append(
+                f"paper_trade must be a JSON boolean, got {type(event['paper_trade']).__name__}"
+            )
+
     return errors

@@ -34,6 +34,7 @@ from qe.research.metrics import (
     per_year,
     with_walk_forward_stats,
 )
+from qe.research.regime import pit_regime_series
 from qe.research.registry import register_run
 
 
@@ -115,6 +116,9 @@ def run_walk_forward_study(
     v1_pass = None
     if wf.v1_cross_check:
         regime = wf_v1.regime_series(panel.close, panel.turnover, wf.overlay_sma)
+        # F-10: the verbatim v1 overlay selects its market proxy from total-period
+        # turnover (look-ahead). The PIT variant is reported alongside it.
+        regime_pit = pit_regime_series(panel.close, panel.turnover, wf.overlay_sma)
         legs = {
             "delivery": wf_v1.run_delivery(
                 panel.close,
@@ -140,6 +144,18 @@ def run_walk_forward_study(
             "benchmark+overlay": wf_v1.run_benchmark(
                 panel.close, panel.turnover, regime, strat.top_n, wf.warmup_rows
             ),
+            "delivery+overlay_pit": wf_v1.run_delivery(
+                panel.close,
+                panel.turnover,
+                panel.delivery,
+                regime_pit,
+                strat.top_n,
+                strat.k,
+                wf.warmup_rows,
+            ),
+            "benchmark+overlay_pit": wf_v1.run_benchmark(
+                panel.close, panel.turnover, regime_pit, strat.top_n, wf.warmup_rows
+            ),
         }
         v1_py = per_year(legs["delivery"].monthly_net)
         v1_variants = {
@@ -154,10 +170,12 @@ def run_walk_forward_study(
 
     gates = config.experiment.gates if config.experiment else ()
     engine_gates = evaluate_gates(gates, engine_metrics)
-    engine_pass = all_passed(engine_gates) if gates else True
+    # No pre-registered gates means nothing was tested: FAIL, never a vacuous
+    # pass (F-11; all_passed([]) is False by design, see qe/research/gates.py).
+    engine_pass = all_passed(engine_gates)
     if wf.v1_cross_check and v1_variants is not None:
         v1_gates = evaluate_gates(gates, v1_variants["delivery"]["metrics"])
-        v1_pass = all_passed(v1_gates) if gates else True
+        v1_pass = all_passed(v1_gates)
 
     out_dir = Path(report_dir) if report_dir else base_dir / "reports" / "qe" / sim.session_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +248,7 @@ def run_walk_forward_study(
 
 def _fmt_gates(results: list[dict]) -> list[str]:
     if not results:
-        return ["_(no gates declared)_"]
+        return ["_(no gates declared — verdict is FAIL: an ungated study proves nothing)_"]
     lines = ["| Gate | Metric | Threshold | Actual | Verdict |", "|---|---|---|---:|---|"]
     for g in results:
         actual = "—" if g["actual"] is None else f"{g['actual']:.4f}"
@@ -305,12 +323,28 @@ def _render_report(
             "| Variant | CAGR | Sharpe | MaxDD | Hit% |",
             "|---|---:|---:|---:|---:|",
         ]
-        for label in ("delivery", "delivery+overlay", "benchmark", "benchmark+overlay"):
+        labels = {
+            "delivery": "delivery",
+            "delivery+overlay": "delivery+overlay ⚠️ look-ahead proxy (F-10)",
+            "delivery+overlay_pit": "delivery+overlay (point-in-time proxy)",
+            "benchmark": "benchmark",
+            "benchmark+overlay": "benchmark+overlay ⚠️ look-ahead proxy (F-10)",
+            "benchmark+overlay_pit": "benchmark+overlay (point-in-time proxy)",
+        }
+        for label, shown in labels.items():
+            if label not in v1["variants"]:
+                continue
             m = v1["variants"][label]["metrics"]
             lines.append(
-                f"| {label} | {m['cagr'] * 100:.1f}% | {m['sharpe']:.2f} "
+                f"| {shown} | {m['cagr'] * 100:.1f}% | {m['sharpe']:.2f} "
                 f"| {m['maxdd'] * 100:.1f}% | {m['hit'] * 100:.0f}% |"
             )
+        lines += [
+            "",
+            "⚠️ The verbatim v1 overlay picks its market proxy from total-period turnover",
+            "(look-ahead, current-state F-10); it is kept only for parity with the registered",
+            "study. Use the point-in-time overlay rows as evidence.",
+        ]
         lines += [
             "",
             "Per-year OOS (v1 delivery, no overlay):",

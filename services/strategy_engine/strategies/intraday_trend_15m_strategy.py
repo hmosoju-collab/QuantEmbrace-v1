@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from shared.logging.logger import get_logger
 from shared.models.signal import Direction, Signal
@@ -36,6 +36,11 @@ from strategy_engine.strategies._math import adx, atr_wilder, ema_series
 from strategy_engine.strategies._position_sizer import size_position
 from strategy_engine.strategies.base_strategy import Bar, BaseStrategy
 from strategy_engine.strategies.nifty_regime_gate import NiftyRegimeGate
+
+if TYPE_CHECKING:
+    # Only for the forward-referenced annotations below (imported at runtime inside
+    # initialize()/get_state() to avoid a circular import at module load).
+    from strategy_engine.strategies.base_strategy import StrategyState
 
 logger = get_logger(__name__, service_name="strategy_engine")
 

@@ -86,18 +86,35 @@ class UniverseOrderValidator:
         mkt = market.upper()
         current_mode = self._mode or UniverseMode.LIVE_ADVANCED  # default to strictest
 
-        # US market: universe validation not yet implemented; allow with warning
+        # Non-NSE markets have no universe snapshot yet. Live must fail closed on
+        # a missing universe (CLAUDE.md), so they are blocked in LIVE mode and
+        # allowed with a WARNING in paper only (F-2, current-state.md).
         if mkt != "NSE":
-            logger.debug(
-                "universe_validator.non_nse_market symbol=%s market=%s — allowed (no US universe configured)",
-                sym, mkt,
+            if current_mode.is_live:
+                logger.critical(
+                    "universe_validator.non_nse_live_blocked symbol=%s market=%s mode=%s",
+                    sym, mkt, current_mode.value,
+                )
+                return ValidationResult(
+                    approved=False,
+                    symbol=sym,
+                    market=mkt,
+                    mode=current_mode,
+                    reason=(
+                        f"Non-NSE market {mkt} has no universe snapshot — "
+                        f"live orders BLOCKED in mode={current_mode.value} (fail-closed)"
+                    ),
+                )
+            logger.warning(
+                "universe_validator.non_nse_paper_allowed symbol=%s market=%s mode=%s",
+                sym, mkt, current_mode.value,
             )
             return ValidationResult(
                 approved=True,
                 symbol=sym,
                 market=mkt,
                 mode=current_mode,
-                reason="Non-NSE market — universe validation not configured",
+                reason="Non-NSE market — universe validation not configured (paper only)",
             )
 
         # No snapshot loaded

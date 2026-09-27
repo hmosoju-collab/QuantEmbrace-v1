@@ -80,7 +80,10 @@ def test_walk_forward_study_end_to_end(tmp_path, panel):
         "delivery+overlay",
         "benchmark",
         "benchmark+overlay",
+        "delivery+overlay_pit",
+        "benchmark+overlay_pit",
     }
+    assert "look-ahead proxy (F-10)" in wf.report_path.read_text()
 
     # Registry recorded the run with the family budget.
     records = read_registry(tmp_path)
@@ -112,3 +115,20 @@ def test_gate_failure_is_reported_not_hidden(tmp_path, panel):
     assert not wf.engine_pass
     assert not wf.v1_pass
     assert "❌ FAIL" in wf.report_path.read_text()
+
+
+@pytest.mark.parametrize("ungated", ["empty_gates", "no_experiment"])
+def test_ungated_study_fails_closed(tmp_path, panel, ungated):
+    """F-11: no pre-registered gates means nothing was tested — FAIL, never a
+    vacuous pass (all_passed([]) is False by design)."""
+    config = _config(tmp_path, panel)
+    experiment = config.experiment.model_copy(update={"gates": ()})
+    config = config.model_copy(
+        update={"experiment": experiment if ungated == "empty_gates" else None}
+    )
+    wf = run_walk_forward_study(
+        config, base_dir=tmp_path, panel=panel, report_dir=tmp_path / f"out-{ungated}"
+    )
+    assert wf.engine_pass is False
+    assert wf.v1_pass is False
+    assert "verdict is FAIL" in wf.report_path.read_text()

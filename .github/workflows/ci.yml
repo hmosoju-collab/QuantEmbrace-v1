@@ -7,6 +7,9 @@
 # Jobs:
 #   lint        ruff fatal-error gate
 #   test-unit   pytest (services/**/tests/unit) against LocalStack
+#   test-qe     qe v2 engine + qe.ai: full ruff rules (incl. TID251) and
+#               pytest tests/qe incl. broker-isolation, parity and AI
+#               boundary tests; fails on any unexpected skip (F-13)
 #   test-infra  terraform validate + tflint on every module
 ###############################################################################
 
@@ -16,6 +19,9 @@ on:
   push:
     branches: ["**"]
     paths:
+      - "qe/**"
+      - "configs/**"
+      - "pyproject.toml"
       - "services/**"
       - "tests/**"
       - "scripts/**"
@@ -27,6 +33,9 @@ on:
   pull_request:
     branches: ["main", "staging"]
     paths:
+      - "qe/**"
+      - "configs/**"
+      - "pyproject.toml"
       - "services/**"
       - "tests/**"
       - "scripts/**"
@@ -141,6 +150,45 @@ jobs:
           ALPACA_API_KEY: test_alpaca_key
           ALPACA_API_SECRET: test_alpaca_secret
           ALPACA_BASE_URL: https://paper-api.alpaca.markets
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2b: qe v2 engine + qe.ai tests (F-13, docs/architecture/current-state.md)
+  # Enforces paper/live isolation, ₹0.00 paper==sim parity, and the AI/quant
+  # import boundary (ADR-043) — previously checked only on developer machines.
+  # ─────────────────────────────────────────────────────────────────────────
+  test-qe:
+    name: qe engine + AI boundary tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt pytest hypothesis ruff
+
+      - name: ruff (full pyproject rules, incl. TID251 banned-api)
+        run: ruff check qe/ tests/qe/ --output-format=github
+
+      - name: pytest tests/qe (fail on unexpected skips)
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest tests/qe -q -rs -p no:cacheprovider | tee qe-tests.txt
+          # Parity anchors use importorskip: a silent skip would hide a broken
+          # parity check. The only legitimate skip is the local book-state check.
+          if grep -E "^SKIPPED" qe-tests.txt | grep -v "no local book state"; then
+            echo "::error::unexpected skipped tests in tests/qe"
+            exit 1
+          fi
 
   # ─────────────────────────────────────────────────────────────────────────
   # Job 3: Terraform validate

@@ -53,3 +53,15 @@ def test_registry_append_and_family_budget(tmp_path):
     assert len(records) == 3
     assert family_experiment_count(tmp_path, "delivery-factor") == 2
     assert family_experiment_count(tmp_path, "other") == 0
+
+
+def test_family_count_is_persisted_in_the_ledger(tmp_path):
+    """F-12: the multiple-testing count must be in the committed ledger line,
+    not only in the returned dict."""
+    exp_a = ExperimentConfig(name="a", family="fam", hypothesis="h-a")
+    exp_b = ExperimentConfig(name="b", family="fam", hypothesis="h-b")
+    register_run(tmp_path, exp_a, {"session_id": "s1"})
+    register_run(tmp_path, exp_a, {"session_id": "s2"})  # rerun: same experiment
+    register_run(tmp_path, exp_b, {"session_id": "s3"})
+    counts = [r["family_experiment_count"] for r in read_registry(tmp_path)]
+    assert counts == [1, 1, 2]

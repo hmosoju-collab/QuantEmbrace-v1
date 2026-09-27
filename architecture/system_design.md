@@ -231,6 +231,8 @@ All primary topics have corresponding `.retry` and `.dlq` topics (same partition
 
 `trace_id` flows: `TICK → SIGNAL_PENDING → SIGNAL_ENRICHED → SIGNAL_APPROVED → ORDER_FILLED`. One CloudWatch Logs Insights query on trace_id reconstructs the full trade lifecycle including enrichment decisions.
 
+**`paper_trade` validation (2026-09-25, fix F-1):** `paper_trade` is a required field on SIGNAL_PENDING / SIGNAL_ENRICHED / SIGNAL_APPROVED and must be a JSON boolean — `validate_event` refuses `null` or strings (which consumers' `bool(...)` would have mis-routed, `null` → LIVE); such messages go to the DLQ and are never approved or executed.
+
 **v3.0 envelope:**
 
 ```json
@@ -809,6 +811,7 @@ This is enforced at `execute_approved_signal()` in the execution engine, before 
 - **Paper mode with no snapshot**: allowed with warning (non-fatal, does not block paper trading).
 - **Live mode with no snapshot**: all orders BLOCKED until snapshot is built.
 - **Symbol not in snapshot**: rejected with reason string that includes mode, date, and checksum.
+- **Non-NSE market** (no universe snapshot exists yet): paper modes allowed with WARNING; **live mode BLOCKED** (fail-closed, 2026-09-25 fix F-2 — previously approved in every mode).
 
 ### Paper / Live Isolation
 
@@ -898,6 +901,7 @@ Run `python scripts/universe/evaluate_promotion_gate.py --gate PAPER_SAFE_START_
 | Snapshot generation fails entirely | `UniverseSnapshotError` raised; live mode rejects all orders |
 | Approved symbol count below `min_symbols_to_trade` | `failure_mode=PARTIAL`, CRITICAL alert raised |
 | Live universe empty | All orders blocked; kill switch candidate |
+| Non-NSE market order | Paper: allowed with WARNING · Live: BLOCKED (fail-closed, F-2) |
 
 ### Environment Variable
 
