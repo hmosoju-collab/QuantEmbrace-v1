@@ -642,6 +642,35 @@ candle-cache (DynamoDB poll)
 
 ---
 
+## Hybrid AI Research Layer — `qe.ai` (ADR-043, Advisory Only)
+
+**Status:** Phases 0–5 **implemented** 2026-09-25 on branch `feature/hybrid-ai-research` (offline,
+advisory, fake-LLM only — zero spend; **not wired to any engine path**). Phases 6–10 (forward AI
+shadow gate, post-trade analyst, dashboard, external data, real Bedrock spend) are
+`[PLANNED — not yet implemented]`. Report: `docs/research/ai-research-p0-p5-report.md`.
+**Phases 7–9 implemented 2026-09-26; Phase 10 built but blocked** (`docs/research/ai-research-p7-p10-report.md`): post-trade analyst (`python -m qe.ai post-trade`), static research dashboard, hardened NSE-announcement corpus + news tool (network only in `scripts/`), and a Bedrock backend on the official SDK with `probe` — the real run is blocked by the AWS account (Claude models return 403/404 for this account), $0 spent.
+**Phase 6 implemented 2026-09-25** (`docs/research/ai-research-p6-report.md`): strategy lifecycle ledger
+(`qe/research/lifecycle.py`, `python -m qe lifecycle` — evidence-gated, human-approved, append-only
+`governance/strategy-lifecycle.jsonl`; qe.ai cannot call it), AI hypothesis drafts (`python -m qe.ai
+hypothesize`, CANDIDATE-only), and the forward AI shadow gate (`configs/qe_ai_shadow_gate.yaml`,
+**DRAFT — unsigned**; `python -m qe.ai shadow` refuses a verdict until a human signs off).
+
+An offline, TradingAgents-inspired multi-agent research package inside the v2 engine tree
+(`qe/ai/`, entry point `python -m qe.ai`). It reads the lake point-in-time, runs analyst agents
+(technical/regime/risk; fundamental/news/sentiment are UNAVAILABLE — no data source), an
+optional bull/bear debate + critic + synthesizer, and emits typed `ResearchSignal` v1 records to
+its own journal (`journals/ai/`). A deterministic fusion layer reports the AI view **next to**
+QuantEmbrace's own decision; default `AI_ADVISORY` gives AI zero weight, so the fused decision
+equals the engine's pick. The engine never imports `qe.ai`; `qe.ai` cannot import engine, risk,
+execution, live-gate, or broker code. LLM signals dated before the model's knowledge cutoff are
+flagged as contaminated and can never carry weight — AI earns weight only via pre-registered
+forward shadow accrual (P6+, planned).
+
+Design: `docs/architecture/hybrid-ai-system.md` · boundary: `docs/architecture/ai-quant-boundary.md`
+· security: `docs/architecture/security-model.md` · look-ahead: `docs/research/lookahead-prevention.md`.
+
+---
+
 ## Layer 6: Infrastructure Layer
 
 ### Compute: EC2 ARM64 Auto Scaling Groups

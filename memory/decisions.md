@@ -3015,3 +3015,142 @@ NAV ₹1,000,000 both books).
   `--end 2025-12-31`; a bare cadence invocation silently skips 2026 catch-up. Fixed
   operationally today with explicit `--start 2026-07-08 --end 2026-07-14`; consider
   defaulting `--end` to today.
+
+---
+
+## ADR-043: Offline Advisory AI Research Layer (`qe.ai`) — TradingAgents-Inspired, Engine-Isolated (2026-09-25)
+
+**Status:** Approved (operator, 2026-09-25) — Phases 0–5 authorised; 6–10 design-only ·
+**Branch:** `feature/hybrid-ai-research` · **Design:** `docs/architecture/hybrid-ai-system.md`
+
+### Context
+
+The operator asked for a hybrid AI + systematic research platform inspired by
+TauricResearch/TradingAgents (LLM analyst team → bull/bear debate → trader → risk debate →
+portfolio manager). Constraints from the existing canon: RA-1 F-4 cut `ai_engine` from the
+hot path (ADR-037); `qe` is the primary engine and v1 is frozen (ADR-038); the governance wall
+(backtesting recommends, GenAI explains, humans promote) is non-negotiable; ADR-042 showed
+that any new `RunConfig` field moves every config hash and strands the paper books.
+Reconnaissance (`docs/architecture/current-state.md`) found: `services/ai_engine` HMM/GBT
+are untrained stubs; the lake is prices-only (no news/fundamentals/sentiment); a dormant
+Bedrock GenAI layer exists in `services/backtesting/genai/`.
+
+### Decision
+
+1. **New package `qe/ai/`, offline and advisory.** Own entry point `python -m qe.ai`; the
+   `qe` CLI and every trading module (`qe.engine`, `qe.execution`, `qe.risk`, `qe.strategy`,
+   `qe.killswitch`, `qe.live_gate`, `qe.cli`, `qe.research`) are untouched and never import
+   it; `qe.ai` imports only an allowlist (`qe.config`, `qe.journal`, `qe.data.*`,
+   `qe.strategy.base`, `qe.universe`, `qe.clock`, `qe.version`). Enforced by AST + fresh-
+   interpreter tests.
+2. **Structured outputs only.** `ResearchSignal` v1 (`research_signal/1`), per-component
+   status; the LLM returns scores + evidence IDs, code attaches evidence and timestamps.
+3. **Tools are called by code**, read-only, point-in-time (`Context.at`), no LLM-directed tool
+   calling. No-data agents (fundamental/news/sentiment) return UNAVAILABLE with zero LLM calls.
+4. **Contamination rule.** An LLM evaluated at a date ≤ its knowledge cutoff (+90d guard) has
+   seen the future; such signals are flagged (computed, never claimed) and never carry weight.
+   **Historical backtests of AI scores are not evidence**; AI can earn weight only via
+   pre-registered forward (post-cutoff) shadow accrual (P6/P10).
+5. **Deterministic fusion, default `AI_ADVISORY` with AI weight 0** — the fused decision equals
+   the engine's own pick; the AI recommendation is reported next to it, never merged. WEIGHTED
+   (cap 0.20) / EXPERIMENTAL (cap 0.50) allowed only in `study` context. Hard risk flags
+   always REJECT. AI alone never decides.
+6. **Own configs, own hash** (`configs/qe_ai_research.yaml`, `configs/research_fusion.yaml`,
+   hashed with `exclude_none`) — `RunConfig` is not modified, so no config-hash drift.
+7. **LLM backend:** provider protocol; Bedrock Converse adapter (lazy boto3, IAM, no API key)
+   ported from the dormant genai layer's pattern (not imported); deterministic fake LLM for all
+   tests; real spend requires `--allow-llm-spend` and is out of scope until P10.
+8. **No new dependencies.** No LangGraph/LangChain; no TradingAgents code copied (clean-room).
+9. **Writes confined** to `journals/ai/`, `reports/qe-ai/`, `backtest-data/ai_cache/`; never
+   `reports/qe/` or `journals/paper-*` (live-gate / forward-gate evidence).
+
+### Consequences
+
+- Phases 0–5 deliver plumbing (safety, governance, traceability) — **not an edge**. With a
+  price-only lake the analysts re-describe what the factor model already sees.
+- `services/ai_engine` and `services/backtesting/genai` stay as-is (v1 frozen / lab dormant).
+- Current-state findings F-1…F-14 are documented only; F-11 (no-gates-passes) and F-12
+  (family count not persisted) must be fixed before P6 hypothesis generation.
+- CI does not run `tests/qe` (F-13), so boundary tests are enforced locally only until a
+  separately-approved CI change.
+
+---
+
+## ADR-034 correction note — regime overlay re-measured point-in-time (F-10, 2026-09-25)
+
+**Status:** Recorded · **Source:** `docs/architecture/current-state.md §10a` F-10, commit `c73fa19`.
+
+The ADR-034 addendum's "200d regime overlay HURTS" evidence used a market proxy ranked on
+**total-period** turnover (`regime_series` in `run_delivery_walkforward.py` / `qe/research/wf_v1.py`) —
+look-ahead. Re-measured on the real lake with `qe.research.regime.pit_regime_series` (walk-forward
+session `delivery-wf-20260925T215825Z-f45157455211`, snapshot `ds-e3d57f81dbab9cb8`, engine and v1
+headline numbers reproduced exactly):
+
+- **Delivery book: decision unchanged.** Overlay (PIT) Sharpe 1.20 vs 1.41 without (look-ahead
+  version said 1.17); CAGR 16.5% vs 23.7%; MaxDD −14.2% vs −22.2%; 18 cash months. Overlay stays
+  NOT adopted for the delivery book.
+- **EW benchmark leg: conclusion reverses.** PIT overlay improves the market proxy (Sharpe 0.99 →
+  1.16, MaxDD −25.8% → −17.5%); the look-ahead version showed it hurting (0.94). Any general claim
+  that a 200d trend filter "hurts" on this data was contaminated. This does not reopen the overlay
+  for the delivery book; a market-exposure overlay would need its own pre-registered study.
+- The verbatim v1 function is kept unchanged as a parity anchor and is labelled look-ahead in
+  every walk-forward report; the PIT rows are the evidence.
+
+---
+
+## ADR-043 addendum — Phase 6 delivered + findings triage (2026-09-25)
+
+**Status:** Implemented (operator-approved "proceed with recommended") · **Branches:**
+`fix/findings-triage` (off `dev`, one commit per fix) merged into `feature/hybrid-ai-research`.
+
+- **Findings triage** (`docs/architecture/current-state.md §10a`): fixed F-1 (paper_trade must be a
+  JSON boolean at every signal boundary — Phase 0 overstated it: a *missing* flag was already
+  refused; the real gap was null/string), F-2 (non-NSE blocked in LIVE), F-10 (point-in-time regime
+  overlay beside the leaky v1 one; see ADR-034 correction note), F-11 (ungated study = FAIL),
+  F-12 (family count persisted), F-13 (CI `test-qe` job). F-3…F-9/F-14 deferred to v1 decommission,
+  accepted as documented paper degrade, tracked, or superseded — each with its reason.
+- **iCloud:** 4,764 evicted lake files re-downloaded (`brctl download` per file — the folder form
+  does nothing); the real-lake `qe.ai` E2E then ran in 8 s.
+- **P6:** `qe.research.lifecycle` (evidence-gated, human-approved, append-only ledger; AI identities
+  refused; qe.ai cannot import it) · `qe.ai.hypotheses` (CANDIDATE drafts; code flags settled-family
+  re-proposals from `governance/research-eliminated-families.yaml`, untestable data, and the family
+  test budget) · `qe.ai.shadow` + `configs/qe_ai_shadow_gate.yaml` (forward gate on incremental IC
+  over the factor rank, mirroring the Forward Factor Gate; **committed as DRAFT — no verdict until a
+  human signs off**, which must wait for a real model + cutoff, P10).
+- **Not done:** P7–P10; the CI job has not run on GitHub (nothing pushed); the shadow gate is unsigned.
+
+---
+
+## ADR-043 addendum 2 — Phases 7–10 (2026-09-26)
+
+**Status:** P7/P8/P9 implemented; P10 built, real run blocked by the AWS account · **Report:** `docs/research/ai-research-p7-p10-report.md`
+
+- **P7** post-trade analyst: code computes every classification; the LLM writes only the lesson; reviews are stamped
+  knowable at exit close and reach later prompts only via `lessons_known_at(cutoff)` (look-ahead-safe reflection).
+- **P8** dashboard: static, HTML-escaped, CSP `default-src 'none'`, no JavaScript; shows the AI recommendation beside
+  the QuantEmbrace decision and computes nothing.
+- **P9** external text: qe.ai keeps zero network code — the downloader lives in `scripts/` and stores raw bytes;
+  curation is quarantine-first (sanitize → dual-form screen → validate → promote / hold / reject), point-in-time by
+  `knowledge_ts`, re-screened on every load; headlines only reach prompts. A test found and closed a hole where tag
+  stripping removed injection markup before the screen.
+- **P10** backend on the official Anthropic SDK Bedrock Mantle client (Opus 5.5 both tiers, operator's choice),
+  optional `requirements-ai.txt`; boto3 banned in qe.ai; `probe`; failures exit 3. **Blocked:** 404 (ap-south-1) /
+  403 not-available (us-east-1) for every Claude model on this account; $0 spent. Options recorded, not chosen:
+  enable model access, or a first-party API adapter.
+- **Unchanged:** engine, v1, required dependencies, all config hashes; shadow gate remains an unsigned DRAFT.
+
+---
+
+## ADR-043 addendum 3 — first-party Anthropic API backend (2026-09-26)
+
+**Status:** built and tested against a fake runtime; **no real call made** (no key on this machine) · **Report:** `docs/research/ai-research-p7-p10-report.md` addendum 2
+
+- **Decision (operator-approved):** add `backend: anthropic` as a second real backend behind the same `LLMClient` protocol, so an
+  Anthropic API key can unblock P10 while the AWS account is not entitled to Claude on Bedrock.
+- **Shape:** the Messages-API mapping (no sampling params, explicit `effort`, no tools, SDK `max_retries=0`, `type:status`-only
+  errors, refusal → BLOCKED) lives once in `qe/ai/llm/messages.py` and imports no SDK; `BedrockLLM` / `AnthropicLLM` are thin
+  subclasses that build their client lazily. Same `--allow-llm-spend`, budget, breaker, cache, probe and contamination rules.
+- **Credentials:** resolved by the SDK (`ANTHROPIC_API_KEY` / `ant auth login`); `qe.ai` bans `os.environ`, so it cannot read or
+  log a key. Boundary: `anthropic` importable in exactly two files; `boto3`/`botocore` still banned; no config hash moved.
+- **Unchanged:** engine, v1, required dependencies, the unsigned DRAFT shadow gate. **Still true:** no real model output exists.
+

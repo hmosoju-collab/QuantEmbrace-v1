@@ -1,0 +1,28 @@
+# qe.ai research run (ADR-043) — offline, advisory; never read by the trading engine.
+# Annotates the delivery forward book. backend=fake ⇒ zero LLM spend; switching to
+# bedrock ALSO requires `--allow-llm-spend` on the CLI (docs/operations/ai-configuration.md).
+schema_version: qe_ai_research/1
+name: delivery-book-ai-research
+book_config: configs/qe_delivery_book_paper.yaml   # read-only: factor params, market, lake
+research_mode: FAST                                 # FAST | STANDARD | DEEP
+backend: fake
+quick_model:
+  model_id: fake-quick
+  tier: quick
+  knowledge_cutoff: null   # unknown ⇒ every signal flagged contaminated (lookahead-prevention §2)
+deep_model:
+  model_id: fake-deep
+  tier: deep
+  knowledge_cutoff: null
+budget:
+  max_run_tokens: 200000
+  max_tokens_per_call: 1024
+  timeout_s: 30
+  max_retries: 1
+  breaker_threshold: 3
+guard_days: 90
+max_symbols: 20
+mask_identifiers: true      # withhold tickers from prompts (contamination mitigation, not a cure)
+temperature: 0.0
+seed: 0
+use_cache: true

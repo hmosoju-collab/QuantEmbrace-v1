@@ -1,0 +1,15 @@
+# qe.ai research fusion (ADR-043) — how the AI view is combined with the quant view.
+# Default AI_ADVISORY: AI weight 0 ⇒ the fused decision IS the engine's own pick; the AI
+# recommendation is shown next to it, never merged. Methodology:
+# docs/operations/ai-configuration.md §3. Nothing here is read by the trading engine.
+schema_version: qe_ai_fusion/1
+mode: AI_ADVISORY          # AI_DISABLED | AI_ADVISORY | AI_WEIGHTED | AI_EXPERIMENTAL
+ai_weight: 0.0             # ceilings enforced in code: 0 / 0 / 0.20 / 0.50
+                           # WEIGHTED/EXPERIMENTAL run ONLY in --context study, and never
+                           # use a contaminated signal (lookahead-prevention §2)
+allowed_contexts: [study, shadow]
+recommendation_dead_zone: 0.20   # |ai_score| <= 0.20 ⇒ AI recommendation NEUTRAL
+hard_risk:                 # deterministic vetoes — REJECT regardless of AI
+  max_data_age_days: 5
+  max_vol_63d: null        # e.g. 0.60 (annualized); null = off
+  max_drawdown_252d: null  # e.g. -0.50; null = off

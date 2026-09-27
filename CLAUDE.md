@@ -49,6 +49,14 @@ ADR-040) → `check_forward_gate.py` → `qe paper` both books → `qe report`. 
 intraday protocol below is the **frozen fallback only** — run it only when the operator
 explicitly asks for a v1 intraday session (its strategies are retired, ADR-033/034).
 
+**Hybrid AI research layer (`qe.ai`, ADR-043):** offline, advisory, never imported by the engine;
+`python -m qe.ai research|report|fuse`. Default fusion `AI_ADVISORY` = AI weight 0 (decision == engine
+pick). Paid LLM backends need `--allow-llm-spend`. Pre-cutoff LLM signals are contaminated → never evidence.
+P7–P10 (built 2026-09-26): `qe.ai post-trade` · `dashboard` · `corpus ingest` (NSE announcements; sanitize→screen→promote/hold) · `probe` (LLM access check). Real Bedrock BLOCKED by the AWS account — see `docs/research/ai-research-p7-p10-report.md`.
+P6: `python -m qe lifecycle` (human-approved strategy states; AI cannot promote) · `qe.ai hypothesize` (drafts
+only) · `qe.ai shadow` (forward AI gate — DRAFT until a human signs off; never sign off on the fake backend).
+Docs: `docs/architecture/hybrid-ai-system.md` · `docs/operations/ai-configuration.md`.
+
 ---
 
 ## Paper Trading Start Protocol (v1 intraday — FROZEN FALLBACK, explicit request only)
