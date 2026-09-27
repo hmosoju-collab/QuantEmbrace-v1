@@ -7,6 +7,7 @@ import pytest
 
 from qe.ai.config import ModelProfile, ResearchRunConfig
 from qe.ai.llm import (
+    AnthropicLLM,
     BedrockLLM,
     CircuitBreaker,
     FakeLLM,
@@ -92,23 +93,40 @@ class _Messages:
 
 
 class _FakeRuntime:
-    """Stands in for AnthropicBedrockMantle: ``client.messages.create(**kw)``."""
+    """Stands in for the SDK client: ``client.messages.create(**kw)``."""
 
     def __init__(self, exc=None, stop_reason="end_turn"):
         self.exc, self.calls, self.stop_reason = exc, [], stop_reason
         self.messages = _Messages(self)
 
 
-def test_bedrock_messages_request_and_response_mapping():
+def _bedrock(rt, **kw):
+    return BedrockLLM(region="ap-south-1", timeout_s=5, runtime_client=rt, **kw)
+
+
+def _anthropic(rt):
+    return AnthropicLLM(timeout_s=5, runtime_client=rt)
+
+
+# Both real backends speak the same Messages API through one shared implementation
+# (llm/messages.py), so every request/response rule is asserted against both.
+BACKENDS = pytest.mark.parametrize(
+    "make,model", [(_bedrock, "anthropic.claude-opus-5-5"), (_anthropic, "claude-opus-5-5")],
+    ids=["bedrock", "anthropic"],
+)  # fmt: skip
+
+
+@BACKENDS
+def test_messages_request_and_response_mapping(make, model):
     rt = _FakeRuntime()
-    req = LLMRequest(model_id="anthropic.claude-opus-5-5", system="sys", prompt="p",
+    req = LLMRequest(model_id=model, system="sys", prompt="p",
                      max_tokens=100, temperature=0.7, effort="low")  # fmt: skip
-    resp = BedrockLLM(region="ap-south-1", timeout_s=5, runtime_client=rt).complete(req)
+    resp = make(rt).complete(req)
     assert resp.text == '{"a": 1}'  # thinking blocks ignored, text joined
     assert (resp.input_tokens, resp.output_tokens) == (12 + 5, 3)  # cache reads are input
     assert resp.stop_reason == "end_turn" and resp.latency_ms >= 0
     call = rt.calls[0]
-    assert call["model"] == "anthropic.claude-opus-5-5" and call["system"] == "sys"
+    assert call["model"] == model and call["system"] == "sys"
     assert call["messages"] == [{"role": "user", "content": "p"}]
     assert call["max_tokens"] == 100 and call["output_config"] == {"effort": "low"}
     # Opus 5.x removed sampling params (400) and the model is never given tools
@@ -116,13 +134,15 @@ def test_bedrock_messages_request_and_response_mapping():
         assert banned not in call
 
 
-def test_bedrock_omits_output_config_when_no_effort():
+@BACKENDS
+def test_messages_omit_output_config_when_no_effort(make, model):
     rt = _FakeRuntime()
-    BedrockLLM(region="r", timeout_s=5, runtime_client=rt).complete(_req())
+    make(rt).complete(_req())
     assert "output_config" not in rt.calls[0]
 
 
-def test_bedrock_errors_are_sanitized():
+@BACKENDS
+def test_messages_errors_are_sanitized(make, model):
     class APITimeoutError(Exception):
         pass
 
@@ -130,19 +150,62 @@ def test_bedrock_errors_are_sanitized():
         status_code = 429
 
     with pytest.raises(LLMTimeout, match=r"^APITimeoutError$"):
-        BedrockLLM(region="r", timeout_s=5,
-                   runtime_client=_FakeRuntime(APITimeoutError("arn:aws:secret"))).complete(_req())  # fmt: skip
+        make(_FakeRuntime(APITimeoutError("arn:aws:secret key-material-123"))).complete(_req())
     with pytest.raises(LLMError) as ei:
-        BedrockLLM(region="r", timeout_s=5,
-                   runtime_client=_FakeRuntime(APIStatusError("req-id 123 arn:x"))).complete(_req())  # fmt: skip
+        make(_FakeRuntime(APIStatusError("req-id 123 arn:x"))).complete(_req())
     assert str(ei.value) == "APIStatusError:429"  # type + status only; provider text never crosses
 
 
-def test_bedrock_without_injected_client_cannot_reach_aws_in_tests():
+@BACKENDS
+def test_real_backend_without_injected_client_cannot_reach_a_network_in_tests(make, model):
     # conftest blocks sockets; with no injected client the adapter must surface an
     # LLMError (or the optional SDK being absent), never a real call.
     with pytest.raises(LLMError):
-        BedrockLLM(region="r", timeout_s=5).complete(_req())
+        make(None).complete(_req())
+
+
+class _RecordingSDK:
+    """Stands in for the `anthropic` module to observe how each client is constructed."""
+
+    def __init__(self):
+        self.built = []
+
+    def _factory(self, name):
+        def make(**kw):
+            self.built.append((name, kw))
+            return _FakeRuntime()
+
+        return make
+
+    def install(self, monkeypatch):
+        import sys
+        import types
+
+        mod = types.ModuleType("anthropic")
+        mod.Anthropic = self._factory("Anthropic")
+        mod.AnthropicBedrockMantle = self._factory("AnthropicBedrockMantle")
+        monkeypatch.setitem(sys.modules, "anthropic", mod)
+
+
+def test_first_party_client_is_built_without_credentials_or_sdk_retries(monkeypatch):
+    sdk = _RecordingSDK()
+    sdk.install(monkeypatch)
+    AnthropicLLM(timeout_s=42).complete(_req())
+    # qe.ai never handles a key (the SDK resolves it) and disables SDK retries (the gateway owns them)
+    assert sdk.built == [("Anthropic", {"timeout": 42, "max_retries": 0})]
+
+
+def test_bedrock_client_is_built_for_the_configured_region_without_sdk_retries(monkeypatch):
+    sdk = _RecordingSDK()
+    sdk.install(monkeypatch)
+    BedrockLLM(region="us-east-1", timeout_s=42).complete(_req())
+    assert sdk.built == [
+        ("AnthropicBedrockMantle", {"aws_region": "us-east-1", "timeout": 42, "max_retries": 0})
+    ]
+
+
+def test_backend_names_are_distinct_for_the_journal():
+    assert AnthropicLLM(timeout_s=5).name == "anthropic" and _bedrock(None).name == "bedrock"
 
 
 def _cfg(backend: str) -> ResearchRunConfig:
@@ -159,8 +222,14 @@ def test_real_backend_requires_spend_flag():
     assert isinstance(build_client(_cfg("fake"), allow_spend=False), FakeLLM)
     with pytest.raises(SpendNotAllowed, match="--allow-llm-spend"):
         build_client(_cfg("bedrock"), allow_spend=False)
+    with pytest.raises(SpendNotAllowed, match="backend=anthropic"):
+        build_client(_cfg("anthropic"), allow_spend=False)
     assert isinstance(
         build_client(_cfg("bedrock"), allow_spend=True, runtime_client=_FakeRuntime()), BedrockLLM
+    )
+    assert isinstance(
+        build_client(_cfg("anthropic"), allow_spend=True, runtime_client=_FakeRuntime()),
+        AnthropicLLM,
     )
 
 

@@ -11,6 +11,18 @@ from dataclasses import dataclass
 from qe.ai.config import ResearchRunConfig
 from qe.ai.llm import LLMClient, LLMError, LLMRequest, LLMTimeout
 
+_ANTHROPIC_HINTS = {
+    "401": "No valid credential: set ANTHROPIC_API_KEY (or run `ant auth login`) in the shell that "
+    "runs qe.ai. qe.ai never reads or logs the key; the SDK resolves it.",
+    "403": "The key/org is not permitted to use this model: check the model is enabled for the "
+    "workspace/organization in the Anthropic Console.",
+    "404": "The model ID is not recognised by the Anthropic API: first-party IDs have no "
+    "`anthropic.` prefix (for example `claude-opus-5-5`).",
+    "400": "The request was rejected: check effort / max_tokens for this model (Opus 5.x rejects "
+    "sampling parameters and cannot disable thinking).",
+    "429": "Rate limited or out of credit: check usage limits and billing, or retry later.",
+}
+
 _HINTS = {
     "403": (
         "The account is not entitled to this model on this endpoint/region (Bedrock returns "
@@ -55,7 +67,8 @@ def run_probe(cfg: ResearchRunConfig, client: LLMClient) -> ProbeResult:
     except LLMError as exc:
         label = str(exc)
         status = label.rsplit(":", 1)[-1]
-        return ProbeResult(False, client.name, model, label, _HINTS.get(status, ""))
+        hints = _ANTHROPIC_HINTS if client.name == "anthropic" else _HINTS
+        return ProbeResult(False, client.name, model, label, hints.get(status, ""))
     return ProbeResult(
         True,
         client.name,

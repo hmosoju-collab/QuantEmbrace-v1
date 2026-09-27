@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument(
         "--allow-llm-spend",
         action="store_true",
-        help="required for any paid backend (bedrock); the fake backend never spends",
+        help="required for any paid backend (bedrock | anthropic); the fake backend never spends",
     )
     r.add_argument("--base-dir", default=".")
 
@@ -191,7 +191,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         res = run_probe(cfg, client)
         print(
-            f"{'OK  ' if res.ok else 'FAIL'} {res.backend} {res.model_id} region={cfg.region}: {res.detail}"
+            f"{'OK  ' if res.ok else 'FAIL'} {res.backend} {res.model_id} "
+            f"{'region=' + cfg.region if cfg.backend == 'bedrock' else 'api=api.anthropic.com'}: "
+            f"{res.detail}"
         )
         if res.hint:
             print(f"hint: {res.hint}")

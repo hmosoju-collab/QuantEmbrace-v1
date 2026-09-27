@@ -43,7 +43,9 @@ BANNED_TOP = {
     "execution_engine", "risk_engine", "strategy_engine", "monitoring_agent",
 }  # fmt: skip
 AWS_TOP = {"boto3", "botocore"}  # banned everywhere: the Bedrock adapter uses the Anthropic SDK
-SDK_ALLOWED_FILE = QE_AI / "llm" / "bedrock.py"  # the only module that may import `anthropic`
+# The only modules that may import `anthropic`: one file per real backend. The shared
+# Messages-API logic (llm/messages.py) deliberately imports no SDK.
+SDK_ALLOWED_FILES = {QE_AI / "llm" / "bedrock.py", QE_AI / "llm" / "anthropic_api.py"}
 BANNED_CALLS = {"eval", "exec", "compile", "__import__"}
 BANNED_ATTR_CALLS = {("os", "system"), ("os", "popen"), ("os", "getenv"), ("os", "environ")}
 TRADING_MODULES = [
@@ -99,7 +101,7 @@ def test_qe_ai_imports_only_the_allowlist(path):
         if top == "qe":
             assert mod in ALLOWED_QE, f"{path.name}: forbidden qe import {mod}"
         if top == "anthropic":
-            assert path == SDK_ALLOWED_FILE, f"{path.name}: anthropic only in llm/bedrock.py"
+            assert path in SDK_ALLOWED_FILES, f"{path.name}: anthropic only in the backend files"
         else:
             assert top not in BANNED_TOP, f"{path.name}: banned import {mod}"
         assert top not in AWS_TOP, f"{path.name}: boto3/botocore are not used by qe.ai"

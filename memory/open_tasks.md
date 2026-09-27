@@ -1721,6 +1721,6 @@ be run per FILE — the folder form silently does nothing). Real-lake `qe.ai` E2
 **Open:** push + first GitHub run of the new CI `test-qe` job; sign-off of the AI shadow gate only after P10.
 
 **Hybrid AI P7–P10 (2026-09-26):** built; report `docs/research/ai-research-p7-p10-report.md`. **Open, operator:** (1) enable Anthropic model
-access on the AWS account (or supply a first-party API key → second adapter) then `python -m qe.ai probe … --allow-llm-spend`;
+access on the AWS account, **or `export ANTHROPIC_API_KEY` and use `configs/qe_ai_research_anthropic.yaml` (first-party adapter BUILT 2026-09-26, ADR-043 addendum 3, no real call yet)**, then `python -m qe.ai probe … --allow-llm-spend`;
 (2) ~~run the NSE downloader~~ DONE 2026-09-26 — 0 held on 307 genuine docs;
 (3) research run on 2026-09-30 (first uncontaminated date), then sign off the shadow gate; (4) push + PRs so CI `test-qe` runs.

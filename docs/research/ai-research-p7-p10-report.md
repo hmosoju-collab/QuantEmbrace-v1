@@ -85,6 +85,8 @@ The 403 text ends "contact AWS Sales", which points to an account-level entitlem
 
 ## 8. Recommended next steps
 
+> **Update (2026-09-26, later): the first-party Anthropic API backend is built** — see the addendum 2 at the end of this report. Step 1 is now satisfied by *either* enabling Bedrock access *or* exporting `ANTHROPIC_API_KEY` and running the probe with `configs/qe_ai_research_anthropic.yaml`.
+
 1. **Unblock the model** (operator): enable Anthropic access on the AWS account, then run `python -m qe.ai probe … --allow-llm-spend`. Tell me if you'd rather use a first-party API key instead.
 2. ~~Run the downloader once~~ — done (see the addendum). Widen it (all 217 universe names, a longer history) once the screen has seen more text.
 3. Once a probe passes, run the capped smoke run, then a STANDARD run on **2026-09-30** (the first clean date) to start accruing.
@@ -116,3 +118,19 @@ did not depend on it: the **first live run of the NSE downloader** and a news-en
 - **Cost projection for a real STANDARD run** (20 symbols, 141 calls): about 155k input tokens (about $0.62 at Opus 5.5's $4/MTok) plus output. Output is unmeasured, since Opus 5.x always thinks and those tokens are billed, so budget roughly **$2–5 per monthly STANDARD run** and about $0.6–1 for FAST. This is an estimate from prompt size, not a measurement.
 
 `tests/qe`: **601 passed, 0 skipped.**
+
+---
+
+## Addendum 2 — first-party Anthropic API backend (2026-09-26, later still)
+
+The operator approved building the second backend, so an Anthropic API key can unblock P10 without waiting on the AWS account.
+
+| Item | Result |
+|---|---|
+| What was built | `backend: anthropic` (`qe/ai/llm/anthropic_api.py`) beside `bedrock`, behind the same `LLMClient` protocol. The shared request/response/error mapping moved into `qe/ai/llm/messages.py` (no SDK import); `BedrockLLM` and `AnthropicLLM` are thin subclasses that build their SDK client lazily. |
+| Same rules for both | No sampling params, explicit `effort`, no tools, `max_retries=0` on the SDK (the gateway owns retries), errors cross as `type:status` only (a test feeds a secret-shaped provider message and confirms it never surfaces), refusal → BLOCKED, `--allow-llm-spend`, budget, breaker, cache, contamination rule. |
+| Credentials | Resolved by the SDK (`ANTHROPIC_API_KEY` or `ant auth login`). `qe.ai` bans `os.environ`, so it never reads, logs or forwards the key. A construction failure (for example no credential) now surfaces as a sanitized `LLMError`, not a raw exception. |
+| Config / probe | `configs/qe_ai_research_anthropic.yaml` (`claude-opus-5-5`, cutoff 2026-06-30, same 60k-token smoke budget). The probe has first-party hints (401 = set the key, 404 = model ID has no `anthropic.` prefix) and no longer prints `region=` for a non-Bedrock backend. |
+| Boundary | `anthropic` may now be imported in exactly two files (`bedrock.py`, `anthropic_api.py`); the shared `messages.py` must import none; `boto3`/`botocore` stay banned. No config hash moved (the `backend` literal only gained a value). |
+| Verified | `tests/qe`: **621 passed, 0 skipped** with the SDK, and the same 621 **without** it. Ruff clean. The request-mapping, error, no-network and client-construction tests run against **both** backends; two tests check how each SDK client is constructed (first-party: no key argument, `max_retries=0`; Bedrock: the configured region). |
+| Not verified | **No real call has been made through the first-party backend** (no key on this machine); its live behaviour is exactly as unproven as Bedrock's was before the account block. Spend: **$0**. |

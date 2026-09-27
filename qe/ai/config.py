@@ -66,7 +66,7 @@ class ResearchRunConfig(FrozenModel):
     # lake location — one source of truth with the engine book being annotated.
     book_config: str
     research_mode: ResearchMode = "FAST"
-    backend: Literal["fake", "bedrock"] = "fake"
+    backend: Literal["fake", "bedrock", "anthropic"] = "fake"
     quick_model: ModelProfile
     deep_model: ModelProfile
     budget: BudgetConfig = BudgetConfig()

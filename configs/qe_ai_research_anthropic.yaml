@@ -1,0 +1,34 @@
+# qe.ai research on REAL Claude via the first-party Anthropic API (ADR-043 P10, second backend).
+# For when Bedrock access is unavailable. Requires `pip install -r requirements-ai.txt`, a credential
+# resolved by the SDK (ANTHROPIC_API_KEY, or `ant auth login`), and an explicit `--allow-llm-spend`.
+# qe.ai never reads or logs the key.
+#
+# SMOKE profile: FAST mode, 3 symbols, hard 60k-token run budget (worst case well under $1 at
+# $4/$20 per MTok). Signals dated within the model's knowledge cutoff + guard are CONTAMINATED and
+# can never carry weight or accrue to the shadow gate (lookahead-prevention §2).
+schema_version: qe_ai_research/1
+name: delivery-book-ai-research-anthropic
+book_config: configs/qe_delivery_book_paper.yaml
+research_mode: FAST
+backend: anthropic
+effort: low                   # Opus 5.5 thinking cannot be disabled; effort is the only control
+quick_model:
+  model_id: claude-opus-5-5    # first-party ID (no `anthropic.` prefix)
+  tier: quick
+  knowledge_cutoff: 2026-06-30   # training-data cutoff "Jun 2026" (Anthropic models overview), conservative month-end
+deep_model:
+  model_id: claude-opus-5-5
+  tier: deep
+  knowledge_cutoff: 2026-06-30
+budget:
+  max_run_tokens: 60000
+  max_tokens_per_call: 4096      # thinking tokens are billed as output and count against this
+  timeout_s: 60
+  max_retries: 1
+  breaker_threshold: 3
+  retry_backoff_s: 2.0
+guard_days: 90                   # → first uncontaminated decision date: 2026-09-29
+max_symbols: 3
+mask_identifiers: true
+seed: 0
+use_cache: true

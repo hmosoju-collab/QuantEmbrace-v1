@@ -40,7 +40,7 @@ python -m qe lifecycle transition --strategy <id> --to CANDIDATE --family <f> \
 | `schema_version` | `qe_ai_research/1` | Bump on any non-optional schema change |
 | `book_config` | `configs/qe_delivery_book_paper.yaml` | The engine book to annotate (read-only). Supplies factor params, market and lake. |
 | `research_mode` | `FAST` | `FAST` / `STANDARD` / `DEEP` (see §2.1) |
-| `backend` | `fake` | `fake` (deterministic, free) or `bedrock` (**requires `--allow-llm-spend`**) |
+| `backend` | `fake` | `fake` (deterministic, free), `bedrock` (Claude on Amazon Bedrock) or `anthropic` (first-party Anthropic API). Both real backends **require `--allow-llm-spend`**. |
 | `quick_model` / `deep_model` | `fake-quick` / `fake-deep` | `model_id`, `tier`, `knowledge_cutoff`. An **unknown cutoff (`null`) marks every signal contaminated.** |
 | `budget.max_run_tokens` | 200000 | Hard per-run token budget (the worst case is reserved before each call) |
 | `budget.max_tokens_per_call` | 1024 | Per-call output cap |
@@ -64,18 +64,32 @@ The config is hashed on its own (`exclude_none`) and echoed into the journal hea
 
 ### 2.2 Enabling a real backend (P10 — code built; account access is the operator's step)
 
-Backend: Claude on Amazon Bedrock through the official SDK's `AnthropicBedrockMantle` client (Messages API,
-IDs like `anthropic.claude-opus-5-5`, SigV4 from the normal AWS credential chain — no API key).
+Two real backends sit behind the same `LLMClient` protocol and share one Messages-API implementation
+(`qe/ai/llm/messages.py`), so the Opus 5.x rules below, the spend flag, the budget/breaker, the probe and the
+contamination rule are identical for both. Pick one with `backend:` in the research config.
+
+| | `bedrock` | `anthropic` (first-party) |
+|---|---|---|
+| Config | `configs/qe_ai_research_bedrock.yaml` | `configs/qe_ai_research_anthropic.yaml` |
+| Client | SDK `AnthropicBedrockMantle` (Messages endpoint) | SDK `Anthropic` |
+| Model ID | `anthropic.claude-opus-5-5` | `claude-opus-5-5` (no `anthropic.` prefix) |
+| Credential | SigV4 from the normal AWS chain (no API key); IAM `bedrock-mantle:CreateInference` on the model ARN only | Resolved **by the SDK**: `ANTHROPIC_API_KEY` in the shell that runs `qe.ai` (or `ant auth login`). `qe.ai` never reads the environment and never handles or logs the key; the secret scanner would refuse a prompt containing one. |
+| Egress | the Bedrock regional endpoint | `api.anthropic.com` |
+| `region` field | used | ignored |
+
+Steps (both):
 
 1. `pip install -r requirements-ai.txt` (optional dependency; not needed for the fake backend, tests or CI).
-2. Use `configs/qe_ai_research_bedrock.yaml` (Opus 5.5, `effort: low`, `max_tokens_per_call: 4096`,
+2. Use the matching config above (Opus 5.5, `effort: low`, `max_tokens_per_call: 4096`,
    `knowledge_cutoff: 2026-06-30` = the "training data cutoff Jun 2026" of Anthropic's models overview,
    guard 90 d ⇒ **first uncontaminated decision date is 2026-09-29**). Opus 5.x removed sampling parameters and
    cannot disable thinking, so the adapter sends none and relies on `effort`.
-3. Grant the run's IAM identity `bedrock-mantle:CreateInference` on the model ARN only.
-4. **Probe before spending:** `python -m qe.ai probe --config configs/qe_ai_research_bedrock.yaml --allow-llm-spend`
-   (a few tokens). It prints an actionable hint per HTTP status (403 = account not entitled, 404 = endpoint
-   does not serve that model/region, 400 = bad parameter, 429 = throttled).
+3. Bedrock only: grant the run's IAM identity `bedrock-mantle:CreateInference` on the model ARN only. First-party:
+   `export ANTHROPIC_API_KEY=...` in your shell (never in a config file or a prompt).
+4. **Probe before spending:** `python -m qe.ai probe --config <config> --allow-llm-spend` (a few tokens). It prints an
+   actionable, backend-specific hint per HTTP status (Bedrock: 403 = account not entitled, 404 = endpoint does not
+   serve that model/region; first-party: 401 = no credential, 403 = key/org not permitted, 404 = unknown model ID;
+   both: 400 = bad parameter, 429 = throttled / out of credit).
 5. Run with `--allow-llm-spend`. Without the flag the CLI refuses (exit 2) before writing anything. If every
    LLM call fails, `research` exits **3** with a loud warning (it does not pretend to have run).
 
@@ -84,8 +98,8 @@ every model in `ap-south-1` and `403 not available for this account` in `us-east
 `bedrock-runtime` path, and also for models the docs list as open to all customers — while
 `aws bedrock get-foundation-model-availability` shows `AUTHORIZED`. That message directs the account to AWS
 Sales / Bedrock model access. Spend: $0 (0 tokens). Alternatives that need an operator decision: enable
-Anthropic model access for the AWS account, or use a first-party Anthropic API credential (a second adapter
-behind the same `LLMClient` protocol; not built).
+Anthropic model access for the AWS account, **or use the first-party backend** (`backend: anthropic`, built and
+tested against a fake runtime the same day; no real call has been made through it yet — it needs an API key).
 
 ## 3. Fusion — `configs/research_fusion.yaml`
 
@@ -154,7 +168,8 @@ python -m qe.ai dashboard                                                       
 python scripts/backtest/download_nse_announcements.py --from 2026-08-01 --to 2026-09-25     # P9 raw zone (network)
 python -m qe.ai corpus ingest        # P9 sanitise -> screen -> validate -> promote / hold / reject
 python -m qe.ai corpus status
-python -m qe.ai probe --config configs/qe_ai_research_bedrock.yaml --allow-llm-spend        # P10 access check
+python -m qe.ai probe --config configs/qe_ai_research_bedrock.yaml --allow-llm-spend        # P10 access check (Bedrock)
+python -m qe.ai probe --config configs/qe_ai_research_anthropic.yaml --allow-llm-spend      # P10 access check (first-party; needs ANTHROPIC_API_KEY)
 ```
 
 - **Held documents** (`backtest-data/ai_corpus/held/`) are text the screen flagged as injection, secret-like or

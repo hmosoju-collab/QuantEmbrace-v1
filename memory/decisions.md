@@ -3138,3 +3138,19 @@ headline numbers reproduced exactly):
   403 not-available (us-east-1) for every Claude model on this account; $0 spent. Options recorded, not chosen:
   enable model access, or a first-party API adapter.
 - **Unchanged:** engine, v1, required dependencies, all config hashes; shadow gate remains an unsigned DRAFT.
+
+---
+
+## ADR-043 addendum 3 — first-party Anthropic API backend (2026-09-26)
+
+**Status:** built and tested against a fake runtime; **no real call made** (no key on this machine) · **Report:** `docs/research/ai-research-p7-p10-report.md` addendum 2
+
+- **Decision (operator-approved):** add `backend: anthropic` as a second real backend behind the same `LLMClient` protocol, so an
+  Anthropic API key can unblock P10 while the AWS account is not entitled to Claude on Bedrock.
+- **Shape:** the Messages-API mapping (no sampling params, explicit `effort`, no tools, SDK `max_retries=0`, `type:status`-only
+  errors, refusal → BLOCKED) lives once in `qe/ai/llm/messages.py` and imports no SDK; `BedrockLLM` / `AnthropicLLM` are thin
+  subclasses that build their client lazily. Same `--allow-llm-spend`, budget, breaker, cache, probe and contamination rules.
+- **Credentials:** resolved by the SDK (`ANTHROPIC_API_KEY` / `ant auth login`); `qe.ai` bans `os.environ`, so it cannot read or
+  log a key. Boundary: `anthropic` importable in exactly two files; `boto3`/`botocore` still banned; no config hash moved.
+- **Unchanged:** engine, v1, required dependencies, the unsigned DRAFT shadow gate. **Still true:** no real model output exists.
+

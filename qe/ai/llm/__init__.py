@@ -1,6 +1,7 @@
-"""LLM access for qe.ai: protocol, fake + Bedrock backends, gateway, controls."""
+"""LLM access for qe.ai: protocol, fake + Bedrock + first-party backends, gateway, controls."""
 
 from qe.ai.config import ResearchRunConfig
+from qe.ai.llm.anthropic_api import AnthropicLLM
 from qe.ai.llm.base import LLMClient, LLMError, LLMRequest, LLMResponse, LLMTimeout
 from qe.ai.llm.bedrock import BedrockLLM
 from qe.ai.llm.budget import BudgetExhausted, CircuitBreaker, RunBudget
@@ -24,12 +25,15 @@ def build_client(
         raise SpendNotAllowed(
             f"backend={cfg.backend} makes paid LLM calls; re-run with --allow-llm-spend"
         )
+    if cfg.backend == "anthropic":
+        return AnthropicLLM(timeout_s=cfg.budget.timeout_s, runtime_client=runtime_client)
     return BedrockLLM(
         region=cfg.region, timeout_s=cfg.budget.timeout_s, runtime_client=runtime_client
     )
 
 
 __all__ = [
+    "AnthropicLLM",
     "BedrockLLM",
     "BudgetExhausted",
     "CallResult",

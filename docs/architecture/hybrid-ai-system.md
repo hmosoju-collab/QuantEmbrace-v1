@@ -33,7 +33,7 @@ qe/ai/
   config.py            ResearchRunConfig, ModelProfile, BudgetConfig (own frozen hash; not RunConfig)
   paths.py             the only write locations + write guard
   models/              ResearchSignal v1, AgentObservation, Evidence, ResearchReport, status enum
-  llm/                 LLMClient protocol · FakeLLM · BedrockLLM (Converse) · cache · budget/breaker · gateway
+  llm/                 LLMClient protocol · FakeLLM · BedrockLLM + AnthropicLLM (shared Messages-API client) · cache · budget/breaker · gateway
   guardrails.py        secret redaction, untrusted-data blocks, forbidden-output scan
   tools/               point-in-time read-only tools (market_data, quant_signal, regime, risk, unavailable)
   agents/              technical, regime, risk, fundamental, news, sentiment, bull, bear, critic, synthesizer
@@ -87,7 +87,7 @@ Every run also has:
 | Post-trade analyst, reflection memory stamped with knowledge time | P7 | Implemented 2026-09-26 — `qe/ai/post_trade`, `python -m qe.ai post-trade`; deterministic reviews + LLM lesson; `lessons_known_at(cutoff)` feeds hypotheses |
 | Research dashboard (beyond the markdown fusion view) | P8 | Implemented 2026-09-26 — `qe/ai/dashboard.py`, `python -m qe.ai dashboard` (static HTML, escaped, CSP, no JavaScript) |
 | External-data (news/fundamentals) security hardening | P9 | Implemented 2026-09-26 for **NSE announcements** — `qe/ai/corpus`, `scripts/backtest/download_nse_announcements.py`; downloader live-verified 2026-09-26 (295 real records, 0 failures); fundamentals and sentiment remain `[PLANNED — not yet implemented]` (no structured source) |
-| First real Bedrock spend and paper-shadow validation | P10 | Backend + probe **built and tested (fake runtime)**; the real smoke run is **BLOCKED by the AWS account** (§ `ai-research-p7-p10-report.md`). Shadow gate remains an unsigned DRAFT. Paper-shadow accrual `[PLANNED — not yet implemented]` |
+| First real LLM spend and paper-shadow validation | P10 | Bedrock backend, first-party Anthropic backend (added 2026-09-26) and probe **built and tested (fake runtime)**; the real Bedrock smoke run is **BLOCKED by the AWS account** (§ `ai-research-p7-p10-report.md`); the first-party backend has not made a real call (needs an API key). Shadow gate remains an unsigned DRAFT. Paper-shadow accrual `[PLANNED — not yet implemented]` |
 
 ## 7. What this system will not do
 
@@ -95,4 +95,4 @@ Every run also has:
 - It will not promote, graduate or retire strategies. It may write *hypotheses* for human review (P6).
 - It will not run inside `qe paper`/`qe study`, or change a single engine decision.
 - It will not treat historical backtests of LLM output as evidence (contamination rule, [lookahead-prevention](../research/lookahead-prevention.md)).
-- It will not call external networks except the configured LLM endpoint, and only with `--allow-llm-spend`.
+- It will not call external networks except the configured LLM endpoint (Bedrock or `api.anthropic.com`), and only with `--allow-llm-spend`.

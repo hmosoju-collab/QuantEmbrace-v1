@@ -5,7 +5,7 @@ import yaml
 
 from qe.ai.cli import main
 from qe.ai.config import ModelProfile, ResearchRunConfig
-from qe.ai.llm import BedrockLLM, FakeLLM, LLMError, LLMGateway, LLMTimeout
+from qe.ai.llm import AnthropicLLM, BedrockLLM, FakeLLM, LLMError, LLMGateway, LLMTimeout
 from qe.ai.probe import llm_health, run_probe
 
 CFG = ResearchRunConfig(
@@ -46,6 +46,20 @@ def _bedrock(exc=None):
     return BedrockLLM(region="ap-south-1", timeout_s=5, runtime_client=rt), rt
 
 
+def _anthropic(exc=None):
+    rt = _Runtime(exc)
+    return AnthropicLLM(timeout_s=5, runtime_client=rt), rt
+
+
+ANTHROPIC_CFG = CFG.model_copy(
+    update={
+        "backend": "anthropic",
+        "quick_model": ModelProfile(model_id="claude-opus-5-5", tier="quick"),
+        "deep_model": ModelProfile(model_id="claude-opus-5-5", tier="deep"),
+    }
+)
+
+
 def _status_error(code):
     return type("PermissionDeniedError", (Exception,), {"status_code": code})("provider text")
 
@@ -73,6 +87,42 @@ def test_probe_failures_carry_actionable_hints(code, needle):
     res = run_probe(CFG, client)
     assert not res.ok and res.detail.endswith(f":{code}") and needle in res.hint
     assert "provider text" not in res.detail  # provider messages never surface
+
+
+@pytest.mark.parametrize(
+    "code,needle",
+    [(401, "ANTHROPIC_API_KEY"), (403, "not permitted"), (404, "no `anthropic.` prefix"),
+     (400, "rejected"), (429, "Rate limited")],
+)  # fmt: skip
+def test_first_party_probe_hints_are_not_bedrock_hints(code, needle):
+    client, _ = _anthropic(_status_error(code))
+    res = run_probe(ANTHROPIC_CFG, client)
+    assert not res.ok and res.detail.endswith(f":{code}") and needle in res.hint
+    assert "Bedrock" not in res.hint and "AWS" not in res.hint
+    assert "provider text" not in res.detail
+
+
+def test_first_party_probe_success_matches_the_bedrock_shape():
+    client, rt = _anthropic()
+    res = run_probe(ANTHROPIC_CFG, client)
+    assert res.ok and res.backend == "anthropic" and "tokens in/out=9/4" in res.detail
+    call = rt.calls[0]
+    assert call["model"] == "claude-opus-5-5" and call["output_config"] == {"effort": "low"}
+    assert call["messages"][0]["content"] == "ping"
+
+
+def test_cli_probe_line_names_the_region_only_for_bedrock(tmp_path, capsys, monkeypatch):
+    for cfg, expect, absent in (
+        (CFG, "region=ap-south-1", "api.anthropic.com"),
+        (ANTHROPIC_CFG, "api=api.anthropic.com", "region="),
+    ):
+        (tmp_path / "ai.yaml").write_text(yaml.safe_dump(cfg.model_dump(mode="json")))
+        make = _bedrock if cfg.backend == "bedrock" else _anthropic
+        monkeypatch.setattr("qe.ai.llm.build_client", lambda *a, _m=make, **k: _m()[0])
+        rc = main(["probe", "--config", "ai.yaml", "--base-dir", str(tmp_path),
+                   "--allow-llm-spend"])  # fmt: skip
+        out = capsys.readouterr().out
+        assert rc == 0 and expect in out and absent not in out
 
 
 def test_probe_timeout():
