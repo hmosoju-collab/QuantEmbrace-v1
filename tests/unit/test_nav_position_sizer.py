@@ -17,7 +17,7 @@ import math
 import sys
 import os
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 # ---------------------------------------------------------------------------
 # Path setup — works without an installed package
@@ -36,6 +36,13 @@ from strategy_engine.strategies._position_sizer import (
     _TARGET_PCT_DEFAULT,
     _TARGET_PCT_HIGH_CONV,
 )
+
+if TYPE_CHECKING:
+    # Only for the forward-referenced annotations below (Bar/Signal are imported
+    # locally inside the helper functions that use them, to avoid a module-level
+    # dependency the rest of this test file doesn't need).
+    from shared.models.signal import Signal
+    from strategy_engine.strategies.base_strategy import Bar
 
 # ---------------------------------------------------------------------------
 # Helpers
